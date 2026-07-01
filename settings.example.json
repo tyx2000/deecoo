@@ -1,0 +1,13 @@
+{
+  "env": {
+    "DEEPSEEK_API_KEY": "sk-...",
+    "DEEPCODE_BASE_URL": "https://api.deepseek.com",
+    "DEEPCODE_MODEL": "deepseek-v4-pro",
+    "DEEPCODE_MAX_STEPS": 20,
+    "DEEPCODE_MAX_TOKENS": 4096,
+    "DEEPCODE_TIMEOUT_MS": 120000,
+    "DEEPCODE_API_RETRIES": 5,
+    "DEEPCODE_PERMISSION_MODE": "ask-once",
+    "DEEPCODE_THEME": "tokyo-night"
+  }
+}

@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+settings.json
+
+node_modules/
+dist/
+build/
+coverage/
+.next/
+
+.DS_Store
