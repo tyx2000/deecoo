@@ -1,14 +1,14 @@
 {
-  "name": "deepcode",
+  "name": "deecoo",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "bin": {
-    "deepcode": "./bin/deepcode.js"
+    "deecoo": "./bin/deecoo.js"
   },
   "scripts": {
-    "start": "node ./bin/deepcode.js",
-    "check": "node --check ./bin/deepcode.js && find ./src -name '*.js' -print0 | xargs -0 -n1 node --check"
+    "start": "node ./bin/deecoo.js",
+    "check": "node --check ./bin/deecoo.js && find ./src -name '*.js' -print0 | xargs -0 -n1 node --check"
   },
   "engines": {
     "node": ">=20"

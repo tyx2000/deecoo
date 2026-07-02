@@ -2,24 +2,25 @@ export function loadConfig(env, args = {}) {
   const apiKey = env.DEEPSEEK_API_KEY;
   if (!apiKey) {
     throw new Error(
-      "Missing DEEPSEEK_API_KEY. Set it in ~/.deepcode/settings.json, your environment, or local .env file.",
+      "Missing DEEPSEEK_API_KEY. Set it in ~/.deecoo/settings.json, your environment, or local .env file.",
     );
   }
 
   return {
     apiKey,
-    baseUrl: normalizeBaseUrl(env.DEEPCODE_BASE_URL ?? "https://api.deepseek.com"),
-    model: args.model ?? env.DEEPCODE_MODEL ?? "deepseek-v4-pro",
-    cwd: env.DEEPCODE_CWD,
-    maxSteps: numberFrom(args.maxSteps ?? env.DEEPCODE_MAX_STEPS, 20),
-    maxTokens: numberFrom(env.DEEPCODE_MAX_TOKENS, 4096),
-    timeoutMs: numberFrom(env.DEEPCODE_TIMEOUT_MS, 120000),
-    retryAttempts: numberFrom(env.DEEPCODE_API_RETRIES, 5),
-    permissionMode: normalizePermissionMode(env.DEEPCODE_PERMISSION_MODE ?? "ask-once"),
-    theme: env.DEEPCODE_THEME ?? "tokyo-night",
-    reasoningEffort: env.DEEPCODE_REASONING_EFFORT,
-    thinking: env.DEEPCODE_THINKING,
-    stream: booleanFrom(env.DEEPCODE_STREAM, true),
+    baseUrl: normalizeBaseUrl(env.DEECOO_BASE_URL ?? "https://api.deepseek.com"),
+    model: args.model ?? env.DEECOO_MODEL ?? "deepseek-v4-pro",
+    cwd: env.DEECOO_CWD,
+    maxSteps: numberFrom(args.maxSteps ?? env.DEECOO_MAX_STEPS, 20),
+    subagentMaxSteps: numberFrom(env.DEECOO_SUBAGENT_MAX_STEPS, 8),
+    maxTokens: numberFrom(env.DEECOO_MAX_TOKENS, 4096),
+    timeoutMs: numberFrom(env.DEECOO_TIMEOUT_MS, 120000),
+    retryAttempts: numberFrom(env.DEECOO_API_RETRIES, 5),
+    permissionMode: normalizePermissionMode(env.DEECOO_PERMISSION_MODE ?? "ask-once"),
+    theme: env.DEECOO_THEME ?? "tokyo-night",
+    reasoningEffort: env.DEECOO_REASONING_EFFORT,
+    thinking: env.DEECOO_THINKING,
+    stream: booleanFrom(env.DEECOO_STREAM, true),
   };
 }
 

@@ -24,7 +24,7 @@ export function renderMarkdown(markdown) {
 export function printAssistantResponse(markdown, footer) {
   const rule = paint("muted", "-".repeat(56));
   console.log(`\n${rule}`);
-  console.log(`${paint("title", "DeepCode")}\n`);
+  console.log(`${paint("title", "Deecoo")}\n`);
   console.log(renderMarkdown(markdown));
   if (footer) {
     console.log(`\n${paint("muted", footer)}`);
@@ -41,7 +41,7 @@ export function createAssistantStreamPrinter() {
     push(chunk) {
       if (!started) {
         console.log(`\n${rule}`);
-        console.log(`${paint("title", "DeepCode")}\n`);
+        console.log(`${paint("title", "Deecoo")}\n`);
         started = true;
       }
       renderer.push(chunk);
@@ -337,20 +337,20 @@ function renderBlock(block) {
 }
 
 function renderHeading(block) {
-  const prefix = block.level <= 2 ? "" : "#".repeat(block.level) + " ";
-  const lines = wrapPlainText(`${prefix}${block.text}`, getContentWidth());
-  return lines.map((line) => paint("heading", renderInline(line))).join("\n");
+  return wrapRenderedInline(block.text, getContentWidth())
+    .map((line) => `${styleStart("heading")}${line}${ansi.reset}`)
+    .join("\n");
 }
 
 function renderParagraph(text) {
-  return wrapPlainText(text, getContentWidth()).map(renderInline).join("\n");
+  return wrapRenderedInline(text, getContentWidth()).join("\n");
 }
 
 function renderQuote(lines) {
   const contentWidth = Math.max(20, getContentWidth() - 2);
   return lines
-    .flatMap((line) => wrapPlainText(line, contentWidth))
-    .map((line) => `${paint("muted", "│")} ${renderInline(line)}`)
+    .flatMap((line) => wrapRenderedInline(line, contentWidth))
+    .map((line) => `${paint("muted", "│")} ${line}`)
     .join("\n");
 }
 
@@ -371,10 +371,10 @@ function renderList(items) {
         ? `${styleStart("bullet")}${marker}${ansi.reset}`
         : paint("bullet", marker);
       const indent = " ".repeat(displayWidth(marker) + 1 + item.indent);
-      const wrapped = wrapPlainText(item.text, Math.max(16, width - displayWidth(indent)));
+      const wrapped = wrapRenderedInline(item.text, Math.max(16, width - displayWidth(indent)));
       const lines = wrapped.length === 0 ? [""] : wrapped.map((line, lineIndex) => {
-        if (lineIndex === 0) return `${" ".repeat(item.indent)}${markerText} ${renderInline(line)}`;
-        return `${indent}${renderInline(line)}`;
+        if (lineIndex === 0) return `${" ".repeat(item.indent)}${markerText} ${line}`;
+        return `${indent}${line}`;
       });
       if (item.childBlocks?.length) {
         const childIndent = " ".repeat(displayWidth(marker) + 2 + item.indent);
@@ -401,6 +401,12 @@ function renderCodeBlock(block) {
 
 function renderInline(line) {
   return renderInlineMarkdown(line);
+}
+
+function wrapRenderedInline(markdown, width) {
+  const rendered = renderInlineMarkdown(markdown);
+  if (displayWidth(rendered) <= width) return [rendered];
+  return wrapAnsiText(rendered, width);
 }
 
 function renderInlineMarkdown(markdown) {
@@ -640,7 +646,7 @@ function stripPseudoToolMarkup(markdown) {
       return /\bDSML\b/.test(line) || /<\|?\s*\|?\s*(tool_calls|invoke|parameter)\b/i.test(line);
     })
   ) {
-    return "The model returned internal tool-call markup instead of a readable final answer. DeepCode hid that raw markup.";
+    return "The model returned internal tool-call markup instead of a readable final answer. Deecoo hid that raw markup.";
   }
   return markdown;
 }
@@ -700,6 +706,97 @@ function wrapTableCell(cell, width) {
   if (!text) return [""];
   if (displayWidth(renderInline(text)) <= width) return [text];
   return wrapPlainText(inlinePlainText(text), width);
+}
+
+function wrapAnsiText(text, width) {
+  const tokens = tokenizeAnsiText(text);
+  const lines = [];
+  let line = [];
+  let lineWidth = 0;
+  let lastBreakIndex = -1;
+
+  for (const token of tokens) {
+    line.push(token.value);
+    lineWidth += token.width;
+    if (token.breakable) lastBreakIndex = line.length - 1;
+
+    if (lineWidth <= width || line.length === 1) continue;
+
+    if (lastBreakIndex >= 0) {
+      const head = trimAnsiLineEnd(line.slice(0, lastBreakIndex));
+      if (head.length > 0) lines.push(head.join(""));
+      line = trimAnsiLineStart(line.slice(lastBreakIndex + 1));
+    } else {
+      const overflow = line.pop();
+      const head = trimAnsiLineEnd(line);
+      if (head.length > 0) lines.push(head.join(""));
+      line = overflow ? [overflow] : [];
+    }
+
+    lineWidth = displayWidth(line.join(""));
+    lastBreakIndex = findLastBreakableTokenIndex(line);
+  }
+
+  const tail = trimAnsiLineEnd(line);
+  if (tail.length > 0) lines.push(tail.join(""));
+  return lines.length > 0 ? lines : [""];
+}
+
+function tokenizeAnsiText(text) {
+  const value = String(text ?? "");
+  const tokens = [];
+  let index = 0;
+  while (index < value.length) {
+    const ansiMatch = readAnsiSequence(value, index);
+    if (ansiMatch) {
+      tokens.push({ value: ansiMatch, width: 0, breakable: false });
+      index += ansiMatch.length;
+      continue;
+    }
+
+    const codePoint = value.codePointAt(index);
+    const char = String.fromCodePoint(codePoint);
+    tokens.push({
+      value: char,
+      width: charWidth(codePoint),
+      breakable: /\s/u.test(char),
+    });
+    index += char.length;
+  }
+  return tokens;
+}
+
+function readAnsiSequence(value, index) {
+  if (value.charCodeAt(index) !== 0x1b) return "";
+  const csi = value.slice(index).match(/^\x1B\[[0-?]*[ -/]*[@-~]/);
+  if (csi) return csi[0];
+  const osc = value.slice(index).match(/^\x1B\][^\x07]*(?:\x07|\x1B\\)/);
+  if (osc) return osc[0];
+  const twoByte = value.slice(index).match(/^\x1B[@-_][0-?]*[ -/]*[@-~]/);
+  return twoByte?.[0] ?? "";
+}
+
+function trimAnsiLineStart(tokens) {
+  let index = 0;
+  while (index < tokens.length && displayWidth(tokens[index]) > 0 && /^\s$/u.test(stripAnsi(tokens[index]))) {
+    index += 1;
+  }
+  return tokens.slice(index);
+}
+
+function trimAnsiLineEnd(tokens) {
+  let index = tokens.length - 1;
+  while (index >= 0 && displayWidth(tokens[index]) > 0 && /^\s$/u.test(stripAnsi(tokens[index]))) {
+    index -= 1;
+  }
+  return tokens.slice(0, index + 1);
+}
+
+function findLastBreakableTokenIndex(tokens) {
+  for (let index = tokens.length - 1; index >= 0; index -= 1) {
+    if (displayWidth(tokens[index]) > 0 && /^\s$/u.test(stripAnsi(tokens[index]))) return index;
+  }
+  return -1;
 }
 
 function inlinePlainText(markdown) {

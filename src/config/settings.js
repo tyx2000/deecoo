@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, extname, resolve } from "node:path";
 
 export async function loadSettingsEnv({ settingsPath } = {}) {
-  const path = resolveSettingsPath(settingsPath ?? process.env.DEEPCODE_SETTINGS_PATH);
+  const path = resolveSettingsPath(settingsPath ?? process.env.DEECOO_SETTINGS_PATH);
 
   try {
     await access(path);
@@ -18,20 +18,21 @@ export async function loadSettingsEnv({ settingsPath } = {}) {
   return { path, loaded: true, env };
 }
 
-export function applySettingsEnv(env) {
+export function applySettingsEnv(env, { overrideKeys = [] } = {}) {
+  const override = new Set(overrideKeys);
   for (const [key, value] of Object.entries(env)) {
     if (!isSupportedSettingsKey(key)) continue;
-    if (process.env[key] !== undefined) continue;
+    if (process.env[key] !== undefined && !override.has(key)) continue;
     process.env[key] = String(value);
   }
 }
 
 export function appSettingsPath() {
-  return resolve(deepcodeHome(), "settings.json");
+  return resolve(deecooHome(), "settings.json");
 }
 
 export async function writeSettingsEnv({ settingsPath, env }) {
-  const path = resolveSettingsPath(settingsPath ?? process.env.DEEPCODE_SETTINGS_PATH);
+  const path = resolveSettingsPath(settingsPath ?? process.env.DEECOO_SETTINGS_PATH);
   const existing = await readSettingsFile(path);
   const currentEnv = normalizeSettingsEnv(existing);
   const next = {
@@ -51,7 +52,7 @@ export function collectSettingsEnv(env) {
   const result = {};
   for (const [key, value] of Object.entries(env)) {
     if (!isSupportedSettingsKey(key)) continue;
-    if (key === "DEEPCODE_SETTINGS_PATH") continue;
+    if (key === "DEECOO_SETTINGS_PATH") continue;
     if (value === undefined || value === "") continue;
     result[key] = value;
   }
@@ -60,14 +61,15 @@ export function collectSettingsEnv(env) {
 
 export function defaultSettingsEnv() {
   return {
-    DEEPCODE_BASE_URL: "https://api.deepseek.com",
-    DEEPCODE_MODEL: "deepseek-v4-pro",
-    DEEPCODE_MAX_STEPS: 20,
-    DEEPCODE_MAX_TOKENS: 4096,
-    DEEPCODE_TIMEOUT_MS: 120000,
-    DEEPCODE_API_RETRIES: 5,
-    DEEPCODE_PERMISSION_MODE: "ask-once",
-    DEEPCODE_THEME: "tokyo-night",
+    DEECOO_BASE_URL: "https://api.deepseek.com",
+    DEECOO_MODEL: "deepseek-v4-pro",
+    DEECOO_MAX_STEPS: 20,
+    DEECOO_SUBAGENT_MAX_STEPS: 8,
+    DEECOO_MAX_TOKENS: 4096,
+    DEECOO_TIMEOUT_MS: 120000,
+    DEECOO_API_RETRIES: 5,
+    DEECOO_PERMISSION_MODE: "ask-once",
+    DEECOO_THEME: "tokyo-night",
   };
 }
 
@@ -102,9 +104,9 @@ function normalizeSettingsEnv(settings) {
 }
 
 function isSupportedSettingsKey(key) {
-  return key === "DEEPSEEK_API_KEY" || key.startsWith("DEEPCODE_");
+  return key === "DEEPSEEK_API_KEY" || key.startsWith("DEECOO_");
 }
 
-function deepcodeHome() {
-  return resolve(process.env.DEEPCODE_HOME ?? resolve(homedir(), ".deepcode"));
+function deecooHome() {
+  return resolve(process.env.DEECOO_HOME ?? resolve(homedir(), ".deecoo"));
 }

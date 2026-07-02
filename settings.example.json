@@ -1,13 +1,14 @@
 {
   "env": {
     "DEEPSEEK_API_KEY": "sk-...",
-    "DEEPCODE_BASE_URL": "https://api.deepseek.com",
-    "DEEPCODE_MODEL": "deepseek-v4-pro",
-    "DEEPCODE_MAX_STEPS": 20,
-    "DEEPCODE_MAX_TOKENS": 4096,
-    "DEEPCODE_TIMEOUT_MS": 120000,
-    "DEEPCODE_API_RETRIES": 5,
-    "DEEPCODE_PERMISSION_MODE": "ask-once",
-    "DEEPCODE_THEME": "tokyo-night"
+    "DEECOO_BASE_URL": "https://api.deepseek.com",
+    "DEECOO_MODEL": "deepseek-v4-pro",
+    "DEECOO_MAX_STEPS": 20,
+    "DEECOO_SUBAGENT_MAX_STEPS": 8,
+    "DEECOO_MAX_TOKENS": 4096,
+    "DEECOO_TIMEOUT_MS": 120000,
+    "DEECOO_API_RETRIES": 5,
+    "DEECOO_PERMISSION_MODE": "ask-once",
+    "DEECOO_THEME": "tokyo-night"
   }
 }

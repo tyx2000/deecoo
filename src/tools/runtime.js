@@ -38,9 +38,20 @@ export function createToolRuntime({
     shellApprovedAlways: false,
     readCache: new Map(),
   };
+  let subagentRuntime;
 
   const runtime = {
-    schemas: buildToolSchemas(),
+    schemas: buildToolSchemas({ includeSubagents: true }),
+    workerSchemas: buildToolSchemas({ includeSubagents: false }),
+    setSubagentRuntime(runtime) {
+      subagentRuntime = runtime;
+    },
+    createWorkerTools() {
+      return {
+        schemas: buildToolSchemas({ includeSubagents: false }),
+        execute: (name, args) => runtime.execute(name, args),
+      };
+    },
     setPermissionMode(mode) {
       permissionState.mode = mode;
       permissionState.fileWriteApprovedForTask = false;
@@ -71,6 +82,12 @@ export function createToolRuntime({
             return gitDiff(workspace, args);
           case "run_shell":
             return runShell(workspace, args, prompter, allowShellWithoutPrompt, permissionState);
+          case "agent":
+            return subagentRuntime ? subagentRuntime.start(args) : { ok: false, error: "Subagent runtime is not available." };
+          case "send_message":
+            return subagentRuntime ? subagentRuntime.send(args) : { ok: false, error: "Subagent runtime is not available." };
+          case "task_stop":
+            return subagentRuntime ? subagentRuntime.stop(args) : { ok: false, error: "Subagent runtime is not available." };
           default:
             return { ok: false, error: `Unknown tool: ${name}` };
         }
@@ -83,8 +100,8 @@ export function createToolRuntime({
   return runtime;
 }
 
-function buildToolSchemas() {
-  return [
+function buildToolSchemas({ includeSubagents = true } = {}) {
+  const schemas = [
     {
       type: "function",
       function: {
@@ -210,6 +227,60 @@ function buildToolSchemas() {
             timeoutMs: { type: "integer" },
           },
           required: ["command"],
+          additionalProperties: false,
+        },
+      },
+    },
+  ];
+
+  if (!includeSubagents) return schemas;
+  return [
+    ...schemas,
+    {
+      type: "function",
+      function: {
+        name: "agent",
+        description:
+          "Run a delegated worker subtask with its own context. Use for independent research, focused implementation, or independent verification. Worker prompts must be self-contained with purpose, scope, file paths if known, constraints, and done criteria.",
+        parameters: {
+          type: "object",
+          properties: {
+            description: { type: "string", description: "Short worker label shown in activity output." },
+            subagent_type: { type: "string", description: "Use worker." },
+            prompt: { type: "string", description: "Self-contained worker instructions." },
+          },
+          required: ["description", "prompt"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "send_message",
+        description: "Continue an existing worker by task id when its prior context is useful.",
+        parameters: {
+          type: "object",
+          properties: {
+            to: { type: "string", description: "Worker task id returned by agent." },
+            message: { type: "string", description: "Self-contained follow-up or correction." },
+          },
+          required: ["to", "message"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "task_stop",
+        description: "Stop a worker that is no longer relevant or was sent in the wrong direction.",
+        parameters: {
+          type: "object",
+          properties: {
+            task_id: { type: "string", description: "Worker task id returned by agent." },
+          },
+          required: ["task_id"],
           additionalProperties: false,
         },
       },
@@ -566,17 +637,48 @@ function countOccurrences(text, search) {
 function countLineChanges(original, next) {
   const before = diffLines(original);
   const after = diffLines(next);
-  const max = Math.max(before.length, after.length);
-  let additions = 0;
-  let deletions = 0;
-
-  for (let index = 0; index < max; index += 1) {
-    if (before[index] === after[index]) continue;
-    if (before[index] !== undefined) deletions += 1;
-    if (after[index] !== undefined) additions += 1;
+  let start = 0;
+  while (start < before.length && start < after.length && before[start] === after[start]) {
+    start += 1;
   }
 
-  return { additions, deletions };
+  let beforeEnd = before.length - 1;
+  let afterEnd = after.length - 1;
+  while (beforeEnd >= start && afterEnd >= start && before[beforeEnd] === after[afterEnd]) {
+    beforeEnd -= 1;
+    afterEnd -= 1;
+  }
+
+  const removed = before.slice(start, beforeEnd + 1);
+  const added = after.slice(start, afterEnd + 1);
+  if (removed.length === 0 || added.length === 0) {
+    return { additions: added.length, deletions: removed.length };
+  }
+
+  const unchangedInside = lcsLength(removed, added);
+  return {
+    additions: added.length - unchangedInside,
+    deletions: removed.length - unchangedInside,
+  };
+}
+
+function lcsLength(before, after) {
+  const cellCount = before.length * after.length;
+  if (cellCount > 1_000_000) return 0;
+  let previous = new Array(after.length + 1).fill(0);
+  let current = new Array(after.length + 1).fill(0);
+
+  for (let i = 1; i <= before.length; i += 1) {
+    for (let j = 1; j <= after.length; j += 1) {
+      current[j] = before[i - 1] === after[j - 1]
+        ? previous[j - 1] + 1
+        : Math.max(previous[j], current[j - 1]);
+    }
+    [previous, current] = [current, previous];
+    current.fill(0);
+  }
+
+  return previous[after.length];
 }
 
 function diffLines(value) {

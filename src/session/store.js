@@ -9,23 +9,24 @@ const MAX_TURN_CHARS = 2000;
 
 export async function createSessionStore(cwd) {
   const projectId = hash(cwd);
-  const projectDir = join(deepcodeHome(), "sessions", projectId);
+  const projectDir = join(deecooHome(), "sessions", projectId);
   await mkdir(projectDir, { recursive: true });
 
   return {
     projectDir,
-    async createSession({ model }) {
+    async createSession({ model, title, summary = "", turns = [], history } = {}) {
       const now = new Date().toISOString();
+      const initialHistory = Array.isArray(history) ? history : turns;
       const session = {
         id: randomUUID(),
         cwd,
-        title: basename(cwd) || cwd,
+        title: title || basename(cwd) || cwd,
         createdAt: now,
         updatedAt: now,
         model,
-        summary: "",
-        turns: [],
-        history: [],
+        summary,
+        turns,
+        history: initialHistory,
       };
       await saveSession(projectDir, session);
       return session;
@@ -54,8 +55,8 @@ export async function createSessionStore(cwd) {
   };
 }
 
-function deepcodeHome() {
-  return resolve(process.env.DEEPCODE_HOME ?? resolve(homedir(), ".deepcode"));
+function deecooHome() {
+  return resolve(process.env.DEECOO_HOME ?? resolve(homedir(), ".deecoo"));
 }
 
 export function buildSessionContext(session) {
@@ -132,6 +133,7 @@ async function readSessionFile(path) {
     parsed.turns ??= [];
     parsed.history ??= [...parsed.turns];
     parsed.summary ??= "";
+    parsed.artifacts ??= [];
     return parsed;
   } catch {
     return undefined;

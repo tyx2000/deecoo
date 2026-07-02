@@ -1,4 +1,4 @@
-import { access, cp, mkdir, readdir, readFile } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, relative, resolve } from "node:path";
 
@@ -24,32 +24,18 @@ export async function listCodexSkills({ home = homedir() } = {}) {
   return skills.sort((a, b) => a.name.localeCompare(b.name) || a.sourceLabel.localeCompare(b.sourceLabel));
 }
 
-export function projectSkillsDir(cwd) {
-  return resolve(cwd, ".deepcode", "skills");
-}
-
-export async function listProjectSkills(cwd) {
-  const root = projectSkillsDir(cwd);
-  if (!(await exists(root))) return [];
-  const found = await findSkillDirs(root, root, "project", 3);
-  return found.sort((a, b) => a.name.localeCompare(b.name));
-}
-
-export async function installCodexSkill({ skill, cwd }) {
-  const targetRoot = projectSkillsDir(cwd);
-  const targetName = safeSkillName(skill.name);
-  const targetPath = join(targetRoot, targetName);
-  await mkdir(targetRoot, { recursive: true });
-  await cp(skill.sourcePath, targetPath, {
-    recursive: true,
-    force: true,
-    errorOnExist: false,
-    filter: (source) => {
-      const name = basename(source);
-      return !SKIP_DIRS.has(name);
-    },
-  });
-  return targetPath;
+export async function loadCodexSkill(skill) {
+  const content = await readFile(join(skill.sourcePath, "SKILL.md"), "utf8");
+  return {
+    id: skill.id,
+    name: skill.name,
+    sourceLabel: skill.sourceLabel,
+    sourcePath: skill.sourcePath,
+    relativePath: skill.relativePath,
+    summary: skill.summary,
+    defaultPrompt: extractDefaultPrompt(content),
+    content,
+  };
 }
 
 function skillRoots(home) {
@@ -97,6 +83,15 @@ async function readSkill(root, sourcePath, sourceLabel, skillFile) {
   };
 }
 
+function extractDefaultPrompt(content) {
+  const lines = String(content ?? "").split(/\r?\n/);
+  for (const line of lines) {
+    const match = line.match(/^default_prompt:\s*(.*)$/i);
+    if (match?.[1]) return match[1].replace(/^["']|["']$/g, "").trim();
+  }
+  return "";
+}
+
 function firstMeaningfulLine(content) {
   const lines = String(content ?? "").split(/\r?\n/);
   for (const line of lines) {
@@ -110,13 +105,6 @@ function firstMeaningfulLine(content) {
     if (text) return text.slice(0, 120);
   }
   return "No description";
-}
-
-function safeSkillName(value) {
-  const safe = String(value ?? "")
-    .replace(/[^A-Za-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return safe || "skill";
 }
 
 async function exists(path) {
