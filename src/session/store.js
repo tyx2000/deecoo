@@ -27,6 +27,7 @@ export async function createSessionStore(cwd) {
         summary,
         turns,
         history: initialHistory,
+        artifacts: [],
       };
       await saveSession(projectDir, session);
       return session;

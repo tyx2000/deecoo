@@ -3,14 +3,15 @@ import { createSubagentRuntime } from "./subagents/runtime.js";
 import { analyzeTaskCoordination } from "./coordination.js";
 import { buildSessionContext, recordTurn } from "../session/store.js";
 import { artifactContextMessages, saveSkillArtifact } from "../session/artifacts.js";
-import { createAssistantStreamPrinter, formatRunFooter, printAssistantResponse } from "../terminal/markdown.js";
+import { createAssistantStreamPrinter, formatRunFooter, formatToolLine, printAssistantResponse } from "../terminal/markdown.js";
 import { createSpinner } from "../terminal/spinner.js";
 import { formatActivityLine, formatActivityReason, printCoordinationPlan } from "../cli/activity.js";
 
-export async function runTask({ client, tools, task, cwd, config, sessionStore, session, activeSkills = [] }) {
+export async function runTask({ client, tools, task, cwd, config, sessionStore, session, activeSkills = [], signal }) {
   const spinner = createSpinner("Thinking");
   const streamPrinter = createAssistantStreamPrinter();
   let streamed = false;
+  let streamedContent = "";
   const startedAt = Date.now();
   const contextMessages = session ? buildSessionContext(session) : [];
   const handoffMessages = await buildSkillHandoffMessages({ sessionStore, session, activeSkills });
@@ -23,6 +24,7 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
       config,
       activeSkills,
       contextMessages: [...contextMessages, ...handoffMessages],
+      signal,
     }),
   );
   const coordination = analyzeTaskCoordination(task);
@@ -34,7 +36,6 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
       tools,
       task,
       cwd,
-      maxSteps: config.maxSteps,
       model: config.model,
       maxTokens: config.maxTokens,
       reasoningEffort: config.reasoningEffort,
@@ -42,6 +43,7 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
       stream: config.stream,
       contextMessages: [...contextMessages, ...handoffMessages],
       activeSkills,
+      signal,
       onModelStart: () => spinner.start(),
       onModelEnd: () => spinner.stop(),
       onToolStart: () => {},
@@ -53,6 +55,7 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
       onTextDelta: ({ content }) => {
         spinner.stop();
         streamed = true;
+        streamedContent += content;
         streamPrinter.push(content);
       },
     });
@@ -64,8 +67,11 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
       usage: result.usage,
       stoppedReason: result.stoppedReason,
     });
-    if (streamed) {
+    if (streamed && finalTextWasStreamed(streamedContent, result.finalText)) {
       streamPrinter.finish(footer);
+    } else if (streamed) {
+      streamPrinter.finish();
+      printAssistantResponse(result.finalText, footer);
     } else {
       printAssistantResponse(result.finalText, footer);
     }
@@ -83,6 +89,14 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
     };
   } catch (error) {
     spinner.stop();
+    if (isAbortError(error, signal)) {
+      if (streamed) streamPrinter.finish();
+      console.log(formatToolLine("task interrupted"));
+      return {
+        elapsedMs: Date.now() - startedAt,
+        interrupted: true,
+      };
+    }
     console.error("Request failed after retries: " + error.message);
     return {
       elapsedMs: Date.now() - startedAt,
@@ -114,8 +128,15 @@ async function maybeSaveSkillArtifacts({ sessionStore, session, activeSkills, ta
         stoppedReason: result.stoppedReason,
       },
     });
-    if (artifact) {
-      session.summary = [session.summary, "Skill artifact: " + artifact.path].filter(Boolean).join("\n");
-    }
   }
+}
+
+function finalTextWasStreamed(streamedContent, finalText) {
+  const final = String(finalText ?? "").trim();
+  if (!final) return true;
+  return String(streamedContent ?? "").endsWith(final);
+}
+
+function isAbortError(error, signal) {
+  return signal?.aborted || error?.name === "AbortError" || /aborted|interrupted/i.test(error?.message ?? "");
 }

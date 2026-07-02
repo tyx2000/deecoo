@@ -1,4 +1,5 @@
 
+import readline from "node:readline";
 import { basename, resolve } from "node:path";
 import { handleConfigCommand } from "./commands/config.js";
 import { runSlashCommand, runTopLevelCommand } from "./commands/dispatcher.js";
@@ -101,7 +102,7 @@ export async function main(argv) {
     }
 
     const session = await sessionStore.createSession({ model: config.model });
-    await runTask({ client, tools, task, cwd, config, sessionStore, session });
+    await runInterruptibleTask({ client, tools, task, cwd, config, sessionStore, session });
   } finally {
     title.restore();
   }
@@ -202,7 +203,7 @@ async function runInteractiveSession({
         session = await sessionStore.createSession({ model: config.model });
         console.log(formatToolLine(`session: ${session.title}`));
       }
-      await runTask({ client, tools, task, cwd, config, sessionStore, session, activeSkills });
+      await runInterruptibleTask({ client, tools, task, cwd, config, sessionStore, session, activeSkills });
       branch = await getGitBranch(cwd);
       console.log("");
     }
@@ -214,3 +215,40 @@ async function runInteractiveSession({
   }
 }
 
+
+async function runInterruptibleTask(params) {
+  const interrupt = installTaskInterrupt();
+  try {
+    return await runTask({ ...params, signal: interrupt.signal });
+  } finally {
+    interrupt.dispose();
+  }
+}
+
+function installTaskInterrupt() {
+  const controller = new AbortController();
+  if (!process.stdin.isTTY) {
+    return { signal: controller.signal, dispose() {} };
+  }
+
+  readline.emitKeypressEvents(process.stdin);
+  const wasRaw = process.stdin.isRaw;
+  process.stdin.setRawMode(true);
+  let reported = false;
+  const onKeypress = (_str, key = {}) => {
+    if (key.name !== "escape" || controller.signal.aborted) return;
+    reported = true;
+    controller.abort(new Error("Task interrupted by Esc."));
+    process.stdout.write("\n" + formatToolLine("interrupted: Esc") + "\n");
+  };
+  process.stdin.on("keypress", onKeypress);
+
+  return {
+    signal: controller.signal,
+    dispose() {
+      process.stdin.off("keypress", onKeypress);
+      process.stdin.setRawMode(wasRaw);
+      if (reported) process.stdout.write("\n");
+    },
+  };
+}

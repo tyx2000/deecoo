@@ -17,25 +17,6 @@ export function buildSystemPrompt(cwd, requestType, activeSkills = [], coordinat
     .join("\n\n");
 }
 
-export function buildFinalizationPrompt({ requestType, trace, maxSteps }) {
-  const traceSummary = trace.length
-    ? trace
-        .slice(-20)
-        .map((event) => {
-          const changes = event.additions || event.deletions ? " +" + (event.additions ?? 0) + " -" + (event.deletions ?? 0) : "";
-          const status = event.ok ? "ok" : "failed " + event.error;
-          return "- step " + event.step + ": " + event.tool + " " + (event.target || ".") + changes + " (" + status + ")";
-        })
-        .join("\n")
-    : "- no tools completed";
-
-  return renderPrompt("finalization.md", {
-    maxSteps,
-    requestType,
-    traceSummary,
-  });
-}
-
 function taskPromptFile(requestType) {
   const known = new Set(["edit", "debug", "review", "analysis", "command", "general"]);
   return "task-" + (known.has(requestType) ? requestType : "general") + ".md";

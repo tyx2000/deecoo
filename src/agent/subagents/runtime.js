@@ -3,7 +3,7 @@ import { runAgent } from "../loop.js";
 
 const MAX_WORKER_PROMPT_CHARS = 8000;
 
-export function createSubagentRuntime({ client, workerTools, cwd, config, activeSkills = [], contextMessages = [] }) {
+export function createSubagentRuntime({ client, workerTools, cwd, config, activeSkills = [], contextMessages = [], signal }) {
   const workers = new Map();
 
   return {
@@ -65,7 +65,6 @@ export function createSubagentRuntime({ client, workerTools, cwd, config, active
       tools: workerTools,
       task: prompt,
       cwd,
-      maxSteps: Math.max(1, Math.min(Number(config.subagentMaxSteps ?? 8), Number(config.maxSteps ?? 20))),
       model: config.model,
       maxTokens: config.maxTokens,
       reasoningEffort: config.reasoningEffort,
@@ -73,6 +72,7 @@ export function createSubagentRuntime({ client, workerTools, cwd, config, active
       stream: false,
       contextMessages: worker.messages,
       activeSkills,
+      signal,
     });
     worker.messages = result.messages ?? worker.messages;
     worker.status = "completed";

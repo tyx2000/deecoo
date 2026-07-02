@@ -191,13 +191,7 @@ In an interactive terminal, `deecoo resume` selects a previous project conversat
 
 This keeps context useful without repeatedly uploading the entire conversation.
 
-Agent runs are capped by `DEECOO_MAX_STEPS` to prevent infinite tool loops. When the cap is reached, Deecoo now makes one final model request without tools so the model can summarize progress instead of exiting immediately. Increase the cap for larger tasks:
-
-```bash
-export DEECOO_MAX_STEPS=40
-export DEECOO_SUBAGENT_MAX_STEPS=8
-deecoo config import-env
-```
+Agent runs continue until the model returns a final answer or an unrecoverable error occurs. Deecoo no longer stops a task because a local step counter was reached.
 
 Or run one task directly:
 
@@ -241,4 +235,4 @@ Deecoo exposes three coordinator tools to the model for complex tasks:
 - `send_message`: continue a previous worker when its loaded context is useful.
 - `task_stop`: stop a worker that is obsolete or was sent in the wrong direction.
 
-Workers currently run in-process and return a structured result to the main agent. They are useful for isolating research, focused implementation, and independent verification prompts, but they are not yet true background processes. Use `DEECOO_SUBAGENT_MAX_STEPS` to cap worker tool loops separately from the main task.
+Workers currently run in-process and return a structured result to the main agent. They are useful for isolating research, focused implementation, and independent verification prompts, but they are not yet true background processes. Workers also continue until they return a final answer or hit an unrecoverable error.

@@ -49,7 +49,7 @@ export function createToolRuntime({
     createWorkerTools() {
       return {
         schemas: buildToolSchemas({ includeSubagents: false }),
-        execute: (name, args) => runtime.execute(name, args),
+        execute: (name, args, options) => runtime.execute(name, args, options),
       };
     },
     setPermissionMode(mode) {
@@ -63,25 +63,26 @@ export function createToolRuntime({
       permissionState.fileWriteApprovedForTask = false;
       permissionState.readCache.clear();
     },
-    async execute(name, args) {
+    async execute(name, args, options = {}) {
       try {
+        throwIfAborted(options.signal);
         switch (name) {
           case "list_files":
             return listFiles(workspace, args);
           case "read_file":
             return readWorkspaceFile(workspace, args, permissionState);
           case "search_text":
-            return searchText(workspace, args);
+            return searchText(workspace, args, options.signal);
           case "edit_file":
             return editFile(workspace, args, prompter, allowShellWithoutPrompt, permissionState);
           case "write_file":
             return writeWorkspaceFile(workspace, args, prompter, allowShellWithoutPrompt, permissionState);
           case "git_status":
-            return gitStatus(workspace);
+            return gitStatus(workspace, options.signal);
           case "git_diff":
-            return gitDiff(workspace, args);
+            return gitDiff(workspace, args, options.signal);
           case "run_shell":
-            return runShell(workspace, args, prompter, allowShellWithoutPrompt, permissionState);
+            return runShell(workspace, args, prompter, allowShellWithoutPrompt, permissionState, options.signal);
           case "agent":
             return subagentRuntime ? subagentRuntime.start(args) : { ok: false, error: "Subagent runtime is not available." };
           case "send_message":
@@ -98,6 +99,13 @@ export function createToolRuntime({
   };
 
   return runtime;
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  const error = signal.reason instanceof Error ? signal.reason : new Error("Task interrupted.");
+  error.name = "AbortError";
+  throw error;
 }
 
 function buildToolSchemas({ includeSubagents = true } = {}) {
@@ -494,7 +502,7 @@ async function approveFileWrite({ rel, action, prompter, allowWithoutPrompt, per
   return allowed;
 }
 
-async function searchText(workspace, args) {
+async function searchText(workspace, args, signal) {
   if (!args.query) return { ok: false, error: "query is required" };
   const directory = assertSafePath(workspace, args.directory ?? ".");
   const maxResults = Math.min(Number(args.maxResults ?? 50), 200);
@@ -526,7 +534,7 @@ async function searchText(workspace, args) {
         args.query,
         relative(workspace, directory) || ".",
       ],
-      { cwd: workspace, maxBuffer: 1024 * 1024 },
+      { cwd: workspace, maxBuffer: 1024 * 1024, signal },
     );
     return {
       ok: true,
@@ -555,11 +563,12 @@ async function searchText(workspace, args) {
   }
 }
 
-async function gitStatus(workspace) {
+async function gitStatus(workspace, signal) {
   try {
     const { stdout } = await execFileAsync("git", ["status", "--short", "--branch"], {
       cwd: workspace,
       maxBuffer: 1024 * 1024,
+      signal,
     });
     return {
       ok: true,
@@ -571,12 +580,13 @@ async function gitStatus(workspace) {
   }
 }
 
-async function gitDiff(workspace, args) {
+async function gitDiff(workspace, args, signal) {
   const command = args.staged ? ["diff", "--staged"] : ["diff"];
   try {
     const { stdout } = await execFileAsync("git", command, {
       cwd: workspace,
       maxBuffer: 4 * 1024 * 1024,
+      signal,
     });
     return {
       ok: true,
@@ -588,7 +598,7 @@ async function gitDiff(workspace, args) {
   }
 }
 
-async function runShell(workspace, args, prompter, allowShellWithoutPrompt, permissionState) {
+async function runShell(workspace, args, prompter, allowShellWithoutPrompt, permissionState, signal) {
   if (!args.command) return { ok: false, error: "command is required" };
   const decision =
     allowShellWithoutPrompt || permissionState.shellApprovedAlways
@@ -605,6 +615,7 @@ async function runShell(workspace, args, prompter, allowShellWithoutPrompt, perm
       cwd: workspace,
       timeout: Number(args.timeoutMs ?? 120000),
       maxBuffer: 4 * 1024 * 1024,
+      signal,
     });
     return {
       ok: true,

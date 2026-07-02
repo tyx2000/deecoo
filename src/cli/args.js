@@ -9,7 +9,6 @@ export function parseArgs(argv) {
     configAction: undefined,
     cwd: undefined,
     model: undefined,
-    maxSteps: undefined,
     settings: undefined,
     yes: false,
     help: false,
@@ -24,8 +23,6 @@ export function parseArgs(argv) {
       args.cwd = argv[++i];
     } else if (arg === "--model") {
       args.model = argv[++i];
-    } else if (arg === "--max-steps") {
-      args.maxSteps = Number(argv[++i]);
     } else if (arg === "--settings") {
       args.settings = argv[++i];
     } else if (arg === "--yes" || arg === "-y") {
@@ -44,7 +41,6 @@ export function parseArgs(argv) {
     configAction: args.configAction,
     cwd: args.cwd,
     model: args.model,
-    maxSteps: args.maxSteps,
     settings: args.settings,
     yes: args.yes,
     help: args.help,
@@ -90,7 +86,6 @@ export function printHelp() {
     "  --cwd <path>         Workspace directory. Defaults to current directory.",
     "  --settings <path>    App settings file or directory. Defaults to " + appSettingsPath() + ".",
     "  --model <model>     Override DEECOO_MODEL.",
-    "  --max-steps <n>     Override DEECOO_MAX_STEPS.",
     "  --yes, -y           Auto-approve guarded shell commands.",
     "  --help, -h          Show help.",
   ].join("\n"));

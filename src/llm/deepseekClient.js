@@ -1,10 +1,10 @@
 export function createDeepSeekClient(config) {
   return {
-    async chatCompletion(request) {
+    async chatCompletion(request, options = {}) {
       return requestJson(config, "/chat/completions", {
         method: "POST",
         body: JSON.stringify(request),
-      });
+      }, options);
     },
     async chatCompletionStream(request, handlers = {}) {
       return requestChatCompletionStream(config, {
@@ -28,8 +28,10 @@ async function requestChatCompletionStream(config, request, handlers) {
   let emittedContent = false;
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    throwIfAborted(handlers.signal);
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
+    const removeAbortListener = linkAbortSignal(handlers.signal, controller);
+    const timeout = setTimeout(() => controller.abort(new Error("Request timed out.")), config.timeoutMs);
 
     try {
       const response = await fetch(`${config.baseUrl}/chat/completions`, {
@@ -64,10 +66,11 @@ async function requestChatCompletionStream(config, request, handlers) {
       return result;
     } catch (error) {
       lastError = error;
-      if (emittedContent || attempt >= attempts || !shouldRetry(error)) break;
+      if (isExternalAbort(handlers.signal) || emittedContent || attempt >= attempts || !shouldRetry(error)) break;
       await delay(backoffMs(attempt));
     } finally {
       clearTimeout(timeout);
+      removeAbortListener();
     }
   }
 
@@ -159,13 +162,15 @@ function applyChatDelta(message, delta, handlers) {
   }
 }
 
-async function requestJson(config, path, init) {
+async function requestJson(config, path, init, options = {}) {
   const attempts = Math.min(5, Math.max(1, config.retryAttempts ?? 5));
   let lastError;
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    throwIfAborted(options.signal);
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
+    const removeAbortListener = linkAbortSignal(options.signal, controller);
+    const timeout = setTimeout(() => controller.abort(new Error("Request timed out.")), config.timeoutMs);
 
     try {
       const response = await fetch(`${config.baseUrl}${path}`, {
@@ -188,18 +193,42 @@ async function requestJson(config, path, init) {
       return text ? JSON.parse(text) : {};
     } catch (error) {
       lastError = error;
-      if (attempt >= attempts || !shouldRetry(error)) break;
+      if (isExternalAbort(options.signal) || attempt >= attempts || !shouldRetry(error)) break;
       await delay(backoffMs(attempt));
     } finally {
       clearTimeout(timeout);
+      removeAbortListener();
     }
   }
 
   throw lastError;
 }
 
+function linkAbortSignal(signal, controller) {
+  if (!signal) return () => {};
+  const onAbort = () => controller.abort(signal.reason ?? new Error("Task interrupted."));
+  if (signal.aborted) {
+    onAbort();
+    return () => {};
+  }
+  signal.addEventListener("abort", onAbort, { once: true });
+  return () => signal.removeEventListener("abort", onAbort);
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  const error = signal.reason instanceof Error ? signal.reason : new Error("Task interrupted.");
+  error.name = "AbortError";
+  throw error;
+}
+
+function isExternalAbort(signal) {
+  return Boolean(signal?.aborted);
+}
+
 function shouldRetry(error) {
   if (error.name === "AbortError") return true;
+  if (/Request timed out/i.test(error.message ?? "")) return true;
   if (error.status === 429 || (error.status >= 500 && error.status <= 599)) return true;
   return /fetch failed|network|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i.test(error.message ?? "");
 }

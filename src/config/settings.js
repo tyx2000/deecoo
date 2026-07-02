@@ -63,8 +63,6 @@ export function defaultSettingsEnv() {
   return {
     DEECOO_BASE_URL: "https://api.deepseek.com",
     DEECOO_MODEL: "deepseek-v4-pro",
-    DEECOO_MAX_STEPS: 20,
-    DEECOO_SUBAGENT_MAX_STEPS: 8,
     DEECOO_MAX_TOKENS: 4096,
     DEECOO_TIMEOUT_MS: 120000,
     DEECOO_API_RETRIES: 5,

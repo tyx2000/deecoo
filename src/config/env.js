@@ -11,8 +11,6 @@ export function loadConfig(env, args = {}) {
     baseUrl: normalizeBaseUrl(env.DEECOO_BASE_URL ?? "https://api.deepseek.com"),
     model: args.model ?? env.DEECOO_MODEL ?? "deepseek-v4-pro",
     cwd: env.DEECOO_CWD,
-    maxSteps: numberFrom(args.maxSteps ?? env.DEECOO_MAX_STEPS, 20),
-    subagentMaxSteps: numberFrom(env.DEECOO_SUBAGENT_MAX_STEPS, 8),
     maxTokens: numberFrom(env.DEECOO_MAX_TOKENS, 4096),
     timeoutMs: numberFrom(env.DEECOO_TIMEOUT_MS, 120000),
     retryAttempts: numberFrom(env.DEECOO_API_RETRIES, 5),

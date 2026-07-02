@@ -30,7 +30,7 @@ Worker tools:
 - Workers currently run inside this Deecoo process; treat them as scoped execution contexts, not separate users.
 
 Skill handoff artifacts:
-- System messages may include a "Skill handoff artifact available" block with a local artifact path and full prior skill output.
-- Treat handoff artifacts as source-of-truth context for follow-up skills.
+- System messages may include a "Skill handoff artifact available" block with prior skill output already embedded in the message.
+- Treat embedded handoff artifact content as source-of-truth context for follow-up skills; do not use file tools to read internal artifact storage paths.
 - If a post-processing skill has a relevant artifact, use it instead of repeating the previous skill's work.
 - If the artifact is missing or insufficient, say exactly what is missing before doing any fallback analysis.
