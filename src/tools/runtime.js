@@ -1,5 +1,5 @@
 import { execFile, exec } from "node:child_process";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { paint } from "../terminal/theme.js";
@@ -68,27 +68,27 @@ export function createToolRuntime({
         throwIfAborted(options.signal);
         switch (name) {
           case "list_files":
-            return listFiles(workspace, args);
+            return await listFiles(workspace, args);
           case "read_file":
-            return readWorkspaceFile(workspace, args, permissionState);
+            return await readWorkspaceFile(workspace, args, permissionState);
           case "search_text":
-            return searchText(workspace, args, options.signal);
+            return await searchText(workspace, args, options.signal);
           case "edit_file":
-            return editFile(workspace, args, prompter, allowShellWithoutPrompt, permissionState);
+            return await editFile(workspace, args, prompter, permissionState);
           case "write_file":
-            return writeWorkspaceFile(workspace, args, prompter, allowShellWithoutPrompt, permissionState);
+            return await writeWorkspaceFile(workspace, args, prompter, permissionState);
           case "git_status":
-            return gitStatus(workspace, options.signal);
+            return await gitStatus(workspace, options.signal);
           case "git_diff":
-            return gitDiff(workspace, args, options.signal);
+            return await gitDiff(workspace, args, options.signal);
           case "run_shell":
-            return runShell(workspace, args, prompter, allowShellWithoutPrompt, permissionState, options.signal);
+            return await runShell(workspace, args, prompter, allowShellWithoutPrompt, permissionState, options.signal);
           case "agent":
-            return subagentRuntime ? subagentRuntime.start(args) : { ok: false, error: "Subagent runtime is not available." };
+            return subagentRuntime ? await subagentRuntime.start(args) : { ok: false, error: "Subagent runtime is not available." };
           case "send_message":
-            return subagentRuntime ? subagentRuntime.send(args) : { ok: false, error: "Subagent runtime is not available." };
+            return subagentRuntime ? await subagentRuntime.send(args) : { ok: false, error: "Subagent runtime is not available." };
           case "task_stop":
-            return subagentRuntime ? subagentRuntime.stop(args) : { ok: false, error: "Subagent runtime is not available." };
+            return subagentRuntime ? await subagentRuntime.stop(args) : { ok: false, error: "Subagent runtime is not available." };
           default:
             return { ok: false, error: `Unknown tool: ${name}` };
         }
@@ -302,6 +302,8 @@ async function listFiles(workspace, args) {
   const root = assertSafePath(workspace, directory);
   const files = [];
   try {
+    const info = await assertExistingWorkspacePath(workspace, root);
+    if (!info.isDirectory()) return { ok: false, error: "path is not a directory" };
     await walk(root, workspace, maxDepth, files);
   } catch (error) {
     if (isPathNotFoundError(error)) {
@@ -338,7 +340,6 @@ async function walk(current, workspace, depth, files) {
 async function readWorkspaceFile(workspace, args, permissionState) {
   if (!args.path) return { ok: false, error: "path is required" };
   const path = assertSafePath(workspace, args.path);
-  assertNotSensitive(path);
   const maxBytes = Math.min(Number(args.maxBytes ?? 20000), 100000);
   const rel = relative(workspace, path);
   const cacheKey = `${rel}:${maxBytes}`;
@@ -356,7 +357,7 @@ async function readWorkspaceFile(workspace, args, permissionState) {
   }
   let info;
   try {
-    info = await stat(path);
+    info = await assertExistingWorkspacePath(workspace, path);
   } catch (error) {
     if (isPathNotFoundError(error)) {
       return pathNotFoundResult(workspace, path, args.path, "file");
@@ -378,15 +379,16 @@ async function readWorkspaceFile(workspace, args, permissionState) {
   return result;
 }
 
-async function editFile(workspace, args, prompter, allowWithoutPrompt, permissionState) {
+async function editFile(workspace, args, prompter, permissionState) {
   if (!args.path) return { ok: false, error: "path is required" };
   if (typeof args.search !== "string") return { ok: false, error: "search is required" };
   if (typeof args.replace !== "string") return { ok: false, error: "replace is required" };
 
   const path = assertSafePath(workspace, args.path);
-  assertNotSensitive(path);
   let original;
   try {
+    const info = await assertExistingWorkspacePath(workspace, path);
+    if (!info.isFile()) return { ok: false, error: "path is not a file" };
     original = await readFile(path, "utf8");
   } catch (error) {
     if (isPathNotFoundError(error)) {
@@ -409,7 +411,6 @@ async function editFile(workspace, args, prompter, allowWithoutPrompt, permissio
     rel,
     action: "Apply edit",
     prompter,
-    allowWithoutPrompt,
     permissionState,
   });
   if (!allowed) return { ok: false, error: "User denied file edit." };
@@ -430,19 +431,21 @@ async function editFile(workspace, args, prompter, allowWithoutPrompt, permissio
   };
 }
 
-async function writeWorkspaceFile(workspace, args, prompter, allowWithoutPrompt, permissionState) {
+async function writeWorkspaceFile(workspace, args, prompter, permissionState) {
   if (!args.path) return { ok: false, error: "path is required" };
   if (typeof args.content !== "string") return { ok: false, error: "content is required" };
 
   const path = assertSafePath(workspace, args.path);
-  assertNotSensitive(path);
   let original = "";
   let existed = true;
   try {
+    const info = await assertExistingWorkspacePath(workspace, path);
+    if (!info.isFile()) return { ok: false, error: "path is not a file" };
     original = await readFile(path, "utf8");
   } catch (error) {
     if (isPathNotFoundError(error)) {
       existed = false;
+      await assertWorkspaceWriteParent(workspace, path);
     } else {
       throw error;
     }
@@ -457,7 +460,6 @@ async function writeWorkspaceFile(workspace, args, prompter, allowWithoutPrompt,
     rel,
     action: existed ? "Overwrite" : "Create",
     prompter,
-    allowWithoutPrompt,
     permissionState,
   });
   if (!allowed) return { ok: false, error: "User denied file write." };
@@ -479,8 +481,7 @@ async function writeWorkspaceFile(workspace, args, prompter, allowWithoutPrompt,
   };
 }
 
-async function approveFileWrite({ rel, action, prompter, allowWithoutPrompt, permissionState }) {
-  if (allowWithoutPrompt) return true;
+async function approveFileWrite({ rel, action, prompter, permissionState }) {
   if (permissionState.mode === "read-only") return false;
   if (permissionState.mode === "workspace-write") return true;
   if (permissionState.mode === "ask-once" && permissionState.fileWriteApprovedForTask) return true;
@@ -508,7 +509,7 @@ async function searchText(workspace, args, signal) {
   const maxResults = Math.min(Number(args.maxResults ?? 50), 200);
   let info;
   try {
-    info = await stat(directory);
+    info = await assertExistingWorkspacePath(workspace, directory);
   } catch (error) {
     if (isPathNotFoundError(error)) {
       return pathNotFoundResult(workspace, directory, args.directory ?? ".", "directory");
@@ -764,6 +765,48 @@ function assertSafePath(workspace, path) {
   }
   assertNotSensitive(full);
   return full;
+}
+
+async function assertExistingWorkspacePath(workspace, path) {
+  const info = await lstat(path);
+  if (info.isSymbolicLink()) {
+    throw new Error(`Access through symbolic links is denied: ${relative(workspace, path) || "."}`);
+  }
+
+  const realWorkspace = await realpath(workspace);
+  const realTarget = await realpath(path);
+  assertInsideWorkspace(realWorkspace, realTarget);
+  assertNotSensitive(realTarget);
+  return info;
+}
+
+async function assertWorkspaceWriteParent(workspace, path) {
+  let current = dirname(path);
+  while (true) {
+    assertSafePath(workspace, current);
+    let info;
+    try {
+      info = await assertExistingWorkspacePath(workspace, current);
+    } catch (error) {
+      if (!isPathNotFoundError(error)) throw error;
+      const next = dirname(current);
+      if (next === current) throw error;
+      current = next;
+      continue;
+    }
+
+    if (!info.isDirectory()) {
+      throw new Error(`Write parent is not a directory: ${relative(workspace, current) || "."}`);
+    }
+    return;
+  }
+}
+
+function assertInsideWorkspace(realWorkspace, realTarget) {
+  const rel = relative(realWorkspace, realTarget);
+  if (rel.startsWith("..") || rel === ".." || rel.startsWith("/") || rel.includes("\0")) {
+    throw new Error(`Access outside workspace is denied: ${realTarget}`);
+  }
 }
 
 function assertNotSensitive(path) {

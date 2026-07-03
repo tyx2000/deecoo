@@ -1,9 +1,9 @@
 import { formatActionPrompt } from "../terminal/markdown.js";
 import { readPromptLine, selectOption } from "../terminal/select.js";
 
-export function createPrompter(autoYes) {
+export function createPrompter(autoApproveShell) {
   return async (question, options = {}) => {
-    if (autoYes) return true;
+    if (autoApproveShell && options.kind === "shell-command-approval") return true;
     if (
       (options.kind === "file-write-approval" || options.kind === "shell-command-approval") &&
       process.stdin.isTTY &&
@@ -24,4 +24,3 @@ export function createPrompter(autoYes) {
     return answer.trim().toLowerCase() === "y" || answer.trim().toLowerCase() === "yes";
   };
 }
-

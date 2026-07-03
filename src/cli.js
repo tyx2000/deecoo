@@ -65,7 +65,7 @@ export async function main(argv) {
     cwd,
     prompter,
     allowShellWithoutPrompt: args.yes,
-    permissionMode: args.yes ? "workspace-write" : config.permissionMode,
+    permissionMode: config.permissionMode,
   });
   const sessionStore = await createSessionStore(cwd);
 
