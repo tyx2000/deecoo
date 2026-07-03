@@ -142,6 +142,12 @@ DEECOO_PERMISSION_MODE=ask-once
 
 Edit approval prompts use a three-option selector: `Approve`, `Deny`, and `Always Approve`. `Always Approve` allows subsequent workspace file edits in the current Deecoo process without asking again.
 
+`--yes` only auto-approves guarded shell commands. For scripted runs that should also allow workspace file writes, pass `--yes-files` or set `DEECOO_PERMISSION_MODE=workspace-write` explicitly:
+
+```bash
+deecoo --yes --yes-files "apply the requested fix"
+```
+
 `/usage` calls the provider balance endpoint available on DeepSeek-compatible APIs:
 
 ```text

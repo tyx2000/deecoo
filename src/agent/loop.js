@@ -110,7 +110,7 @@ export async function runAgent({
       messages.push({
         role: "tool",
         tool_call_id: call.id,
-        content: JSON.stringify(result),
+        content: JSON.stringify(compactToolResult(name, result)),
       });
     }
     step += 1;
@@ -180,6 +180,40 @@ function parseToolArguments(value) {
   } catch {
     return {};
   }
+}
+
+export function compactToolResult(name, result) {
+  if (!result || typeof result !== "object") return result;
+  const compact = {};
+  for (const key of ["ok", "code", "error", "recoverable", "suggestion", "cached", "truncated", "path", "requestedPath", "bytesWritten", "status", "task_id", "mode", "stoppedReason"]) {
+    if (result[key] !== undefined) compact[key] = result[key];
+  }
+  if (result.activity) compact.activity = result.activity;
+  if (result.usage) compact.usage = result.usage;
+  if (result.files) compact.files = compactArray(result.files, 120);
+  if (result.matches) compact.matches = compactArray(result.matches, 80);
+  if (result.content !== undefined) compact.content = truncateText(result.content, 30000);
+  if (result.stdout !== undefined) compact.stdout = truncateText(result.stdout, 12000);
+  if (result.stderr !== undefined) compact.stderr = truncateText(result.stderr, 12000);
+  if (result.diff !== undefined) compact.diff = truncateText(result.diff, 20000);
+  if (result.status !== undefined && name === "git_status") compact.status = truncateText(result.status, 8000);
+  if (result.summary !== undefined) compact.summary = truncateText(result.summary, 4000);
+  if (result.result !== undefined) compact.result = truncateText(result.result, 16000);
+  return compact;
+}
+
+function compactArray(values, maxItems) {
+  if (!Array.isArray(values) || values.length <= maxItems) return values;
+  return [
+    ...values.slice(0, maxItems),
+    `... truncated ${values.length - maxItems} additional item${values.length - maxItems === 1 ? "" : "s"}`,
+  ];
+}
+
+function truncateText(value, maxChars) {
+  const text = String(value ?? "");
+  if (text.length <= maxChars) return text;
+  return text.slice(0, maxChars) + `\n... truncated ${text.length - maxChars} additional characters`;
 }
 
 function toolTraceEvent({ step, name, args, result }) {

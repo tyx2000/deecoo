@@ -25,6 +25,12 @@ const SENSITIVE_BASENAMES = new Set([
   "id_ed25519",
 ]);
 
+const WORKER_TOOL_PROFILES = {
+  research: new Set(["list_files", "read_file", "search_text", "git_status", "git_diff"]),
+  verify: new Set(["list_files", "read_file", "search_text", "git_status", "git_diff", "run_shell"]),
+  implement: new Set(["list_files", "read_file", "search_text", "git_status", "git_diff", "run_shell", "edit_file", "write_file"]),
+};
+
 export function createToolRuntime({
   cwd,
   prompter,
@@ -32,6 +38,11 @@ export function createToolRuntime({
   permissionMode = "ask-once",
 }) {
   const workspace = resolve(cwd);
+  let realWorkspace;
+  const getRealWorkspace = () => {
+    realWorkspace ??= realpath(workspace);
+    return realWorkspace;
+  };
   const permissionState = {
     mode: permissionMode,
     fileWriteApprovedForTask: false,
@@ -46,10 +57,22 @@ export function createToolRuntime({
     setSubagentRuntime(runtime) {
       subagentRuntime = runtime;
     },
-    createWorkerTools() {
+    createWorkerTools({ mode = "research" } = {}) {
+      const workerMode = normalizeWorkerMode(mode);
+      const allowedTools = WORKER_TOOL_PROFILES[workerMode];
       return {
-        schemas: buildToolSchemas({ includeSubagents: false }),
-        execute: (name, args, options) => runtime.execute(name, args, options),
+        mode: workerMode,
+        schemas: buildToolSchemas({ includeSubagents: false, allowedTools }),
+        async execute(name, args, options) {
+          if (!allowedTools.has(name)) {
+            return {
+              ok: false,
+              error: `Tool ${name} is not available to ${workerMode} workers.`,
+              code: "WORKER_TOOL_BLOCKED",
+            };
+          }
+          return runtime.execute(name, args, options);
+        },
       };
     },
     setPermissionMode(mode) {
@@ -68,15 +91,15 @@ export function createToolRuntime({
         throwIfAborted(options.signal);
         switch (name) {
           case "list_files":
-            return await listFiles(workspace, args);
+            return await listFiles(workspace, getRealWorkspace, args);
           case "read_file":
-            return await readWorkspaceFile(workspace, args, permissionState);
+            return await readWorkspaceFile(workspace, getRealWorkspace, args, permissionState);
           case "search_text":
-            return await searchText(workspace, args, options.signal);
+            return await searchText(workspace, getRealWorkspace, args, options.signal);
           case "edit_file":
-            return await editFile(workspace, args, prompter, permissionState);
+            return await editFile(workspace, getRealWorkspace, args, prompter, permissionState);
           case "write_file":
-            return await writeWorkspaceFile(workspace, args, prompter, permissionState);
+            return await writeWorkspaceFile(workspace, getRealWorkspace, args, prompter, permissionState);
           case "git_status":
             return await gitStatus(workspace, options.signal);
           case "git_diff":
@@ -108,7 +131,7 @@ function throwIfAborted(signal) {
   throw error;
 }
 
-function buildToolSchemas({ includeSubagents = true } = {}) {
+function buildToolSchemas({ includeSubagents = true, allowedTools } = {}) {
   const schemas = [
     {
       type: "function",
@@ -241,20 +264,30 @@ function buildToolSchemas({ includeSubagents = true } = {}) {
     },
   ];
 
-  if (!includeSubagents) return schemas;
+  const filteredSchemas = allowedTools
+    ? schemas.filter((schema) => allowedTools.has(schema.function.name))
+    : schemas;
+
+  if (!includeSubagents) return filteredSchemas;
   return [
-    ...schemas,
+    ...filteredSchemas,
     {
       type: "function",
       function: {
         name: "agent",
         description:
-          "Run a delegated worker subtask with its own context. Use for independent research, focused implementation, or independent verification. Worker prompts must be self-contained with purpose, scope, file paths if known, constraints, and done criteria.",
+          "Run a delegated worker subtask with its own context. Use for independent research, focused implementation, or independent verification. Worker prompts must be self-contained with purpose, mode, scope, file paths if known, constraints, and done criteria.",
         parameters: {
           type: "object",
           properties: {
             description: { type: "string", description: "Short worker label shown in activity output." },
-            subagent_type: { type: "string", description: "Use worker." },
+            mode: {
+              type: "string",
+              enum: ["research", "verify", "implement"],
+              description:
+                "Worker tool profile. research is read-only; verify can also run shell commands; implement can edit files.",
+            },
+            subagent_type: { type: "string", description: "Legacy worker type; prefer mode." },
             prompt: { type: "string", description: "Self-contained worker instructions." },
           },
           required: ["description", "prompt"],
@@ -296,13 +329,21 @@ function buildToolSchemas({ includeSubagents = true } = {}) {
   ];
 }
 
-async function listFiles(workspace, args) {
+function normalizeWorkerMode(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (normalized === "verification" || normalized === "verifier" || normalized === "test") return "verify";
+  if (normalized === "implementation" || normalized === "implementer" || normalized === "edit" || normalized === "write") return "implement";
+  if (normalized === "review" || normalized === "analysis" || normalized === "inspect" || normalized === "read") return "research";
+  return WORKER_TOOL_PROFILES[normalized] ? normalized : "research";
+}
+
+async function listFiles(workspace, getRealWorkspace, args) {
   const directory = args.directory ?? ".";
   const maxDepth = Math.min(Number(args.maxDepth ?? 2), 5);
   const root = assertSafePath(workspace, directory);
   const files = [];
   try {
-    const info = await assertExistingWorkspacePath(workspace, root);
+    const info = await assertExistingWorkspacePath(workspace, getRealWorkspace, root);
     if (!info.isDirectory()) return { ok: false, error: "path is not a directory" };
     await walk(root, workspace, maxDepth, files);
   } catch (error) {
@@ -337,7 +378,7 @@ async function walk(current, workspace, depth, files) {
   }
 }
 
-async function readWorkspaceFile(workspace, args, permissionState) {
+async function readWorkspaceFile(workspace, getRealWorkspace, args, permissionState) {
   if (!args.path) return { ok: false, error: "path is required" };
   const path = assertSafePath(workspace, args.path);
   const maxBytes = Math.min(Number(args.maxBytes ?? 20000), 100000);
@@ -357,7 +398,7 @@ async function readWorkspaceFile(workspace, args, permissionState) {
   }
   let info;
   try {
-    info = await assertExistingWorkspacePath(workspace, path);
+    info = await assertExistingWorkspacePath(workspace, getRealWorkspace, path);
   } catch (error) {
     if (isPathNotFoundError(error)) {
       return pathNotFoundResult(workspace, path, args.path, "file");
@@ -379,7 +420,7 @@ async function readWorkspaceFile(workspace, args, permissionState) {
   return result;
 }
 
-async function editFile(workspace, args, prompter, permissionState) {
+async function editFile(workspace, getRealWorkspace, args, prompter, permissionState) {
   if (!args.path) return { ok: false, error: "path is required" };
   if (typeof args.search !== "string") return { ok: false, error: "search is required" };
   if (typeof args.replace !== "string") return { ok: false, error: "replace is required" };
@@ -387,7 +428,7 @@ async function editFile(workspace, args, prompter, permissionState) {
   const path = assertSafePath(workspace, args.path);
   let original;
   try {
-    const info = await assertExistingWorkspacePath(workspace, path);
+    const info = await assertExistingWorkspacePath(workspace, getRealWorkspace, path);
     if (!info.isFile()) return { ok: false, error: "path is not a file" };
     original = await readFile(path, "utf8");
   } catch (error) {
@@ -431,7 +472,7 @@ async function editFile(workspace, args, prompter, permissionState) {
   };
 }
 
-async function writeWorkspaceFile(workspace, args, prompter, permissionState) {
+async function writeWorkspaceFile(workspace, getRealWorkspace, args, prompter, permissionState) {
   if (!args.path) return { ok: false, error: "path is required" };
   if (typeof args.content !== "string") return { ok: false, error: "content is required" };
 
@@ -439,13 +480,13 @@ async function writeWorkspaceFile(workspace, args, prompter, permissionState) {
   let original = "";
   let existed = true;
   try {
-    const info = await assertExistingWorkspacePath(workspace, path);
+    const info = await assertExistingWorkspacePath(workspace, getRealWorkspace, path);
     if (!info.isFile()) return { ok: false, error: "path is not a file" };
     original = await readFile(path, "utf8");
   } catch (error) {
     if (isPathNotFoundError(error)) {
       existed = false;
-      await assertWorkspaceWriteParent(workspace, path);
+      await assertWorkspaceWriteParent(workspace, getRealWorkspace, path);
     } else {
       throw error;
     }
@@ -503,13 +544,13 @@ async function approveFileWrite({ rel, action, prompter, permissionState }) {
   return allowed;
 }
 
-async function searchText(workspace, args, signal) {
+async function searchText(workspace, getRealWorkspace, args, signal) {
   if (!args.query) return { ok: false, error: "query is required" };
   const directory = assertSafePath(workspace, args.directory ?? ".");
   const maxResults = Math.min(Number(args.maxResults ?? 50), 200);
   let info;
   try {
-    info = await assertExistingWorkspacePath(workspace, directory);
+    info = await assertExistingWorkspacePath(workspace, getRealWorkspace, directory);
   } catch (error) {
     if (isPathNotFoundError(error)) {
       return pathNotFoundResult(workspace, directory, args.directory ?? ".", "directory");
@@ -767,26 +808,25 @@ function assertSafePath(workspace, path) {
   return full;
 }
 
-async function assertExistingWorkspacePath(workspace, path) {
+async function assertExistingWorkspacePath(workspace, getRealWorkspace, path) {
   const info = await lstat(path);
   if (info.isSymbolicLink()) {
     throw new Error(`Access through symbolic links is denied: ${relative(workspace, path) || "."}`);
   }
 
-  const realWorkspace = await realpath(workspace);
   const realTarget = await realpath(path);
-  assertInsideWorkspace(realWorkspace, realTarget);
+  assertInsideWorkspace(await getRealWorkspace(), realTarget);
   assertNotSensitive(realTarget);
   return info;
 }
 
-async function assertWorkspaceWriteParent(workspace, path) {
+async function assertWorkspaceWriteParent(workspace, getRealWorkspace, path) {
   let current = dirname(path);
   while (true) {
     assertSafePath(workspace, current);
     let info;
     try {
-      info = await assertExistingWorkspacePath(workspace, current);
+      info = await assertExistingWorkspacePath(workspace, getRealWorkspace, current);
     } catch (error) {
       if (!isPathNotFoundError(error)) throw error;
       const next = dirname(current);

@@ -5,7 +5,7 @@ import { buildSessionContext, recordTurn } from "../session/store.js";
 import { artifactContextMessages, saveSkillArtifact } from "../session/artifacts.js";
 import { createAssistantStreamPrinter, formatRunFooter, formatToolLine, printAssistantResponse } from "../terminal/markdown.js";
 import { createSpinner } from "../terminal/spinner.js";
-import { formatActivityLine, formatActivityReason, printCoordinationPlan } from "../cli/activity.js";
+import { formatActivityBlock, printCoordinationPlan } from "../cli/activity.js";
 
 export async function runTask({ client, tools, task, cwd, config, sessionStore, session, activeSkills = [], signal }) {
   const spinner = createSpinner("Thinking");
@@ -19,7 +19,8 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
   tools.setSubagentRuntime?.(
     createSubagentRuntime({
       client,
-      workerTools: tools.createWorkerTools?.() ?? tools,
+      createWorkerTools: tools.createWorkerTools?.bind(tools),
+      workerTools: tools.createWorkerTools?.({ mode: "research" }) ?? tools,
       cwd,
       config,
       activeSkills,
@@ -49,8 +50,7 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
       onToolStart: () => {},
       onToolEnd: ({ name, args, result }) => {
         spinner.stop();
-        const reason = result?.cached ? "" : formatActivityReason({ name, args }) + "\n";
-        console.log(reason + formatActivityLine({ name, args, result }) + "\n");
+        console.log(formatActivityBlock({ name, args, result }) + "\n");
       },
       onTextDelta: ({ content }) => {
         spinner.stop();

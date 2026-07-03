@@ -11,6 +11,7 @@ export function parseArgs(argv) {
     model: undefined,
     settings: undefined,
     yes: false,
+    yesFiles: false,
     help: false,
     taskParts: [],
   };
@@ -27,6 +28,8 @@ export function parseArgs(argv) {
       args.settings = argv[++i];
     } else if (arg === "--yes" || arg === "-y") {
       args.yes = true;
+    } else if (arg === "--yes-files" || arg === "--auto-approve-files") {
+      args.yesFiles = true;
     } else if (!args.command && args.taskParts.length === 0 && (arg === "config" || APP_COMMANDS.has(arg))) {
       args.command = arg;
     } else if (args.command === "config" && !args.configAction) {
@@ -43,6 +46,7 @@ export function parseArgs(argv) {
     model: args.model,
     settings: args.settings,
     yes: args.yes,
+    yesFiles: args.yesFiles,
     help: args.help,
     taskParts: args.taskParts,
     task: args.taskParts.join(" "),
@@ -87,7 +91,7 @@ export function printHelp() {
     "  --settings <path>    App settings file or directory. Defaults to " + appSettingsPath() + ".",
     "  --model <model>     Override DEECOO_MODEL.",
     "  --yes, -y           Auto-approve guarded shell commands.",
+    "  --yes-files         Auto-approve workspace file writes for scripted runs.",
     "  --help, -h          Show help.",
   ].join("\n"));
 }
-

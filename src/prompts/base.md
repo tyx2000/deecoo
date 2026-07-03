@@ -25,6 +25,10 @@ Global rules:
 
 Worker tools:
 - agent starts a delegated worker with an independent context and returns a structured result.
+- Worker mode controls available tools:
+  - research: read-only workspace inspection; no shell commands or file edits.
+  - verify: read/search plus focused shell commands; no file edits.
+  - implement: read/search, shell, and file edits for a delegated implementation scope.
 - send_message continues a worker when that worker's previous context is useful.
 - task_stop stops a worker that is obsolete or wrong-direction.
 - Workers currently run inside this Deecoo process; treat them as scoped execution contexts, not separate users.

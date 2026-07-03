@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { createPrompter } from "../src/cli/prompter.js";
 import { createToolRuntime } from "../src/tools/runtime.js";
@@ -46,4 +49,23 @@ test("auto-approved shell mode still prompts for ask-every-edit file writes", as
   assert.equal(prompted, true);
   assert.equal(result.ok, false);
   assert.match(result.error, /denied/i);
+});
+
+test("explicit file approval mode allows scripted workspace writes", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-scripted-write-"));
+  const tools = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("file write should not prompt in workspace-write mode");
+    },
+    allowShellWithoutPrompt: true,
+    permissionMode: "workspace-write",
+  });
+
+  const result = await tools.execute("write_file", {
+    path: "test-scripted-write-output.txt",
+    content: "scripted write",
+  });
+
+  assert.equal(result.ok, true);
 });

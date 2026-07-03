@@ -8,9 +8,11 @@ export function buildSystemPrompt(cwd, requestType, activeSkills = [], coordinat
       activeSkills: formatActiveSkills(activeSkills),
     }),
     renderPrompt(taskPromptFile(requestType)),
-    renderPrompt("coordination.md", {
-      coordinationProtocol: coordinationProtocol(coordination),
-    }),
+    coordination?.complex
+      ? renderPrompt("coordination.md", {
+          coordinationProtocol: coordinationProtocol(coordination),
+        })
+      : "",
     renderPrompt("final-answer.md"),
   ]
     .filter(Boolean)
@@ -32,16 +34,13 @@ function readPrompt(fileName) {
 }
 
 function coordinationProtocol(coordination) {
-  if (!coordination?.complex) {
-    return "- This task is not classified as complex. Use the narrowest single-agent workflow.";
-  }
   const basis = bulletList(coordination.basis);
   const phases = bulletList((coordination.phases ?? []).map((phase) => phase.name + ": " + phase.reason));
   const domains = bulletList((coordination.riskDomains ?? []).map((domain) => domain.name + ": " + domain.reason));
-  const parallel = bulletList((coordination.parallel ?? []).map((worker) => worker.name + ": " + worker.goal + " (" + worker.reason + ")"));
-  const serial = bulletList((coordination.serial ?? []).map((worker) => worker.name + ": " + worker.goal + " (" + worker.reason + ")"));
+  const parallel = bulletList((coordination.parallel ?? []).map(formatWorker));
+  const serial = bulletList((coordination.serial ?? []).map(formatWorker));
   const verification = coordination.verification
-    ? "  - " + coordination.verification.name + ": " + coordination.verification.goal + " (" + coordination.verification.reason + ")"
+    ? "  - " + formatWorker(coordination.verification)
     : "  - none";
   return [
     "- This task is classified as complex.",
@@ -61,6 +60,11 @@ function coordinationProtocol(coordination) {
     "- Verification candidate:",
     verification,
   ].join("\n");
+}
+
+function formatWorker(worker) {
+  const mode = worker.mode ? `mode=${worker.mode}; ` : "";
+  return `${worker.name}: ${mode}${worker.goal} (${worker.reason})`;
 }
 
 function bulletList(items) {
@@ -88,4 +92,3 @@ function indentBlock(block) {
     .map((line) => "  " + line)
     .join("\n");
 }
-

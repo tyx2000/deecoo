@@ -160,6 +160,7 @@ function buildWorkerPlan({ requestType, basis, riskDomains, phases }) {
     for (const domain of riskDomains) {
       parallel.push({
         name: domain.reviewer,
+        mode: "research",
         goal: domain.goal,
         phase: "Risk Review",
         concurrency: "parallel",
@@ -170,6 +171,7 @@ function buildWorkerPlan({ requestType, basis, riskDomains, phases }) {
     if (riskDomains.some((domain) => domain.name === "Architecture")) {
       parallel.push({
         name: "Architecture Researcher",
+        mode: "research",
         goal: "evaluate implementation paths, module boundaries, tradeoffs, and migration costs without editing files",
         phase: "Research",
         concurrency: "parallel",
@@ -179,6 +181,7 @@ function buildWorkerPlan({ requestType, basis, riskDomains, phases }) {
     if (basis.some((item) => /risk|风险|隐患/i.test(item))) {
       parallel.push({
         name: "Risk Assessor",
+        mode: "research",
         goal: "identify hidden assumptions, operational risks, and validation strategy",
         phase: "Research",
         concurrency: "parallel",
@@ -188,6 +191,7 @@ function buildWorkerPlan({ requestType, basis, riskDomains, phases }) {
   } else if (requestType === "command") {
     serial.push({
       name: "Command Runner",
+      mode: "verify",
       goal: "execute the requested command or focused diagnostics and capture meaningful output",
       phase: "Verification",
       concurrency: "serial",
@@ -196,6 +200,7 @@ function buildWorkerPlan({ requestType, basis, riskDomains, phases }) {
   } else {
     parallel.push({
       name: "Inspector",
+      mode: "research",
       goal: "identify relevant files, existing patterns, constraints, and prior observations before edits",
       phase: "Research",
       concurrency: "parallel",
@@ -204,6 +209,7 @@ function buildWorkerPlan({ requestType, basis, riskDomains, phases }) {
     if (phases.some((phase) => phase.name === "Implementation")) {
       serial.push({
         name: "Implementer",
+        mode: "implement",
         goal: "apply minimal scoped changes consistent with existing project patterns",
         phase: "Implementation",
         concurrency: "serial",
@@ -215,6 +221,7 @@ function buildWorkerPlan({ requestType, basis, riskDomains, phases }) {
   if (phases.some((phase) => phase.name === "Verification")) {
     verification = {
       name: "Verifier",
+      mode: "verify",
       goal: "run or define focused validation and report failures, uncertainty, and residual risk",
       phase: "Verification",
       concurrency: "fresh-worker-or-main-check",
@@ -245,4 +252,3 @@ function uniqueByName(items) {
   }
   return result;
 }
-
