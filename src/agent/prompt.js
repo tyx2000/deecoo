@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { reviewSchemaInstructions } from "../reporter/reviewReport.js";
 
 export function buildSystemPrompt(cwd, requestType, activeSkills = [], coordination) {
   return [
@@ -8,6 +9,7 @@ export function buildSystemPrompt(cwd, requestType, activeSkills = [], coordinat
       activeSkills: formatActiveSkills(activeSkills),
     }),
     renderPrompt(taskPromptFile(requestType)),
+    requestType === "review" ? reviewSchemaInstructions() : "",
     coordination?.complex
       ? renderPrompt("coordination.md", {
           coordinationProtocol: coordinationProtocol(coordination),

@@ -1,6 +1,8 @@
 import { analyzeTaskCoordination } from "./coordination.js";
 import { buildSystemPrompt } from "./prompt.js";
 import { CONTINUE_TRANSITIONS, TERMINAL_TRANSITIONS, continueTransition, terminalTransition } from "./transitions.js";
+import { advanceWorkflowState, createWorkflowState } from "../harness/workflow.js";
+import { createVerificationStateMachine } from "../verification/state.js";
 
 export async function runAgent({
   client,
@@ -19,6 +21,7 @@ export async function runAgent({
   onToolStart,
   onToolEnd,
   onTextDelta,
+  finalValidator,
   signal,
 }) {
   const usage = emptyUsage();
@@ -26,6 +29,9 @@ export async function runAgent({
   const requestType = coordination.requestType;
   const trace = [];
   const transitions = [];
+  const verification = createVerificationStateMachine();
+  let workflow = advanceWorkflowState(createWorkflowState({ requestType }), { type: "planned" });
+  let finalValidationAttempt = 0;
   const messages = [
     {
       role: "system",
@@ -51,6 +57,7 @@ export async function runAgent({
     if (thinking) request.thinking = thinking;
     if (reasoningEffort) request.reasoning_effort = reasoningEffort;
 
+    workflow = advanceWorkflowState(workflow, { type: "model-start", step });
     onModelStart?.({ step });
     const completion = await requestChatCompletion({
       client,
@@ -71,6 +78,28 @@ export async function runAgent({
     messages.push(message);
 
     if (!message.tool_calls?.length) {
+      const finalText = message.content || "Done.";
+      const finalValidation = finalValidator?.({
+        finalText,
+        messages,
+        requestType,
+        verification: verification.snapshot(),
+        attempt: finalValidationAttempt,
+      });
+      if (finalValidation && !finalValidation.ok && finalValidationAttempt < finalValidation.maxRepairAttempts) {
+        transitions.push(continueTransition(CONTINUE_TRANSITIONS.FINAL_VALIDATION_REPAIR, {
+          step,
+          errors: finalValidation.errors,
+        }));
+        workflow = advanceWorkflowState(workflow, { type: "final-validation-repair", step });
+        messages.push({
+          role: "user",
+          content: finalValidation.repairPrompt,
+        });
+        finalValidationAttempt += 1;
+        step += 1;
+        continue;
+      }
       if (looksLikePseudoToolCall(message.content)) {
         return {
           finalText:
@@ -83,30 +112,40 @@ export async function runAgent({
           transitions,
           trace,
           requestType,
+          verification: verification.snapshot(),
+          workflow: advanceWorkflowState(workflow, { type: "failed", step }),
         };
       }
+      workflow = advanceWorkflowState(workflow, { type: finalValidation?.ok === false ? "failed" : "completed", step });
       return {
-        finalText: message.content || "Done.",
+        finalText,
         messages,
         steps: step,
         usage,
-        transition: terminalTransition(TERMINAL_TRANSITIONS.COMPLETED, { step }),
+        stoppedReason: finalValidation?.ok === false ? TERMINAL_TRANSITIONS.REVIEW_SCHEMA_INVALID : undefined,
+        transition: terminalTransition(finalValidation?.ok === false ? TERMINAL_TRANSITIONS.REVIEW_SCHEMA_INVALID : TERMINAL_TRANSITIONS.COMPLETED, { step }),
         transitions,
         trace,
         requestType,
+        reviewReport: finalValidation?.report,
+        reviewValidation: finalValidation,
+        verification: verification.snapshot(),
+        workflow,
       };
     }
 
     for (const call of message.tool_calls) {
       const name = call.function?.name;
       const args = parseToolArguments(call.function?.arguments);
+      workflow = advanceWorkflowState(workflow, { type: "tool-start", tool: name, step });
       onToolStart?.({ name, args });
       throwIfAborted(signal);
       const result = await tools.execute(name, args, { signal });
       throwIfAborted(signal);
+      const verificationState = verification.observeTool({ name, args, result, step });
       transitions.push(continueTransition(result?.ok === false ? CONTINUE_TRANSITIONS.TOOL_ERROR : CONTINUE_TRANSITIONS.TOOL_USE, { step, tool: name }));
       trace.push(toolTraceEvent({ step, name, args, result }));
-      onToolEnd?.({ name, args, result });
+      onToolEnd?.({ name, args, result, verification: verificationState });
       messages.push({
         role: "tool",
         tool_call_id: call.id,

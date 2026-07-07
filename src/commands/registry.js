@@ -6,6 +6,7 @@ export const SLASH_COMMANDS = sortSlashCommands([
   { label: "/new    Start a new conversation", value: "/new" },
   { label: "/permissions Select edit permission mode", value: "/permissions" },
   { label: "/skills Load a Codex skill for this session", value: "/skills" },
+  { label: "/trace  Show latest run audit trace", value: "/trace" },
   { label: "/theme  Select terminal color theme", value: "/theme" },
   { label: "/model  Select active model", value: "/model" },
   { label: "/usage  Show API key balance/usage", value: "/usage" },
@@ -13,7 +14,7 @@ export const SLASH_COMMANDS = sortSlashCommands([
   { label: "/exit   Leave Deecoo", value: "/exit" },
 ]);
 
-export const APP_COMMANDS = new Set(["model", "resume", "delete", "export", "permissions", "skills", "theme", "usage", "help"]);
+export const APP_COMMANDS = new Set(["model", "resume", "delete", "export", "permissions", "skills", "trace", "theme", "usage", "help"]);
 export const EXIT_SIGNAL = Symbol("exit");
 
 export function isExitCommand(value) {
@@ -32,4 +33,3 @@ function sortSlashCommands(commands) {
     return a.value.localeCompare(b.value);
   });
 }
-

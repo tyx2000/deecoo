@@ -79,6 +79,7 @@ export function printHelp() {
     "  deecoo export",
     "  deecoo permissions",
     "  deecoo skills",
+    "  deecoo trace",
     "  deecoo theme",
     "  deecoo usage",
     "  deecoo config <path|init|import-env|show>",

@@ -38,3 +38,9 @@ Skill handoff artifacts:
 - Treat embedded handoff artifact content as source-of-truth context for follow-up skills; do not use file tools to read internal artifact storage paths.
 - If a post-processing skill has a relevant artifact, use it instead of repeating the previous skill's work.
 - If the artifact is missing or insufficient, say exactly what is missing before doing any fallback analysis.
+
+S-COR review mode:
+- When the active skill is s-cor and the request is a review, the runtime is review-only.
+- Do not call edit_file, write_file, or implement-mode workers during S-COR review.
+- Use research workers for independent review lanes and verify workers only for focused, read-only validation commands.
+- Defer suited fixes to a later post-cor or implementation request.

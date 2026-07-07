@@ -242,3 +242,27 @@ Deecoo exposes three coordinator tools to the model for complex tasks:
 - `task_stop`: stop a worker that is obsolete or was sent in the wrong direction.
 
 Workers currently run in-process and return a structured result to the main agent. They are useful for isolating research, focused implementation, and independent verification prompts, but they are not yet true background processes. Workers also continue until they return a final answer or hit an unrecoverable error.
+
+## Harness Engineering
+
+Deecoo records a structured task spec, workflow state, verification plan, project index snapshot, and audit trace for each run. Audit files are stored under the project session directory and redact common secret patterns before writing.
+
+The runtime also exposes tool capability metadata, shell-command guardrails, structured review schema validation, review finding aggregation, project memory, and output adapters for run summaries, review reports, and verification records.
+
+The harness is split by capability boundary:
+
+```text
+src/agent/          agent loop, prompt assembly, coordination, worker runtime
+src/context/        project index, review scope, context budget assembly
+src/harness/        task spec and workflow state contracts
+src/verification/   verification state machine and command planner
+src/permissions/    permission and shell-command policy
+src/memory/         project memory persistence
+src/observability/  audit trace persistence and redaction
+src/reporter/       structured review reports and output adapters
+src/tools/          local tool runtime, schemas, file/search helpers, shell/git executors
+```
+
+`src/tools/runtime.js` owns tool dispatch, task-scoped permission state, and worker tool filtering. Concrete executors live in focused modules: `src/tools/files.js`, `src/tools/search.js`, `src/tools/shell.js`, and `src/tools/git.js`. Tool schemas and worker profiles live in `src/tools/definitions.js`; path containment and sensitive-path checks live in `src/tools/pathPolicy.js`; edit line-count helpers live in `src/tools/textDiff.js`; shared tool error adaptation lives in `src/tools/results.js`.
+
+Use `/trace` inside an interactive session, or `deecoo trace`, to inspect the latest audit trace for a conversation.

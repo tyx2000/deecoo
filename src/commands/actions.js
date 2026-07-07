@@ -1,6 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { writeSettingsEnv } from "../config/settings.js";
+import { listRunAudits, readRunAudit } from "../observability/audit.js";
 import { listCodexSkills, loadCodexSkill } from "../skills/install.js";
 import { createSpinner } from "../terminal/spinner.js";
 import { selectOption } from "../terminal/select.js";
@@ -217,6 +218,29 @@ export async function showUsage({ client }) {
   }
 }
 
+export async function showTrace({ sessionStore, session }) {
+  if (!session) {
+    console.log("No active conversation.");
+    return;
+  }
+  const audits = await listRunAudits(sessionStore, session);
+  if (audits.length === 0) {
+    console.log("No audit traces for this conversation.");
+    return;
+  }
+  const audit = await readRunAudit(audits[0].path);
+  console.log([
+    "Latest trace: " + audits[0].path,
+    "task: " + truncateOneLine(audit.task, 100),
+    "requestType: " + (audit.requestType ?? "-"),
+    "workflow: " + (audit.workflow?.status ?? "-") + " / " + (audit.workflow?.phase ?? "-"),
+    "verification: " + (audit.verification?.status ?? "-"),
+    "steps: " + (audit.trace?.length ?? 0),
+    "tool calls:",
+    ...(audit.trace ?? []).slice(-12).map((entry) => "  - " + entry.tool + " " + (entry.ok ? "ok" : "failed") + " " + truncateOneLine(entry.target, 80)),
+  ].join("\n"));
+}
+
 function normalizeModels(result) {
   if (Array.isArray(result?.data)) {
     return result.data.map((item) => item.id).filter(Boolean);
@@ -249,4 +273,3 @@ async function persistSetting({ settingsPath, env }) {
     console.error("Unable to persist setting: " + error.message);
   }
 }
-

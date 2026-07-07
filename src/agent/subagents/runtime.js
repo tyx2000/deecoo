@@ -1,13 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { runAgent } from "../loop.js";
+import { normalizeWorkerMode } from "../../tools/definitions.js";
 
 const MAX_WORKER_PROMPT_CHARS = 8000;
+const MAX_WORKERS_PER_TASK = 8;
 
 export function createSubagentRuntime({ client, createWorkerTools, workerTools, cwd, config, activeSkills = [], contextMessages = [], signal }) {
   const workers = new Map();
 
   return {
     async start(args = {}) {
+      if (workers.size >= MAX_WORKERS_PER_TASK) {
+        return { ok: false, error: "worker limit reached for this task", code: "WORKER_LIMIT_REACHED" };
+      }
       const description = truncateOneLine(args.description || args.prompt || "worker", 80);
       const mode = normalizeWorkerMode(args.mode ?? args.subagent_type);
       const prompt = normalizeWorkerPrompt(args.prompt);
@@ -40,6 +45,18 @@ export function createSubagentRuntime({ client, createWorkerTools, workerTools, 
         activity: { kind: "subagent", label: "Stopped worker", target: worker.description },
       };
     },
+
+    snapshot() {
+      return [...workers.values()].map((worker) => ({
+        id: worker.id,
+        description: worker.description,
+        mode: worker.mode,
+        status: worker.status,
+        startedAt: worker.startedAt,
+        completedAt: worker.completedAt,
+        usage: worker.usage,
+      }));
+    },
   };
 
   function createWorker({ description, prompt, mode }) {
@@ -49,6 +66,8 @@ export function createSubagentRuntime({ client, createWorkerTools, workerTools, 
       description,
       mode,
       status: "running",
+      startedAt: new Date().toISOString(),
+      completedAt: undefined,
       tools,
       messages: [
         ...contextMessages,
@@ -80,6 +99,7 @@ export function createSubagentRuntime({ client, createWorkerTools, workerTools, 
     });
     worker.messages = result.messages ?? worker.messages;
     worker.status = "completed";
+    worker.completedAt = new Date().toISOString();
     addUsage(worker.usage, result.usage);
     return {
       ok: true,
@@ -128,12 +148,4 @@ function addUsage(total, usage = {}) {
   total.promptTokens += Number(usage.promptTokens ?? usage.prompt_tokens ?? 0);
   total.completionTokens += Number(usage.completionTokens ?? usage.completion_tokens ?? 0);
   total.totalTokens += Number(usage.totalTokens ?? usage.total_tokens ?? 0);
-}
-
-function normalizeWorkerMode(value) {
-  const normalized = String(value ?? "").trim().toLowerCase();
-  if (normalized === "verification" || normalized === "verifier" || normalized === "test") return "verify";
-  if (normalized === "implementation" || normalized === "implementer" || normalized === "edit" || normalized === "write") return "implement";
-  if (normalized === "review" || normalized === "analysis" || normalized === "inspect" || normalized === "read") return "research";
-  return ["research", "verify", "implement"].includes(normalized) ? normalized : "research";
 }

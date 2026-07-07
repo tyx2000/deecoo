@@ -7,6 +7,7 @@ import {
   selectModel,
   selectPermissions,
   selectTheme,
+  showTrace,
   showUsage,
 } from "./actions.js";
 import { EXIT_SIGNAL, isExitCommand, printSlashHelp } from "./registry.js";
@@ -43,6 +44,11 @@ export async function runTopLevelCommand({ command, client, cwd, config, session
       console.log("");
       await startInteractive({ initialActiveSkills: [skill] });
     }
+    return;
+  }
+  if (command === "trace") {
+    const session = (await sessionStore.listSessions())[0];
+    await showTrace({ sessionStore, session });
     return;
   }
   if (command === "theme") {
@@ -84,6 +90,11 @@ export async function runSlashCommand({ command, client, config, sessionStore, t
     return skill ? { kind: "skill", skill } : undefined;
   }
 
+  if (command === "/trace") {
+    await showTrace({ sessionStore, session });
+    return;
+  }
+
   if (command === "/new") {
     const nextSession = await sessionStore.createSession({ model: config.model });
     console.log("New conversation: " + shortSessionId(nextSession.id));
@@ -122,4 +133,3 @@ export async function runSlashCommand({ command, client, config, sessionStore, t
 function isInteractiveTerminal() {
   return process.stdin.isTTY && process.stdout.isTTY;
 }
-
