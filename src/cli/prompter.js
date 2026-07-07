@@ -9,12 +9,13 @@ export function createPrompter(autoApproveShell) {
       process.stdin.isTTY &&
       process.stdout.isTTY
     ) {
+      const alwaysLabel = options.kind === "shell-command-approval" ? "Always Approve This Command" : "Always Approve";
       const selected = await selectOption({
         title: question,
         options: [
           { label: "Approve", value: "approve" },
           { label: "Deny", value: "deny" },
-          { label: "Always Approve", value: "always" },
+          { label: alwaysLabel, value: "always" },
         ],
         filterable: false,
       });

@@ -1,6 +1,7 @@
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, extname, resolve } from "node:path";
+import { normalizeShellCommand } from "../permissions/shellPolicy.js";
 
 export async function loadSettingsEnv({ settingsPath } = {}) {
   const path = resolveSettingsPath(settingsPath ?? process.env.DEECOO_SETTINGS_PATH);
@@ -8,14 +9,14 @@ export async function loadSettingsEnv({ settingsPath } = {}) {
   try {
     await access(path);
   } catch {
-    return { path, loaded: false, env: {} };
+    return { path, loaded: false, env: {}, permissions: normalizeSettingsPermissions({}) };
   }
 
   const raw = await readFile(path, "utf8");
   const parsed = JSON.parse(raw);
   const env = normalizeSettingsEnv(parsed);
 
-  return { path, loaded: true, env };
+  return { path, loaded: true, env, permissions: normalizeSettingsPermissions(parsed) };
 }
 
 export function applySettingsEnv(env, { overrideKeys = [] } = {}) {
@@ -46,6 +47,32 @@ export async function writeSettingsEnv({ settingsPath, env }) {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, JSON.stringify(next, null, 2) + "\n", "utf8");
   return { path, env: next.env };
+}
+
+export async function addApprovedShellCommand({ settingsPath, command }) {
+  const normalizedCommand = normalizeShellCommand(command);
+  if (!normalizedCommand) throw new Error("command is required");
+
+  const path = resolveSettingsPath(settingsPath ?? process.env.DEECOO_SETTINGS_PATH);
+  const existing = await readSettingsFile(path);
+  const permissions = normalizeSettingsPermissions(existing);
+  const approvedCommands = new Set(permissions.shell.approvedCommands);
+  approvedCommands.add(normalizedCommand);
+
+  const next = {
+    ...existing,
+    permissions: {
+      ...(existing.permissions && typeof existing.permissions === "object" ? existing.permissions : {}),
+      shell: {
+        ...(existing.permissions?.shell && typeof existing.permissions.shell === "object" ? existing.permissions.shell : {}),
+        approvedCommands: [...approvedCommands].sort(),
+      },
+    },
+  };
+
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, JSON.stringify(next, null, 2) + "\n", "utf8");
+  return { path, approvedCommands: next.permissions.shell.approvedCommands };
 }
 
 export function collectSettingsEnv(env) {
@@ -99,6 +126,18 @@ function normalizeSettingsEnv(settings) {
   }
 
   return env;
+}
+
+function normalizeSettingsPermissions(settings) {
+  const approvedCommands = Array.isArray(settings.permissions?.shell?.approvedCommands)
+    ? settings.permissions.shell.approvedCommands.map(normalizeShellCommand).filter(Boolean)
+    : [];
+
+  return {
+    shell: {
+      approvedCommands: [...new Set(approvedCommands)],
+    },
+  };
 }
 
 function isSupportedSettingsKey(key) {

@@ -47,6 +47,11 @@ The resulting `~/.deecoo/settings.json` looks like:
     "DEEPSEEK_API_KEY": "sk-...",
     "DEECOO_BASE_URL": "https://api.deepseek.com",
     "DEECOO_MODEL": "deepseek-v4-pro"
+  },
+  "permissions": {
+    "shell": {
+      "approvedCommands": []
+    }
   }
 }
 ```
@@ -142,6 +147,8 @@ DEECOO_PERMISSION_MODE=ask-once
 
 Edit approval prompts use a three-option selector: `Approve`, `Deny`, and `Always Approve`. `Always Approve` allows subsequent workspace file edits in the current Deecoo process without asking again.
 
+Shell approval prompts also support `Always Approve This Command`. That stores the exact normalized command under `permissions.shell.approvedCommands` in `settings.json`, so the same command can run later without another prompt. Destructive commands blocked by guardrails are still blocked even if they appear in settings.
+
 `--yes` only auto-approves guarded shell commands. For scripted runs that should also allow workspace file writes, pass `--yes-files` or set `DEECOO_PERMISSION_MODE=workspace-write` explicitly:
 
 ```bash
@@ -229,7 +236,7 @@ deecoo "review this project"
 - Reads `DEEPSEEK_API_KEY` and `DEECOO_*` settings from `~/.deecoo/settings.json`, environment, and optional local `.env`
 - Calls DeepSeek through the OpenAI-compatible Chat Completions API
 - Runs a minimal agent loop with local tool execution
-- Provides workspace read/search tools, guarded file writes, and guarded shell execution
+- Provides workspace read/search tools, guarded file writes, guarded shell execution, and persisted exact shell-command approvals
 - Blocks common sensitive and heavy paths such as `.env`, `.git`, and `node_modules`
 
 

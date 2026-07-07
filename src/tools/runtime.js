@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { buildToolSchemas, normalizeWorkerMode, TOOL_CAPABILITIES, WORKER_TOOL_PROFILES } from "./definitions.js";
 import { editFile, listFiles, readWorkspaceFile, writeWorkspaceFile } from "./files.js";
 import { gitDiff, gitStatus } from "./git.js";
+import { normalizeShellCommand } from "../permissions/shellPolicy.js";
 import { toolExceptionResult } from "./results.js";
 import { searchText } from "./search.js";
 import { runShell } from "./shell.js";
@@ -12,6 +13,8 @@ export function createToolRuntime({
   prompter,
   allowShellWithoutPrompt = false,
   permissionMode = "ask-once",
+  approvedShellCommands = [],
+  onApproveShellCommand,
 }) {
   const workspace = resolve(cwd);
   let realWorkspace;
@@ -22,7 +25,8 @@ export function createToolRuntime({
   const permissionState = {
     mode: permissionMode,
     fileWriteApprovedForTask: false,
-    shellApprovedAlways: false,
+    approvedShellCommands: new Set(approvedShellCommands.map(normalizeShellCommand).filter(Boolean)),
+    onApproveShellCommand,
     readCache: new Map(),
     taskToolPolicy: undefined,
   };

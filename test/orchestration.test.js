@@ -383,10 +383,25 @@ test("shell guardrails classify destructive commands as blocked", async () => {
   });
 
   assert.equal(classifyShellCommand("rm -rf /").level, "block");
+  assert.equal(classifyShellCommand("rm -r -f /").level, "block");
+  assert.equal(classifyShellCommand("rm --recursive --force /tmp/x").level, "block");
+  assert.equal(classifyShellCommand("rm file.txt").level, "warn");
   const result = await runtime.execute("run_shell", { command: "rm -rf /" });
 
   assert.equal(result.ok, false);
   assert.equal(result.code, "SHELL_COMMAND_BLOCKED");
+
+  const approvedRuntime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("blocked shell command should not prompt");
+    },
+    approvedShellCommands: ["rm -rf /"],
+  });
+  const approvedResult = await approvedRuntime.execute("run_shell", { command: "rm -rf /" });
+
+  assert.equal(approvedResult.ok, false);
+  assert.equal(approvedResult.code, "SHELL_COMMAND_BLOCKED");
 });
 
 test("project index summarizes manifests, scripts, source, and tests", async () => {

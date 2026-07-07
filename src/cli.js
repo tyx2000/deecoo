@@ -9,7 +9,7 @@ import { getGitBranch } from "./cli/git.js";
 import { createPrompter } from "./cli/prompter.js";
 import { runTask } from "./agent/taskRunner.js";
 import { loadConfig } from "./config/env.js";
-import { applySettingsEnv, loadSettingsEnv } from "./config/settings.js";
+import { addApprovedShellCommand, applySettingsEnv, loadSettingsEnv } from "./config/settings.js";
 import { createDeepSeekClient } from "./llm/deepseekClient.js";
 import { createSessionStore } from "./session/store.js";
 import { listCodexSkills, loadCodexSkill } from "./skills/install.js";
@@ -66,6 +66,8 @@ export async function main(argv) {
     prompter,
     allowShellWithoutPrompt: args.yes,
     permissionMode: args.yesFiles ? "workspace-write" : config.permissionMode,
+    approvedShellCommands: settings.permissions.shell.approvedCommands,
+    onApproveShellCommand: (command) => addApprovedShellCommand({ settingsPath: args.settings, command }),
   });
   const sessionStore = await createSessionStore(cwd);
 

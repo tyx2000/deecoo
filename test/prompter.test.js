@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createPrompter } from "../src/cli/prompter.js";
+import { addApprovedShellCommand, loadSettingsEnv } from "../src/config/settings.js";
 import { createToolRuntime } from "../src/tools/runtime.js";
 
 test("--yes prompter auto-approves shell commands only", async () => {
@@ -68,4 +69,40 @@ test("explicit file approval mode allows scripted workspace writes", async () =>
   });
 
   assert.equal(result.ok, true);
+});
+
+test("always shell approval persists the exact command in settings", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-shell-approval-workspace-"));
+  const settingsDir = await mkdtemp(join(tmpdir(), "deecoo-shell-approval-settings-"));
+  const command = "node -e \"console.log('approved')\"";
+  let prompts = 0;
+
+  const tools = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      prompts += 1;
+      return prompts === 1 ? "always" : "deny";
+    },
+    onApproveShellCommand: (approvedCommand) => addApprovedShellCommand({ settingsPath: settingsDir, command: approvedCommand }),
+  });
+
+  const first = await tools.execute("run_shell", { command });
+  const second = await tools.execute("run_shell", { command });
+  const settings = await loadSettingsEnv({ settingsPath: settingsDir });
+
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  assert.equal(prompts, 1);
+  assert.deepEqual(settings.permissions.shell.approvedCommands, [command]);
+
+  const reloadedTools = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("approved settings command should not prompt");
+    },
+    approvedShellCommands: settings.permissions.shell.approvedCommands,
+  });
+  const reloaded = await reloadedTools.execute("run_shell", { command });
+
+  assert.equal(reloaded.ok, true);
 });
