@@ -15,6 +15,8 @@ export function createToolRuntime({
   permissionMode = "ask-once",
   approvedShellCommands = [],
   onApproveShellCommand,
+  autoApproveAllShell = false,
+  onApproveAllShellCommands,
 }) {
   const workspace = resolve(cwd);
   let realWorkspace;
@@ -27,6 +29,8 @@ export function createToolRuntime({
     fileWriteApprovedForTask: false,
     approvedShellCommands: new Set(approvedShellCommands.map(normalizeShellCommand).filter(Boolean)),
     onApproveShellCommand,
+    autoApproveAllShell,
+    onApproveAllShellCommands,
     readCache: new Map(),
     taskToolPolicy: undefined,
   };

@@ -50,7 +50,8 @@ The resulting `~/.deecoo/settings.json` looks like:
   },
   "permissions": {
     "shell": {
-      "approvedCommands": []
+      "approvedCommands": [],
+      "autoApproveAll": false
     }
   }
 }
@@ -147,7 +148,9 @@ DEECOO_PERMISSION_MODE=ask-once
 
 Edit approval prompts use a three-option selector: `Approve`, `Deny`, and `Always Approve`. `Always Approve` allows subsequent workspace file edits in the current Deecoo process without asking again.
 
-Shell approval prompts also support `Always Approve This Command`. That stores the exact normalized command under `permissions.shell.approvedCommands` in `settings.json`, so the same command can run later without another prompt. Destructive commands blocked by guardrails are still blocked even if they appear in settings.
+Shell commands are classified by `src/permissions/shellPolicy.js` into `allow`, `warn`, and `block`. `allow`-level commands (e.g. read-only or otherwise unremarkable commands) never prompt. `warn`-level commands (e.g. `rm`, `git push`, `npm install`, network access) prompt with a four-option selector: `Approve`, `Deny`, `Always Approve This Command`, and `Always Approve All Commands`.
+
+`Always Approve This Command` stores the exact normalized command under `permissions.shell.approvedCommands` in `settings.json`, so that same command can run later without another prompt. `Always Approve All Commands` sets `permissions.shell.autoApproveAll` in `settings.json`, suppressing shell prompts entirely for the rest of this and future sessions. Destructive commands classified as `block` (`git reset --hard`, `sudo`, recursive force `rm`, piping a download into a shell, etc.) are always refused regardless of these settings.
 
 `--yes` only auto-approves guarded shell commands. For scripted runs that should also allow workspace file writes, pass `--yes-files` or set `DEECOO_PERMISSION_MODE=workspace-write` explicitly:
 

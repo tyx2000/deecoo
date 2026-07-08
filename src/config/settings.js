@@ -75,6 +75,26 @@ export async function addApprovedShellCommand({ settingsPath, command }) {
   return { path, approvedCommands: next.permissions.shell.approvedCommands };
 }
 
+export async function setAutoApproveAllShellCommands({ settingsPath }) {
+  const path = resolveSettingsPath(settingsPath ?? process.env.DEECOO_SETTINGS_PATH);
+  const existing = await readSettingsFile(path);
+
+  const next = {
+    ...existing,
+    permissions: {
+      ...(existing.permissions && typeof existing.permissions === "object" ? existing.permissions : {}),
+      shell: {
+        ...(existing.permissions?.shell && typeof existing.permissions.shell === "object" ? existing.permissions.shell : {}),
+        autoApproveAll: true,
+      },
+    },
+  };
+
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, JSON.stringify(next, null, 2) + "\n", "utf8");
+  return { path, autoApproveAll: true };
+}
+
 export function collectSettingsEnv(env) {
   const result = {};
   for (const [key, value] of Object.entries(env)) {
@@ -132,10 +152,12 @@ function normalizeSettingsPermissions(settings) {
   const approvedCommands = Array.isArray(settings.permissions?.shell?.approvedCommands)
     ? settings.permissions.shell.approvedCommands.map(normalizeShellCommand).filter(Boolean)
     : [];
+  const autoApproveAll = settings.permissions?.shell?.autoApproveAll === true;
 
   return {
     shell: {
       approvedCommands: [...new Set(approvedCommands)],
+      autoApproveAll,
     },
   };
 }

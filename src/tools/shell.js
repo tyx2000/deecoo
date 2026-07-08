@@ -20,15 +20,20 @@ export async function runShell(workspace, args, prompter, allowShellWithoutPromp
     };
   }
   const approvedCommand = permissionState.approvedShellCommands?.has(approvedCommandKey);
-  const decision =
-    allowShellWithoutPrompt || approvedCommand
-      ? "approve"
-      : await prompter(shellPrompt(command, policy), { kind: "shell-command-approval", policy, command });
+  const autoApproved =
+    allowShellWithoutPrompt || permissionState.autoApproveAllShell || policy.level === "allow" || approvedCommand;
+  const decision = autoApproved
+    ? "approve"
+    : await prompter(shellPrompt(command, policy), { kind: "shell-command-approval", policy, command });
   if (decision === "always") {
     permissionState.approvedShellCommands?.add(approvedCommandKey);
     await permissionState.onApproveShellCommand?.(approvedCommandKey);
   }
-  const allowed = decision === true || decision === "approve" || decision === "always";
+  if (decision === "always-all") {
+    permissionState.autoApproveAllShell = true;
+    await permissionState.onApproveAllShellCommands?.();
+  }
+  const allowed = decision === true || decision === "approve" || decision === "always" || decision === "always-all";
   if (!allowed) return { ok: false, error: "User denied shell command." };
 
   try {

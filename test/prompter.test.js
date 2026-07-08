@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createPrompter } from "../src/cli/prompter.js";
-import { addApprovedShellCommand, loadSettingsEnv } from "../src/config/settings.js";
+import { addApprovedShellCommand, loadSettingsEnv, setAutoApproveAllShellCommands } from "../src/config/settings.js";
 import { createToolRuntime } from "../src/tools/runtime.js";
 
 test("--yes prompter auto-approves shell commands only", async () => {
@@ -71,10 +71,28 @@ test("explicit file approval mode allows scripted workspace writes", async () =>
   assert.equal(result.ok, true);
 });
 
+test("safe shell commands classified as allow-level never prompt", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-shell-allow-workspace-"));
+  let prompts = 0;
+
+  const tools = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      prompts += 1;
+      return "deny";
+    },
+  });
+
+  const result = await tools.execute("run_shell", { command: "node -e \"console.log('safe')\"" });
+
+  assert.equal(prompts, 0);
+  assert.equal(result.ok, true);
+});
+
 test("always shell approval persists the exact command in settings", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "deecoo-shell-approval-workspace-"));
   const settingsDir = await mkdtemp(join(tmpdir(), "deecoo-shell-approval-settings-"));
-  const command = "node -e \"console.log('approved')\"";
+  const command = "chmod 755 .";
   let prompts = 0;
 
   const tools = createToolRuntime({
@@ -105,4 +123,53 @@ test("always shell approval persists the exact command in settings", async () =>
   const reloaded = await reloadedTools.execute("run_shell", { command });
 
   assert.equal(reloaded.ok, true);
+});
+
+test("always-all shell approval bypasses future prompts for different warn-level commands and persists", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-shell-approve-all-workspace-"));
+  const settingsDir = await mkdtemp(join(tmpdir(), "deecoo-shell-approve-all-settings-"));
+  let prompts = 0;
+
+  const tools = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      prompts += 1;
+      return "always-all";
+    },
+    onApproveAllShellCommands: () => setAutoApproveAllShellCommands({ settingsPath: settingsDir }),
+  });
+
+  const first = await tools.execute("run_shell", { command: "chmod 755 ." });
+  const second = await tools.execute("run_shell", { command: "chmod 700 ." });
+  const settings = await loadSettingsEnv({ settingsPath: settingsDir });
+
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  assert.equal(prompts, 1);
+  assert.equal(settings.permissions.shell.autoApproveAll, true);
+
+  const reloadedTools = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("approve-all setting should suppress prompts on reload");
+    },
+    autoApproveAllShell: settings.permissions.shell.autoApproveAll,
+  });
+  const reloaded = await reloadedTools.execute("run_shell", { command: "chmod 640 ." });
+
+  assert.equal(reloaded.ok, true);
+});
+
+test("always-all does not bypass hard-blocked commands", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-shell-block-workspace-"));
+
+  const tools = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => "always-all",
+  });
+
+  const result = await tools.execute("run_shell", { command: "sudo rm -rf /" });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "SHELL_COMMAND_BLOCKED");
 });

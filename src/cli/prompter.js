@@ -10,13 +10,17 @@ export function createPrompter(autoApproveShell) {
       process.stdout.isTTY
     ) {
       const alwaysLabel = options.kind === "shell-command-approval" ? "Always Approve This Command" : "Always Approve";
+      const promptOptions = [
+        { label: "Approve", value: "approve" },
+        { label: "Deny", value: "deny" },
+        { label: alwaysLabel, value: "always" },
+      ];
+      if (options.kind === "shell-command-approval") {
+        promptOptions.push({ label: "Always Approve All Commands", value: "always-all" });
+      }
       const selected = await selectOption({
         title: question,
-        options: [
-          { label: "Approve", value: "approve" },
-          { label: "Deny", value: "deny" },
-          { label: alwaysLabel, value: "always" },
-        ],
+        options: promptOptions,
         filterable: false,
       });
       return selected?.value ?? "deny";
