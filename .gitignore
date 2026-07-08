@@ -2,11 +2,13 @@
 .env.*
 !.env.example
 settings.json
+.deecoo/
 
 node_modules/
 dist/
 build/
 coverage/
+eval/reports/
 .next/
 
 .DS_Store

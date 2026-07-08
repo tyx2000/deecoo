@@ -252,9 +252,28 @@ Workers currently run in-process and return a structured result to the main agen
 
 ## Harness Engineering
 
-Deecoo records a structured task spec, workflow state, verification plan, project index snapshot, and audit trace for each run. Audit files are stored under the project session directory and redact common secret patterns before writing.
+Deecoo records a structured task spec, workflow state, verification plan, project index snapshot, workspace snapshot, and audit trace for each run. Audit files are stored under the project session directory and redact common secret patterns before writing.
+
+The workspace snapshot is intentionally small: current working directory, git status, `git diff --stat`, package metadata, project instructions, README excerpt, and a shallow directory tree. Deecoo looks for project instructions in priority order: `.deecoo.md`, `AGENTS.md`, `CLAUDE.md`, then `README.md` as a fallback. This gives the remote model early project memory with skill-like rules such as package manager, verification commands, patch size, and files that should not be edited. Deecoo also maintains `.deecoo/PROJECT.md` inside each workspace as a generated project-context cache for remote models. The generated section is refreshed on startup and after each task attempt; manual notes can live outside the generated markers.
 
 The runtime also exposes tool capability metadata, shell-command guardrails, structured review schema validation, review finding aggregation, project memory, and output adapters for run summaries, review reports, and verification records.
+
+Harness behavior can be evaluated with the fixture-based eval suite:
+
+```bash
+npm run eval
+npm run eval -- --case small-bugfix
+npm run eval -- --case small-bugfix --run /path/to/audit.json
+npm run eval -- --run /path/to/audit.json --suggest
+npm run eval -- --run /path/to/audit.json --auto-case
+deecoo eval
+```
+
+Eval cases live in `eval/cases`, fixture run records live in `eval/fixtures`, and generated reports are written to `eval/reports`. The suite scores completion, request classification, required and forbidden tool usage, verification behavior, final output coverage, and unexpected tool failures. Fixture runs are the deterministic default; real audit JSON can be scored explicitly with `--run`.
+
+Use `--suggest` to rank candidate cases for a real audit, or `--auto-case` to score the audit against the highest-scoring match. Without `--suggest` or `--auto-case`, real audit scoring requires `--case` so one run is not accidentally compared against unrelated task types.
+
+`/trace` and `deecoo trace` show the latest audit path plus ranked eval suggestions and ready-to-run eval commands when cases are available. `/eval` and `deecoo eval` score the latest audit directly against the best matching eval case.
 
 The harness is split by capability boundary:
 

@@ -2,6 +2,7 @@ import { writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { writeSettingsEnv } from "../config/settings.js";
 import { listRunAudits, readRunAudit } from "../observability/audit.js";
+import { buildTraceEvalResultLines, buildTraceEvalSuggestionLines } from "./evalTrace.js";
 import { listCodexSkills, loadCodexSkill } from "../skills/install.js";
 import { createSpinner } from "../terminal/spinner.js";
 import { selectOption } from "../terminal/select.js";
@@ -229,6 +230,7 @@ export async function showTrace({ sessionStore, session }) {
     return;
   }
   const audit = await readRunAudit(audits[0].path);
+  const evalLines = await safeTraceEvalSuggestionLines({ audit, auditPath: audits[0].path });
   console.log([
     "Latest trace: " + audits[0].path,
     "task: " + truncateOneLine(audit.task, 100),
@@ -238,7 +240,32 @@ export async function showTrace({ sessionStore, session }) {
     "steps: " + (audit.trace?.length ?? 0),
     "tool calls:",
     ...(audit.trace ?? []).slice(-12).map((entry) => "  - " + entry.tool + " " + (entry.ok ? "ok" : "failed") + " " + truncateOneLine(entry.target, 80)),
+    ...evalLines,
   ].join("\n"));
+}
+
+export async function showEval({ sessionStore, session }) {
+  if (!session) {
+    console.log("No active conversation.");
+    return;
+  }
+  const audits = await listRunAudits(sessionStore, session);
+  if (audits.length === 0) {
+    console.log("No audit traces for this conversation.");
+    return;
+  }
+  const audit = await readRunAudit(audits[0].path);
+  const lines = await buildTraceEvalResultLines({ audit, auditPath: audits[0].path });
+  console.log(lines.join("\n"));
+}
+
+async function safeTraceEvalSuggestionLines({ audit, auditPath }) {
+  try {
+    const lines = await buildTraceEvalSuggestionLines({ audit, auditPath });
+    return lines.length ? ["", ...lines] : [];
+  } catch {
+    return [];
+  }
 }
 
 function normalizeModels(result) {

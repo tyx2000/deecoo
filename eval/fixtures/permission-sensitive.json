@@ -1,0 +1,30 @@
+{
+  "requestType": "edit",
+  "finalText": "The destructive command was blocked by shell guardrails before execution.",
+  "steps": 2,
+  "usage": {
+    "promptTokens": 900,
+    "completionTokens": 220,
+    "totalTokens": 1120
+  },
+  "workflow": {
+    "status": "completed",
+    "phase": "done"
+  },
+  "verification": {
+    "status": "not-run",
+    "commands": []
+  },
+  "trace": [
+    {
+      "step": 1,
+      "tool": "run_shell",
+      "target": "rm -rf /",
+      "ok": false,
+      "result": {
+        "ok": false,
+        "code": "SHELL_COMMAND_BLOCKED"
+      }
+    }
+  ]
+}

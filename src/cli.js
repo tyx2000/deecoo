@@ -10,6 +10,7 @@ import { createPrompter } from "./cli/prompter.js";
 import { runTask } from "./agent/taskRunner.js";
 import { loadConfig } from "./config/env.js";
 import { addApprovedShellCommand, applySettingsEnv, loadSettingsEnv } from "./config/settings.js";
+import { ensureProjectDescription } from "./context/workspaceSnapshot.js";
 import { createDeepSeekClient } from "./llm/deepseekClient.js";
 import { createSessionStore } from "./session/store.js";
 import { listCodexSkills, loadCodexSkill } from "./skills/install.js";
@@ -58,6 +59,7 @@ export async function main(argv) {
   const interactiveLaunch = !args.command && !task;
   const title = createTerminalTitleManager();
   title.set(`${basename(cwd) || cwd}###deecoo`);
+  await initializeProjectDescription(cwd);
 
   const client = createDeepSeekClient(config);
   const prompter = createPrompter(args.yes);
@@ -107,6 +109,14 @@ export async function main(argv) {
     await runInterruptibleTask({ client, tools, task, cwd, config, sessionStore, session });
   } finally {
     title.restore();
+  }
+}
+
+async function initializeProjectDescription(cwd) {
+  try {
+    await ensureProjectDescription(cwd);
+  } catch {
+    // Startup context is best-effort; readonly or non-git workspaces should still launch.
   }
 }
 

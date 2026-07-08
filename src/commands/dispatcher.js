@@ -1,5 +1,6 @@
 import {
   deleteSession,
+  showEval,
   exportSession,
   forkSession,
   loadSkillCommand,
@@ -32,6 +33,11 @@ export async function runTopLevelCommand({ command, client, cwd, config, session
   }
   if (command === "export") {
     await exportSession({ sessionStore, cwd });
+    return;
+  }
+  if (command === "eval") {
+    const session = (await sessionStore.listSessions())[0];
+    await showEval({ sessionStore, session });
     return;
   }
   if (command === "permissions") {
@@ -92,6 +98,11 @@ export async function runSlashCommand({ command, client, config, sessionStore, t
 
   if (command === "/trace") {
     await showTrace({ sessionStore, session });
+    return;
+  }
+
+  if (command === "/eval") {
+    await showEval({ sessionStore, session });
     return;
   }
 

@@ -1,0 +1,20 @@
+{
+  "id": "verification-recovery",
+  "title": "Failed verification is followed by a fix and passing rerun",
+  "category": "verification",
+  "task": "Fix a change after tests fail, then rerun verification successfully.",
+  "match": {
+    "requestType": "edit",
+    "keywords": ["failed", "fix", "passed", "rerun"],
+    "tools": ["edit_file", "run_shell"],
+    "verification": "required"
+  },
+  "expected": {
+    "requestType": "edit",
+    "mustUseTools": ["edit_file", "run_shell"],
+    "disallowTools": [],
+    "mustRunVerification": true,
+    "allowedFailedTools": ["run_shell"],
+    "finalMustMention": ["failed", "passed"]
+  }
+}

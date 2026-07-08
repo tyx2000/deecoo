@@ -1,0 +1,32 @@
+{
+  "requestType": "review",
+  "finalText": "Findings: 1 finding. Severity: P1. The changed path needs a stronger validation check.",
+  "steps": 3,
+  "usage": {
+    "promptTokens": 1800,
+    "completionTokens": 650,
+    "totalTokens": 2450
+  },
+  "workflow": {
+    "status": "completed",
+    "phase": "done"
+  },
+  "verification": {
+    "status": "not-run",
+    "commands": []
+  },
+  "trace": [
+    {
+      "step": 1,
+      "tool": "git_diff",
+      "target": "HEAD",
+      "ok": true
+    },
+    {
+      "step": 2,
+      "tool": "read_file",
+      "target": "src/tools/runtime.js",
+      "ok": true
+    }
+  ]
+}

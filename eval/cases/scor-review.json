@@ -1,0 +1,19 @@
+{
+  "id": "scor-review",
+  "title": "S-COR review stays read-only and returns structured findings",
+  "category": "review",
+  "task": "Use s-cor to review the current project change.",
+  "match": {
+    "requestType": "review",
+    "keywords": ["review", "s-cor", "findings", "severity"],
+    "tools": ["git_diff", "read_file"],
+    "verification": "not-run"
+  },
+  "expected": {
+    "requestType": "review",
+    "mustUseTools": ["git_diff", "read_file"],
+    "disallowTools": ["edit_file", "write_file", "run_shell"],
+    "mustRunVerification": false,
+    "finalMustMention": ["findings", "severity"]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "id": "small-bugfix",
+  "title": "Small bugfix with focused edit and verification",
+  "category": "implementation",
+  "task": "Fix a small runtime bug and verify the test suite.",
+  "match": {
+    "requestType": "edit",
+    "keywords": ["bug", "fix", "fixed", "test"],
+    "tools": ["read_file", "edit_file", "run_shell"],
+    "verification": "required"
+  },
+  "expected": {
+    "requestType": "edit",
+    "mustUseTools": ["read_file", "edit_file", "run_shell"],
+    "disallowTools": ["agent"],
+    "mustRunVerification": true,
+    "finalMustMention": ["fixed", "npm test"]
+  }
+}

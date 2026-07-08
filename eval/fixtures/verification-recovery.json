@@ -1,0 +1,53 @@
+{
+  "requestType": "edit",
+  "finalText": "The first verification failed, I fixed the issue, and the rerun passed.",
+  "steps": 5,
+  "usage": {
+    "promptTokens": 2000,
+    "completionTokens": 700,
+    "totalTokens": 2700
+  },
+  "workflow": {
+    "status": "completed",
+    "phase": "done"
+  },
+  "verification": {
+    "status": "failed-then-passed",
+    "commands": [
+      {
+        "command": "npm test",
+        "ok": false
+      },
+      {
+        "command": "npm test",
+        "ok": true
+      }
+    ]
+  },
+  "trace": [
+    {
+      "step": 1,
+      "tool": "run_shell",
+      "target": "npm test",
+      "ok": false
+    },
+    {
+      "step": 2,
+      "tool": "read_file",
+      "target": "src/runtime.js",
+      "ok": true
+    },
+    {
+      "step": 3,
+      "tool": "edit_file",
+      "target": "src/runtime.js",
+      "ok": true
+    },
+    {
+      "step": 4,
+      "tool": "run_shell",
+      "target": "npm test",
+      "ok": true
+    }
+  ]
+}

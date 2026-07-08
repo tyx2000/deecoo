@@ -11,6 +11,7 @@ import { createSubagentRuntime } from "../src/agent/subagents/runtime.js";
 import { buildContextMessages, contextItem } from "../src/context/builder.js";
 import { buildProjectIndex } from "../src/context/projectIndex.js";
 import { buildReviewScopeMessages, resolveReviewScope } from "../src/context/reviewScope.js";
+import { buildWorkspaceSnapshot, buildWorkspaceSnapshotMessages, ensureProjectDescription } from "../src/context/workspaceSnapshot.js";
 import { buildTaskSpec } from "../src/harness/taskSpec.js";
 import { advanceWorkflowState, createWorkflowState } from "../src/harness/workflow.js";
 import { loadProjectMemory, recordProjectMemory } from "../src/memory/projectMemory.js";
@@ -94,6 +95,18 @@ test("simple prompts omit complex coordination protocol", () => {
   const prompt = buildSystemPrompt("/tmp/workspace", "general", [], { complex: false });
 
   assert.equal(prompt.includes("Complex-task coordination:"), false);
+});
+
+test("base prompt states CLI operating procedure", () => {
+  const prompt = buildSystemPrompt("/tmp/workspace", "edit", [], { complex: false });
+
+  assert.match(prompt, /Core operating procedure/);
+  assert.match(prompt, /You cannot access files directly/);
+  assert.match(prompt, /Before editing, inspect the relevant current files/);
+  assert.match(prompt, /Never access files outside the workspace/);
+  assert.match(prompt, /When done, summarize/);
+  assert.match(prompt, /files changed/);
+  assert.match(prompt, /tests or checks run/);
 });
 
 test("tool observations are compacted before returning to the model", () => {
@@ -417,6 +430,61 @@ test("project index summarizes manifests, scripts, source, and tests", async () 
   assert.equal(index.packageManager, "npm");
   assert.equal(index.scripts.test, "node --test");
   assert.equal(index.testFiles.includes("foo.test.js"), true);
+});
+
+test("workspace snapshot includes bounded high-signal project context", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-workspace-snapshot-"));
+  await writeFile(
+    join(workspace, "package.json"),
+    JSON.stringify({ name: "demo", scripts: { test: "node --test" }, dependencies: { leftpad: "1.0.0" } }),
+    "utf8",
+  );
+  await writeFile(join(workspace, "README.md"), "# Demo\n\nRun tests with npm test.", "utf8");
+  await writeFile(join(workspace, "AGENTS.md"), "Prefer focused changes.", "utf8");
+  await writeFile(join(workspace, ".deecoo.md"), "# Project Instructions\n\n- Run npm test before final answer.", "utf8");
+  await writeFile(join(workspace, "index.js"), "console.log('x')", "utf8");
+
+  const snapshot = await buildWorkspaceSnapshot(workspace);
+  const messages = await buildWorkspaceSnapshotMessages(workspace);
+
+  assert.equal(snapshot.cwd, workspace);
+  assert.equal(snapshot.package.name, "demo");
+  assert.equal(snapshot.package.scripts.test, "node --test");
+  assert.equal(snapshot.package.dependencies.includes("leftpad"), true);
+  assert.match(snapshot.readme.content, /Run tests/);
+  assert.equal(snapshot.projectInstructions.primary.path, ".deecoo.md");
+  assert.equal(snapshot.projectInstructions.additional[0].path, "AGENTS.md");
+  assert.equal(snapshot.tree.lines.includes("index.js"), true);
+  assert.match(messages[0].content, /Workspace snapshot/);
+  assert.match(messages[0].content, /primary project instructions \(.deecoo.md\)/);
+  assert.match(messages[0].content, /git:/);
+});
+
+test("workspace snapshot falls back to README when no instruction file exists", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-workspace-instructions-"));
+  await writeFile(join(workspace, "README.md"), "# Demo\n\nUse small patches.", "utf8");
+
+  const snapshot = await buildWorkspaceSnapshot(workspace);
+
+  assert.equal(snapshot.projectInstructions.primary.path, "README.md");
+  assert.equal(snapshot.projectInstructions.primary.fallback, true);
+  assert.match(snapshot.projectInstructions.primary.content, /Use small patches/);
+});
+
+test("project description refreshes generated section without removing manual notes", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-project-description-"));
+  await writeFile(join(workspace, "package.json"), JSON.stringify({ name: "demo", scripts: { check: "node --check index.js" } }), "utf8");
+  await writeFile(join(workspace, "README.md"), "# Demo", "utf8");
+
+  const first = await ensureProjectDescription(workspace);
+  await writeFile(first.path, "Manual note.\n\n" + first.content, "utf8");
+  await writeFile(join(workspace, "package.json"), JSON.stringify({ name: "demo", scripts: { test: "node --test" } }), "utf8");
+  await ensureProjectDescription(workspace);
+
+  const content = await readFile(first.path, "utf8");
+  assert.match(content, /Manual note/);
+  assert.match(content, /test: `node --test`/);
+  assert.doesNotMatch(content, /check: `node --check index.js`/);
 });
 
 test("review aggregation removes duplicates and sorts by severity", () => {

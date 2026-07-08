@@ -262,6 +262,7 @@ function toolTraceEvent({ step, name, args, result }) {
     tool: name,
     target: activity.target ?? args?.path ?? args?.directory ?? args?.command ?? args?.query ?? "",
     ok: result?.ok !== false,
+    code: result?.code ?? "",
     cached: Boolean(result?.cached),
     additions: activity.additions ?? 0,
     deletions: activity.deletions ?? 0,

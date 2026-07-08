@@ -76,6 +76,7 @@ export function printHelp() {
     "  deecoo model",
     "  deecoo resume",
     "  deecoo delete",
+    "  deecoo eval",
     "  deecoo export",
     "  deecoo permissions",
     "  deecoo skills",

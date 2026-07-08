@@ -4,6 +4,7 @@ import { analyzeTaskCoordination } from "./coordination.js";
 import { buildContextMessages, contextItem } from "../context/builder.js";
 import { buildProjectIndex, buildProjectIndexMessages } from "../context/projectIndex.js";
 import { buildReviewScopeMessages } from "../context/reviewScope.js";
+import { buildWorkspaceSnapshotMessages, ensureProjectDescription } from "../context/workspaceSnapshot.js";
 import { buildTaskSpec, taskSpecMessage } from "../harness/taskSpec.js";
 import { loadProjectMemory, memoryContextMessage, recordProjectMemory, summarizeRunForMemory } from "../memory/projectMemory.js";
 import { saveRunAudit } from "../observability/audit.js";
@@ -29,6 +30,7 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
   const taskSpec = buildTaskSpec({ task, cwd, coordination, activeSkills });
   const projectIndex = await buildProjectIndex(cwd);
   const projectIndexMessages = await buildProjectIndexMessages(cwd);
+  const workspaceSnapshotMessages = await buildWorkspaceSnapshotMessages(cwd);
   const memory = sessionStore ? await loadProjectMemory(sessionStore) : undefined;
   const memoryMessage = memoryContextMessage(memory);
   const verificationPlan = buildVerificationPlan({ taskSpec, projectIndex });
@@ -38,6 +40,7 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
     contextItem(memoryMessage, 80),
     ...contextMessages.map((message) => contextItem(message, 50)),
     ...handoffMessages.map((message) => contextItem(message, 70)),
+    ...workspaceSnapshotMessages.map((message) => contextItem(message, 65)),
     ...projectIndexMessages.map((message) => contextItem(message, 60)),
   ]);
   const reviewScopeMessages = await buildReviewScopeMessages({
@@ -118,6 +121,7 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
         taskSpec,
         verificationPlan,
         elapsedMs,
+        finalText: result.finalText,
         usage: result.usage,
         workflow: result.workflow,
         verification: result.verification,
@@ -155,6 +159,16 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
     return {
       elapsedMs: Date.now() - startedAt,
     };
+  } finally {
+    await refreshProjectDescription(cwd);
+  }
+}
+
+async function refreshProjectDescription(cwd) {
+  try {
+    await ensureProjectDescription(cwd);
+  } catch {
+    // Project context is helpful, but it should never make a task fail.
   }
 }
 
