@@ -13,6 +13,7 @@ import { buildContextMessages, contextItem } from "../src/context/builder.js";
 import { buildProjectIndex } from "../src/context/projectIndex.js";
 import { buildReviewScopeMessages, resolveReviewScope } from "../src/context/reviewScope.js";
 import { buildWorkspaceSnapshot, buildWorkspaceSnapshotMessages, ensureProjectDescription } from "../src/context/workspaceSnapshot.js";
+import { createTaskFinalValidator, validateTaskFinal } from "../src/harness/finalValidation.js";
 import { buildTaskSpec } from "../src/harness/taskSpec.js";
 import { advanceWorkflowState, createWorkflowState } from "../src/harness/workflow.js";
 import {
@@ -1008,6 +1009,81 @@ test("agent repairs invalid review output before returning", async () => {
   assert.equal(result.steps, 2);
   assert.equal(result.reviewValidation.ok, true);
   assert.equal(result.reviewReport.findings.length, 0);
+});
+
+test("task final validation rejects weak edit completion without recorded edits", () => {
+  const errors = validateTaskFinal({
+    finalText: "Done.",
+    requestType: "edit",
+    taskSpec: { goal: "Implement chunk upload support.", requestType: "edit" },
+    agentState: { filesEdited: [], commandsRun: [] },
+    trace: [],
+  });
+
+  assert.equal(errors.some((error) => /weak completion/.test(error)), true);
+  assert.equal(errors.some((error) => /no successful file edit/.test(error)), true);
+});
+
+test("agent repairs weak edit final before exiting", async () => {
+  const replies = [
+    { role: "assistant", content: "Done." },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        {
+          id: "call-1",
+          function: {
+            name: "edit_file",
+            arguments: JSON.stringify({ path: "src/a.js", search: "old", replace: "new" }),
+          },
+        },
+      ],
+    },
+    { role: "assistant", content: "Modified src/a.js. Verification not run because this isolated test has no project scripts." },
+  ];
+  const client = {
+    async chatCompletion() {
+      return {
+        choices: [{ message: replies.shift() }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      };
+    },
+  };
+  const tools = {
+    schemas: [
+      {
+        type: "function",
+        function: {
+          name: "edit_file",
+          parameters: { type: "object", properties: {}, additionalProperties: true },
+        },
+      },
+    ],
+    async execute(name, args) {
+      return {
+        ok: true,
+        path: args.path,
+        activity: { kind: "edit", label: "Edited file", target: args.path, additions: 1, deletions: 1 },
+      };
+    },
+  };
+  const taskSpec = { goal: "Implement chunk upload support.", requestType: "edit" };
+
+  const result = await runAgent({
+    client,
+    tools,
+    task: taskSpec.goal,
+    cwd: "/tmp/workspace",
+    model: "test",
+    stream: false,
+    finalValidator: createTaskFinalValidator({ taskSpec, verificationPlan: { required: true } }),
+  });
+
+  assert.match(result.finalText, /Modified src\/a\.js/);
+  assert.equal(result.stoppedReason, undefined);
+  assert.equal(result.transitions.some((transition) => transition.reason === "final_validation_repair"), true);
+  assert.deepEqual(result.agentState.filesEdited, ["src/a.js"]);
 });
 
 test("verification state records failure, fix, and rerun pass", () => {

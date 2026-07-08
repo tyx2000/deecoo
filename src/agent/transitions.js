@@ -2,6 +2,7 @@ export const TERMINAL_TRANSITIONS = Object.freeze({
   COMPLETED: "completed",
   PSEUDO_TOOL_CALL_TEXT: "pseudo_tool_call_text",
   REVIEW_SCHEMA_INVALID: "review_schema_invalid",
+  TASK_CONTRACT_INVALID: "task_contract_invalid",
 });
 
 export const CONTINUE_TRANSITIONS = Object.freeze({
@@ -17,4 +18,3 @@ export function terminalTransition(reason, extra = {}) {
 export function continueTransition(reason, extra = {}) {
   return { type: "continue", reason, ...extra };
 }
-

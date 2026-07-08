@@ -106,7 +106,11 @@ export async function runAgent({
         finalText,
         messages,
         requestType,
+        task,
+        agentState,
+        trace,
         verification: verification.snapshot(),
+        workflow,
         attempt: finalValidationAttempt,
       });
       if (finalValidation && !finalValidation.ok && finalValidationAttempt < finalValidation.maxRepairAttempts) {
@@ -140,14 +144,15 @@ export async function runAgent({
           workflow: advanceWorkflowState(workflow, { type: "failed", step }),
         };
       }
+      const failedReason = finalValidation?.reason ?? TERMINAL_TRANSITIONS.REVIEW_SCHEMA_INVALID;
       workflow = advanceWorkflowState(workflow, { type: finalValidation?.ok === false ? "failed" : "completed", step });
       return {
         finalText,
         messages,
         steps: step,
         usage,
-        stoppedReason: finalValidation?.ok === false ? TERMINAL_TRANSITIONS.REVIEW_SCHEMA_INVALID : undefined,
-        transition: terminalTransition(finalValidation?.ok === false ? TERMINAL_TRANSITIONS.REVIEW_SCHEMA_INVALID : TERMINAL_TRANSITIONS.COMPLETED, { step }),
+        stoppedReason: finalValidation?.ok === false ? failedReason : undefined,
+        transition: terminalTransition(finalValidation?.ok === false ? failedReason : TERMINAL_TRANSITIONS.COMPLETED, { step }),
         transitions,
         trace,
         agentState,

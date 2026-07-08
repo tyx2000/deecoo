@@ -5,6 +5,7 @@ import { buildContextMessages, contextItem } from "../context/builder.js";
 import { buildProjectIndex, buildProjectIndexMessages } from "../context/projectIndex.js";
 import { buildReviewScopeMessages } from "../context/reviewScope.js";
 import { buildWorkspaceSnapshotMessages, ensureProjectDescription } from "../context/workspaceSnapshot.js";
+import { createTaskFinalValidator } from "../harness/finalValidation.js";
 import { buildTaskSpec, taskSpecMessage } from "../harness/taskSpec.js";
 import {
   loadLongTermMemory,
@@ -92,7 +93,10 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
       stream: coordination.requestType === "review" ? false : config.stream,
       contextMessages: [...baseContextMessages, ...reviewScopeMessages],
       activeSkills,
-      finalValidator: coordination.requestType === "review" ? createReviewFinalValidator() : undefined,
+      finalValidator:
+        coordination.requestType === "review"
+          ? createReviewFinalValidator()
+          : createTaskFinalValidator({ taskSpec, verificationPlan }),
       signal,
       onModelStart: () => spinner.start(),
       onModelEnd: () => spinner.stop(),
