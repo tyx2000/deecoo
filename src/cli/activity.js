@@ -39,6 +39,11 @@ function toolLabel(name) {
     read_file: "Read a file",
     list_files: "Listed files",
     search_text: "Searched code",
+    propose_patch: "Proposed a patch",
+    propose_patch_set: "Proposed a patch set",
+    apply_patch: "Applied a patch",
+    apply_patch_set: "Applied a patch set",
+    apply_json_patch: "Applied a JSON patch",
     edit_file: "Edited a file",
     write_file: "Wrote a file",
     git_status: "Checked git status",
@@ -64,6 +69,11 @@ function toolCallTitle(name, args, activity) {
   if (name === "read_file") return "Read(" + truncateOneLine(args?.path ?? activity.target ?? "", 120) + ")";
   if (name === "list_files") return "List(" + truncateOneLine(args?.directory ?? activity.target ?? ".", 120) + ")";
   if (name === "search_text") return "Search(" + truncateOneLine(args?.query ?? "", 90) + ")";
+  if (name === "propose_patch") return "Patch(" + truncateOneLine(args?.path ?? activity.target ?? "", 120) + ")";
+  if (name === "propose_patch_set") return "PatchSet(" + truncateOneLine(activity.target ?? "files", 120) + ")";
+  if (name === "apply_patch") return "ApplyPatch(" + truncateOneLine(args?.path ?? activity.target ?? "", 120) + ")";
+  if (name === "apply_patch_set") return "ApplyPatchSet(" + truncateOneLine(activity.target ?? "files", 120) + ")";
+  if (name === "apply_json_patch") return "JsonPatch(" + truncateOneLine(args?.path ?? activity.target ?? "", 120) + ")";
   if (name === "edit_file") return "Edit(" + truncateOneLine(args?.path ?? activity.target ?? "", 120) + ")";
   if (name === "write_file") return "Write(" + truncateOneLine(args?.path ?? activity.target ?? "", 120) + ")";
   if (name === "git_status") return "Git(status)";
@@ -120,6 +130,34 @@ function formatActivitySummary({ name, args, result, activity }) {
     return [paint("muted", meta || "Read complete")];
   }
 
+  if (name === "propose_patch") {
+    return [paint("muted", "Patch proposal only; not applied"), ...previewText(result?.patch, { limit: 3 })];
+  }
+
+  if (name === "propose_patch_set") {
+    return [
+      paint("muted", "Patch set proposal only; not applied"),
+      ...(result?.files ?? []).slice(0, PREVIEW_LIMIT).map((file) => paint("muted", truncateOneLine(`${file.action}: ${file.from ? `${file.from} -> ` : ""}${file.path}`, 160))),
+      ...truncatedLine((result?.files?.length ?? 0) - PREVIEW_LIMIT),
+    ];
+  }
+
+  if (name === "apply_patch") {
+    return [paint("muted", String(result?.hunksApplied ?? 0) + " hunk" + (result?.hunksApplied === 1 ? "" : "s") + " applied")];
+  }
+
+  if (name === "apply_patch_set") {
+    return [
+      paint("muted", String(result?.hunksApplied ?? 0) + " hunk" + (result?.hunksApplied === 1 ? "" : "s") + " across " + String(result?.filesChanged ?? 0) + " file" + (result?.filesChanged === 1 ? "" : "s")),
+      ...(result?.paths ?? []).slice(0, PREVIEW_LIMIT).map((path) => paint("muted", truncateOneLine(path, 160))),
+      ...truncatedLine((result?.paths?.length ?? 0) - PREVIEW_LIMIT),
+    ];
+  }
+
+  if (name === "apply_json_patch") {
+    return [paint("muted", String(result?.operationsApplied ?? 0) + " operation" + (result?.operationsApplied === 1 ? "" : "s") + " applied")];
+  }
+
   if (name === "edit_file" || name === "write_file") {
     const bytes = Number(result?.bytesWritten ?? 0);
     return [paint("muted", bytes ? String(bytes) + " bytes written" : "Write complete")];
@@ -135,6 +173,7 @@ function formatActivitySummary({ name, args, result, activity }) {
 }
 
 function previewToolOutput(result, { emptyLabel = "" } = {}) {
+  if (result?.failureSummary) return previewText(result.failureSummary, { emptyLabel });
   return previewText([result?.stdout, result?.stderr].filter(Boolean).join("\n"), { emptyLabel });
 }
 
@@ -171,6 +210,7 @@ export function printCoordinationPlan(coordination) {
       paint("muted", " · " + coordination.requestType + " · " + phaseCount + " phases" + (agents.length ? " · " + agents.length + " agents" : "")),
   );
   printTreeGroup("Basis", coordination.basis);
+  printTreeGroup("Split", (coordination.splitTriggers ?? []).map((trigger) => trigger.name + " · " + trigger.reason));
   printTreeGroup("Phases", (coordination.phases ?? []).map((phase) => phase.name + " · " + phase.reason));
   printTreeGroup("Risk", (coordination.riskDomains ?? []).map((domain) => domain.name + " · " + domain.reason));
   printWorkerTree("Parallel", coordination.parallel ?? []);
@@ -200,10 +240,11 @@ function printWorkerTree(title, workers) {
   }
   for (const [index, worker] of workers.entries()) {
     const marker = index === workers.length - 1 ? TREE : BRANCH;
+    const role = worker.role ? paint("muted", " {" + worker.role + "}") : "";
     const mode = worker.mode ? paint("muted", " [" + worker.mode + "]") : "";
     const suffix = worker.reason ? paint("muted", " · " + worker.reason) : "";
     console.log(
-      "  " + VERTICAL + " " + marker + " " + paint("title", worker.name) + mode + paint("muted", " · " + worker.goal) + suffix,
+      "  " + VERTICAL + " " + marker + " " + paint("title", worker.name) + role + mode + paint("muted", " · " + worker.goal) + suffix,
     );
   }
 }

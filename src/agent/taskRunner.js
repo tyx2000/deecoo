@@ -6,7 +6,15 @@ import { buildProjectIndex, buildProjectIndexMessages } from "../context/project
 import { buildReviewScopeMessages } from "../context/reviewScope.js";
 import { buildWorkspaceSnapshotMessages, ensureProjectDescription } from "../context/workspaceSnapshot.js";
 import { buildTaskSpec, taskSpecMessage } from "../harness/taskSpec.js";
-import { loadProjectMemory, memoryContextMessage, recordProjectMemory, summarizeRunForMemory } from "../memory/projectMemory.js";
+import {
+  loadLongTermMemory,
+  loadProjectMemory,
+  longTermMemoryContextMessage,
+  memoryContextMessage,
+  memoryLayerSummary,
+  recordProjectMemory,
+  summarizeRunForMemory,
+} from "../memory/projectMemory.js";
 import { saveRunAudit } from "../observability/audit.js";
 import { saveRunOutputs } from "../reporter/outputs.js";
 import { createReviewFinalValidator } from "../reporter/reviewReport.js";
@@ -31,13 +39,17 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
   const projectIndex = await buildProjectIndex(cwd);
   const projectIndexMessages = await buildProjectIndexMessages(cwd);
   const workspaceSnapshotMessages = await buildWorkspaceSnapshotMessages(cwd);
-  const memory = sessionStore ? await loadProjectMemory(sessionStore) : undefined;
-  const memoryMessage = memoryContextMessage(memory);
+  const projectMemory = sessionStore ? await loadProjectMemory(sessionStore) : undefined;
+  const projectMemoryMessage = memoryContextMessage(projectMemory);
+  const longTermMemory = sessionStore ? await loadLongTermMemory(sessionStore) : undefined;
+  const longTermMemoryMessage = longTermMemoryContextMessage(longTermMemory);
+  const memoryLayers = memoryLayerSummary({ session, projectMemory, longTermMemory });
   const verificationPlan = buildVerificationPlan({ taskSpec, projectIndex });
   const baseContextMessages = buildContextMessages([
     contextItem(taskSpecMessage(taskSpec), 100),
     contextItem(verificationPlanMessage(verificationPlan), 90),
-    contextItem(memoryMessage, 80),
+    contextItem(projectMemoryMessage, 80),
+    contextItem(longTermMemoryMessage, 55),
     ...contextMessages.map((message) => contextItem(message, 50)),
     ...handoffMessages.map((message) => contextItem(message, 70)),
     ...workspaceSnapshotMessages.map((message) => contextItem(message, 65)),
@@ -120,11 +132,13 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
         requestType: result.requestType,
         taskSpec,
         verificationPlan,
+        memoryLayers,
         elapsedMs,
         finalText: result.finalText,
         usage: result.usage,
         workflow: result.workflow,
         verification: result.verification,
+        agentState: result.agentState,
         transitions: result.transitions,
         trace: result.trace,
         reviewReport: result.reviewReport,

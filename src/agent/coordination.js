@@ -3,17 +3,20 @@ export function analyzeTaskCoordination(task) {
   const basis = coordinationBasis(task, requestType);
   const riskDomains = selectRiskDomains(task, requestType);
   const phases = selectPhases(task, requestType, riskDomains);
-  const plan = buildWorkerPlan({ task, requestType, basis, riskDomains, phases });
+  const splitTriggers = selectSplitTriggers(task, requestType, basis, riskDomains, phases);
+  const plan = buildWorkerPlan({ task, requestType, basis, riskDomains, phases, splitTriggers });
   const complex =
     basis.length >= 2 ||
     riskDomains.length >= 2 ||
     phases.length >= 3 ||
+    splitTriggers.length >= 2 ||
     String(task ?? "").length > 180;
 
   return {
     requestType,
     complex,
     basis,
+    splitTriggers,
     phases,
     riskDomains,
     parallel: complex ? plan.parallel : [],
@@ -25,8 +28,10 @@ export function analyzeTaskCoordination(task) {
 
 function classifyRequest(task) {
   const text = String(task ?? "").toLowerCase();
-  if (/(review|审查|评审|code review|风险|隐患)/i.test(text)) return "review";
   if (/(报错|错误|失败|bug|debug|修复|fix|failed|error|crash|异常)/i.test(text)) return "debug";
+  const hasEdit = /(修改|新增|实现|继续|完善|改造|搭建|接入|add|implement|update|change|refactor|build)/i.test(text);
+  const hasReview = /(review|审查|评审|code review|风险|隐患)/i.test(text);
+  if (hasReview && !hasEdit) return "review";
   if (/(修改|新增|实现|继续|完善|改造|搭建|接入|add|implement|update|change|refactor|build)/i.test(text)) {
     return "edit";
   }
@@ -151,7 +156,50 @@ function selectPhases(task, requestType, riskDomains) {
   return uniqueByName(phases);
 }
 
-function buildWorkerPlan({ requestType, basis, riskDomains, phases }) {
+function selectSplitTriggers(task, requestType, basis, riskDomains, phases) {
+  const text = String(task ?? "");
+  const triggers = [];
+  const wantsLongOutput = /(详细|全面|所有|全量|完整|deep|complete|comprehensive|all files|entire)/i.test(text);
+  if (text.length > 220 || wantsLongOutput) {
+    triggers.push({
+      name: "Context volume",
+      reason: "single-agent context or final output may grow too large",
+    });
+  }
+  if ((requestType === "edit" || requestType === "debug") && riskDomains.some((domain) => domain.name === "Security")) {
+    triggers.push({
+      name: "Safety separation",
+      reason: "security review should stay independent from code modification",
+    });
+  }
+  if (requestType === "review" && riskDomains.length > 1) {
+    triggers.push({
+      name: "Parallel review lanes",
+      reason: "multiple risk domains can be checked independently",
+    });
+  }
+  if (phases.some((phase) => phase.name === "Implementation") && phases.some((phase) => phase.name === "Verification")) {
+    triggers.push({
+      name: "Independent verification",
+      reason: "tester should validate behavior without sharing implementation assumptions",
+    });
+  }
+  if (requestType === "review" || (requestType === "edit" && /(审查|review|风险|risk)/i.test(text))) {
+    triggers.push({
+      name: "Anti-confirmation",
+      reason: "independent reviewer reduces self-confirmation after planning or edits",
+    });
+  }
+  if (basis.some((item) => /multiple distinct requirements/i.test(item))) {
+    triggers.push({
+      name: "Multi-part task",
+      reason: "separate subtasks reduce context mixing and missed requirements",
+    });
+  }
+  return uniqueByName(triggers);
+}
+
+function buildWorkerPlan({ requestType, basis, riskDomains, phases, splitTriggers }) {
   const parallel = [];
   const serial = [];
   let verification;
@@ -160,6 +208,7 @@ function buildWorkerPlan({ requestType, basis, riskDomains, phases }) {
     for (const domain of riskDomains) {
       parallel.push({
         name: domain.reviewer,
+        role: roleForRiskDomain(domain.name),
         mode: "research",
         goal: domain.goal,
         phase: "Risk Review",
@@ -170,7 +219,8 @@ function buildWorkerPlan({ requestType, basis, riskDomains, phases }) {
   } else if (requestType === "analysis") {
     if (riskDomains.some((domain) => domain.name === "Architecture")) {
       parallel.push({
-        name: "Architecture Researcher",
+        name: "Planner Agent",
+        role: "planner",
         mode: "research",
         goal: "evaluate implementation paths, module boundaries, tradeoffs, and migration costs without editing files",
         phase: "Research",
@@ -180,7 +230,8 @@ function buildWorkerPlan({ requestType, basis, riskDomains, phases }) {
     }
     if (basis.some((item) => /risk|风险|隐患/i.test(item))) {
       parallel.push({
-        name: "Risk Assessor",
+        name: "Reviewer Agent",
+        role: "reviewer",
         mode: "research",
         goal: "identify hidden assumptions, operational risks, and validation strategy",
         phase: "Research",
@@ -191,6 +242,7 @@ function buildWorkerPlan({ requestType, basis, riskDomains, phases }) {
   } else if (requestType === "command") {
     serial.push({
       name: "Command Runner",
+      role: "tester",
       mode: "verify",
       goal: "execute the requested command or focused diagnostics and capture meaningful output",
       phase: "Verification",
@@ -199,7 +251,8 @@ function buildWorkerPlan({ requestType, basis, riskDomains, phases }) {
     });
   } else {
     parallel.push({
-      name: "Inspector",
+      name: "Planner Agent",
+      role: "planner",
       mode: "research",
       goal: "identify relevant files, existing patterns, constraints, and prior observations before edits",
       phase: "Research",
@@ -208,7 +261,8 @@ function buildWorkerPlan({ requestType, basis, riskDomains, phases }) {
     });
     if (phases.some((phase) => phase.name === "Implementation")) {
       serial.push({
-        name: "Implementer",
+        name: "Coder Agent",
+        role: "coder",
         mode: "implement",
         goal: "apply minimal scoped changes consistent with existing project patterns",
         phase: "Implementation",
@@ -216,11 +270,23 @@ function buildWorkerPlan({ requestType, basis, riskDomains, phases }) {
         reason: "write-heavy work should avoid overlapping file edits",
       });
     }
+    if (splitTriggers.some((trigger) => trigger.name === "Safety separation")) {
+      parallel.push({
+        name: "Security Agent",
+        role: "security",
+        mode: "research",
+        goal: "independently inspect auth, command execution, path access, secret handling, and unsafe file operations",
+        phase: "Risk Review",
+        concurrency: "parallel",
+        reason: "security review should not share the coder's implementation assumptions",
+      });
+    }
   }
 
   if (phases.some((phase) => phase.name === "Verification")) {
     verification = {
-      name: "Verifier",
+      name: "Tester Agent",
+      role: "tester",
       mode: "verify",
       goal: "run or define focused validation and report failures, uncertainty, and residual risk",
       phase: "Verification",
@@ -231,6 +297,12 @@ function buildWorkerPlan({ requestType, basis, riskDomains, phases }) {
   }
 
   return { parallel, serial, verification };
+}
+
+function roleForRiskDomain(name) {
+  if (name === "Security") return "security";
+  if (name === "Tests") return "tester";
+  return "reviewer";
 }
 
 function domainToSelection(domain, reason) {

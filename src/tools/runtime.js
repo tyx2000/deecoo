@@ -1,7 +1,7 @@
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { buildToolSchemas, normalizeWorkerMode, TOOL_CAPABILITIES, WORKER_TOOL_PROFILES } from "./definitions.js";
-import { editFile, listFiles, readWorkspaceFile, writeWorkspaceFile } from "./files.js";
+import { applyJsonPatch, applyStructuredPatch, applyStructuredPatchSet, editFile, listFiles, proposePatch, proposeStructuredPatchSet, readWorkspaceFile, writeWorkspaceFile } from "./files.js";
 import { gitDiff, gitStatus } from "./git.js";
 import { normalizeShellCommand } from "../permissions/shellPolicy.js";
 import { toolExceptionResult } from "./results.js";
@@ -91,6 +91,16 @@ export function createToolRuntime({
             return await searchText(workspace, getRealWorkspace, args, options.signal);
           case "edit_file":
             return await editFile(workspace, getRealWorkspace, args, prompter, permissionState);
+          case "propose_patch":
+            return await proposePatch(workspace, getRealWorkspace, args);
+          case "propose_patch_set":
+            return await proposeStructuredPatchSet(workspace, getRealWorkspace, args);
+          case "apply_patch":
+            return await applyStructuredPatch(workspace, getRealWorkspace, args, prompter, permissionState);
+          case "apply_patch_set":
+            return await applyStructuredPatchSet(workspace, getRealWorkspace, args, prompter, permissionState);
+          case "apply_json_patch":
+            return await applyJsonPatch(workspace, getRealWorkspace, args, prompter, permissionState);
           case "write_file":
             return await writeWorkspaceFile(workspace, getRealWorkspace, args, prompter, permissionState);
           case "git_status":

@@ -1,23 +1,32 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { analyzeTaskCoordination } from "../src/agent/coordination.js";
-import { compactToolResult } from "../src/agent/loop.js";
+import { compactLiveMessages, compactToolResult } from "../src/agent/loop.js";
 import { runAgent } from "../src/agent/loop.js";
 import { buildSystemPrompt } from "../src/agent/prompt.js";
 import { createSubagentRuntime } from "../src/agent/subagents/runtime.js";
+import { buildAgentStateSummary, createAgentState, recordModelStep, recordToolStep } from "../src/agent/state.js";
 import { buildContextMessages, contextItem } from "../src/context/builder.js";
 import { buildProjectIndex } from "../src/context/projectIndex.js";
 import { buildReviewScopeMessages, resolveReviewScope } from "../src/context/reviewScope.js";
 import { buildWorkspaceSnapshot, buildWorkspaceSnapshotMessages, ensureProjectDescription } from "../src/context/workspaceSnapshot.js";
 import { buildTaskSpec } from "../src/harness/taskSpec.js";
 import { advanceWorkflowState, createWorkflowState } from "../src/harness/workflow.js";
-import { loadProjectMemory, recordProjectMemory } from "../src/memory/projectMemory.js";
+import {
+  loadLongTermMemory,
+  loadProjectMemory,
+  longTermMemoryContextMessage,
+  memoryLayerSummary,
+  projectMemoryContextMessage,
+  recordLongTermMemory,
+  recordProjectMemory,
+} from "../src/memory/projectMemory.js";
 import { redact, saveRunAudit } from "../src/observability/audit.js";
 import { classifyShellCommand } from "../src/permissions/shellPolicy.js";
-import { saveRunOutputs } from "../src/reporter/outputs.js";
+import { saveRunOutputs, structuredRunResult } from "../src/reporter/outputs.js";
 import { aggregateReviewReport, createReviewFinalValidator, validateReviewReportText } from "../src/reporter/reviewReport.js";
 import { scorArtifactMetadata, scorReviewToolPolicy } from "../src/skills/scor.js";
 import { advanceVerificationState, emptyVerificationState } from "../src/verification/state.js";
@@ -80,15 +89,631 @@ test("implement workers can edit files within their delegated scope", async () =
   assert.equal(result.ok, true);
 });
 
+test("propose_patch previews a diff without writing", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-propose-patch-"));
+  await writeFile(join(workspace, "target.txt"), "one\ntwo\nthree\n", "utf8");
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("propose_patch should not prompt");
+    },
+    permissionMode: "read-only",
+  });
+
+  const result = await runtime.execute("propose_patch", {
+    path: "target.txt",
+    search: "two",
+    replace: "TWO",
+  });
+  const content = await readFile(join(workspace, "target.txt"), "utf8");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.applied, false);
+  assert.match(result.patch, /--- a\/target\.txt/);
+  assert.match(result.patch, /-two/);
+  assert.match(result.patch, /\+TWO/);
+  assert.equal(content, "one\ntwo\nthree\n");
+});
+
+test("propose_patch requires unique search text", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-propose-patch-"));
+  await writeFile(join(workspace, "target.txt"), "same\nsame\n", "utf8");
+  const runtime = createToolRuntime({ cwd: workspace, prompter: async () => "approve" });
+
+  const result = await runtime.execute("propose_patch", {
+    path: "target.txt",
+    search: "same",
+    replace: "next",
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /matched 2/);
+});
+
+test("apply_patch applies validated structured hunks", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-apply-patch-"));
+  await writeFile(join(workspace, "target.txt"), "one\ntwo\nthree\n", "utf8");
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("workspace-write mode should not prompt");
+    },
+    permissionMode: "workspace-write",
+  });
+
+  const result = await runtime.execute("apply_patch", {
+    path: "target.txt",
+    hunks: [
+      {
+        oldStart: 2,
+        oldLines: ["two"],
+        newLines: ["TWO", "two and a half"],
+      },
+    ],
+  });
+  const content = await readFile(join(workspace, "target.txt"), "utf8");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.hunksApplied, 1);
+  assert.equal(content, "one\nTWO\ntwo and a half\nthree\n");
+});
+
+test("apply_patch rejects stale hunk context before writing", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-apply-patch-"));
+  await writeFile(join(workspace, "target.txt"), "one\ntwo\nthree\n", "utf8");
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("stale patch should fail before approval");
+    },
+    permissionMode: "workspace-write",
+  });
+
+  const result = await runtime.execute("apply_patch", {
+    path: "target.txt",
+    hunks: [
+      {
+        oldStart: 2,
+        oldLines: ["stale"],
+        newLines: ["next"],
+      },
+    ],
+  });
+  const content = await readFile(join(workspace, "target.txt"), "utf8");
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "PATCH_CONTEXT_MISMATCH");
+  assert.equal(content, "one\ntwo\nthree\n");
+});
+
+test("apply_patch supports insertion hunks and blocks read-only writes", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-apply-patch-"));
+  await writeFile(join(workspace, "target.txt"), "one\ntwo\n", "utf8");
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("read-only mode should not prompt");
+    },
+    permissionMode: "read-only",
+  });
+
+  const result = await runtime.execute("apply_patch", {
+    path: "target.txt",
+    hunks: [
+      {
+        oldStart: 2,
+        oldLines: [],
+        newLines: ["inserted"],
+      },
+    ],
+  });
+  const content = await readFile(join(workspace, "target.txt"), "utf8");
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /read-only/i);
+  assert.equal(content, "one\ntwo\n");
+});
+
+test("apply_patch preserves existing CRLF line endings", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-apply-patch-"));
+  await writeFile(join(workspace, "target.txt"), "one\r\ntwo\r\n", "utf8");
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => "approve",
+    permissionMode: "workspace-write",
+  });
+
+  const result = await runtime.execute("apply_patch", {
+    path: "target.txt",
+    hunks: [
+      {
+        oldStart: 2,
+        oldLines: ["two"],
+        newLines: ["TWO"],
+      },
+    ],
+  });
+  const content = await readFile(join(workspace, "target.txt"), "utf8");
+
+  assert.equal(result.ok, true);
+  assert.equal(content, "one\r\nTWO\r\n");
+});
+
+test("apply_patch revalidates hunk context after approval", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-apply-patch-"));
+  const target = join(workspace, "target.txt");
+  await writeFile(target, "one\ntwo\n", "utf8");
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      await writeFile(target, "one\nchanged\n", "utf8");
+      return "approve";
+    },
+    permissionMode: "ask-every-edit",
+  });
+
+  const result = await runtime.execute("apply_patch", {
+    path: "target.txt",
+    hunks: [{ oldStart: 2, oldLines: ["two"], newLines: ["TWO"] }],
+  });
+  const content = await readFile(target, "utf8");
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "PATCH_CONTEXT_MISMATCH");
+  assert.match(result.error, /file changed before write/);
+  assert.equal(content, "one\nchanged\n");
+});
+
+test("propose_patch_set previews multiple files without writing or prompting", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-propose-patch-set-"));
+  await writeFile(join(workspace, "a.txt"), "one\ntwo\n", "utf8");
+  await writeFile(join(workspace, "b.txt"), "alpha\nbeta\n", "utf8");
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("propose_patch_set should not prompt");
+    },
+    permissionMode: "read-only",
+  });
+
+  const result = await runtime.execute("propose_patch_set", {
+    files: [
+      { path: "a.txt", hunks: [{ oldStart: 2, oldLines: ["two"], newLines: ["TWO"] }] },
+      { path: "b.txt", hunks: [{ oldStart: 1, oldLines: ["alpha"], newLines: ["ALPHA"] }] },
+    ],
+  });
+  const a = await readFile(join(workspace, "a.txt"), "utf8");
+  const b = await readFile(join(workspace, "b.txt"), "utf8");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.applied, false);
+  assert.equal(result.filesChanged, 2);
+  assert.deepEqual(result.paths, ["a.txt", "b.txt"]);
+  assert.match(result.files[0].patch, /-two/);
+  assert.match(result.files[0].patch, /\+TWO/);
+  assert.equal(a, "one\ntwo\n");
+  assert.equal(b, "alpha\nbeta\n");
+});
+
+test("propose_patch_set rejects stale context without writing", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-propose-patch-set-"));
+  await writeFile(join(workspace, "a.txt"), "one\ntwo\n", "utf8");
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("stale patch set preview should fail before approval");
+    },
+    permissionMode: "workspace-write",
+  });
+
+  const result = await runtime.execute("propose_patch_set", {
+    files: [{ path: "a.txt", hunks: [{ oldStart: 2, oldLines: ["stale"], newLines: ["TWO"] }] }],
+  });
+  const content = await readFile(join(workspace, "a.txt"), "utf8");
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "PATCH_CONTEXT_MISMATCH");
+  assert.equal(content, "one\ntwo\n");
+});
+
+test("propose_patch_set previews create and move operations", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-propose-patch-set-"));
+  await writeFile(join(workspace, "old.txt"), "move me\n", "utf8");
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("propose_patch_set should not prompt");
+    },
+    permissionMode: "read-only",
+  });
+
+  const result = await runtime.execute("propose_patch_set", {
+    files: [
+      { action: "create", path: "new/file.txt", content: "created\n" },
+      { action: "move", from: "old.txt", path: "renamed.txt" },
+    ],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.filesChanged, 2);
+  assert.equal(result.files[0].action, "create");
+  assert.match(result.files[0].patch, /\+created/);
+  assert.deepEqual(
+    result.files[1],
+    {
+      action: "move",
+      path: "renamed.txt",
+      from: "old.txt",
+      patch: "rename from old.txt\nrename to renamed.txt",
+      additions: 0,
+      deletions: 0,
+    },
+  );
+  assert.equal(await readFile(join(workspace, "old.txt"), "utf8"), "move me\n");
+  await assert.rejects(readFile(join(workspace, "new/file.txt"), "utf8"), /ENOENT/);
+});
+
+test("apply_patch_set applies multiple files after validating all hunks", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-apply-patch-set-"));
+  await writeFile(join(workspace, "a.txt"), "one\ntwo\n", "utf8");
+  await writeFile(join(workspace, "b.txt"), "alpha\nbeta\n", "utf8");
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("workspace-write mode should not prompt");
+    },
+    permissionMode: "workspace-write",
+  });
+
+  const result = await runtime.execute("apply_patch_set", {
+    files: [
+      { path: "a.txt", hunks: [{ oldStart: 2, oldLines: ["two"], newLines: ["TWO"] }] },
+      { path: "b.txt", hunks: [{ oldStart: 1, oldLines: ["alpha"], newLines: ["ALPHA"] }] },
+    ],
+  });
+  const a = await readFile(join(workspace, "a.txt"), "utf8");
+  const b = await readFile(join(workspace, "b.txt"), "utf8");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.filesChanged, 2);
+  assert.deepEqual(result.paths, ["a.txt", "b.txt"]);
+  assert.equal(a, "one\nTWO\n");
+  assert.equal(b, "ALPHA\nbeta\n");
+});
+
+test("apply_patch_set rejects stale context without writing any file", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-apply-patch-set-"));
+  await writeFile(join(workspace, "a.txt"), "one\ntwo\n", "utf8");
+  await writeFile(join(workspace, "b.txt"), "alpha\nbeta\n", "utf8");
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("stale patch set should fail before approval");
+    },
+    permissionMode: "workspace-write",
+  });
+
+  const result = await runtime.execute("apply_patch_set", {
+    files: [
+      { path: "a.txt", hunks: [{ oldStart: 2, oldLines: ["two"], newLines: ["TWO"] }] },
+      { path: "b.txt", hunks: [{ oldStart: 1, oldLines: ["stale"], newLines: ["ALPHA"] }] },
+    ],
+  });
+  const a = await readFile(join(workspace, "a.txt"), "utf8");
+  const b = await readFile(join(workspace, "b.txt"), "utf8");
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "PATCH_CONTEXT_MISMATCH");
+  assert.match(result.error, /b\.txt/);
+  assert.equal(a, "one\ntwo\n");
+  assert.equal(b, "alpha\nbeta\n");
+});
+
+test("apply_patch_set rolls back earlier writes when a later write fails", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-apply-patch-set-"));
+  const aPath = join(workspace, "a.txt");
+  const bPath = join(workspace, "b.txt");
+  await writeFile(aPath, "one\ntwo\n", "utf8");
+  await writeFile(bPath, "alpha\nbeta\n", "utf8");
+  await chmod(bPath, 0o444);
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("workspace-write mode should not prompt");
+    },
+    permissionMode: "workspace-write",
+  });
+
+  try {
+    const result = await runtime.execute("apply_patch_set", {
+      files: [
+        { path: "a.txt", hunks: [{ oldStart: 2, oldLines: ["two"], newLines: ["TWO"] }] },
+        { path: "b.txt", hunks: [{ oldStart: 1, oldLines: ["alpha"], newLines: ["ALPHA"] }] },
+      ],
+    });
+    const a = await readFile(aPath, "utf8");
+    const b = await readFile(bPath, "utf8");
+
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "PATCH_SET_WRITE_FAILED");
+    assert.equal(result.rolledBack, true);
+    assert.deepEqual(result.filesRolledBack, ["a.txt"]);
+    assert.equal(a, "one\ntwo\n");
+    assert.equal(b, "alpha\nbeta\n");
+  } finally {
+    await chmod(bPath, 0o644).catch(() => {});
+  }
+});
+
+test("apply_patch_set rejects duplicate paths", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-apply-patch-set-"));
+  await writeFile(join(workspace, "a.txt"), "one\n", "utf8");
+  const runtime = createToolRuntime({ cwd: workspace, prompter: async () => "approve" });
+
+  const result = await runtime.execute("apply_patch_set", {
+    files: [
+      { path: "a.txt", hunks: [{ oldStart: 1, oldLines: ["one"], newLines: ["ONE"] }] },
+      { path: "./a.txt", hunks: [{ oldStart: 1, oldLines: ["one"], newLines: ["ONE"] }] },
+    ],
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /duplicate patch path/);
+});
+
+test("apply_patch_set creates and moves files structurally", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-apply-patch-set-"));
+  await writeFile(join(workspace, "old.txt"), "move me\n", "utf8");
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("workspace-write mode should not prompt");
+    },
+    permissionMode: "workspace-write",
+  });
+
+  const result = await runtime.execute("apply_patch_set", {
+    files: [
+      { action: "create", path: "new/file.txt", content: "created\n" },
+      { action: "move", from: "old.txt", path: "renamed.txt" },
+    ],
+  });
+  const created = await readFile(join(workspace, "new/file.txt"), "utf8");
+  const moved = await readFile(join(workspace, "renamed.txt"), "utf8");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.filesChanged, 2);
+  assert.equal(created, "created\n");
+  assert.equal(moved, "move me\n");
+  await assert.rejects(readFile(join(workspace, "old.txt"), "utf8"), /ENOENT/);
+});
+
+test("apply_patch_set rejects create overwrite and move target overwrite", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-apply-patch-set-"));
+  await writeFile(join(workspace, "exists.txt"), "exists\n", "utf8");
+  await writeFile(join(workspace, "source.txt"), "source\n", "utf8");
+  await writeFile(join(workspace, "target.txt"), "target\n", "utf8");
+  const runtime = createToolRuntime({ cwd: workspace, prompter: async () => "approve" });
+
+  const createResult = await runtime.execute("apply_patch_set", {
+    files: [{ action: "create", path: "exists.txt", content: "new\n" }],
+  });
+  const moveResult = await runtime.execute("apply_patch_set", {
+    files: [{ action: "move", from: "source.txt", path: "target.txt" }],
+  });
+
+  assert.equal(createResult.ok, false);
+  assert.match(createResult.error, /already exists/);
+  assert.equal(moveResult.ok, false);
+  assert.match(moveResult.error, /already exists/);
+  assert.equal(await readFile(join(workspace, "exists.txt"), "utf8"), "exists\n");
+  assert.equal(await readFile(join(workspace, "source.txt"), "utf8"), "source\n");
+  assert.equal(await readFile(join(workspace, "target.txt"), "utf8"), "target\n");
+});
+
+test("apply_patch_set revalidates create targets after approval", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-apply-patch-set-"));
+  const target = join(workspace, "created.txt");
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      await writeFile(target, "appeared\n", "utf8");
+      return "approve";
+    },
+    permissionMode: "ask-every-edit",
+  });
+
+  const result = await runtime.execute("apply_patch_set", {
+    files: [{ action: "create", path: "created.txt", content: "created\n" }],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "PATCH_SET_CHANGED_BEFORE_WRITE");
+  assert.match(result.error, /already exists/);
+  assert.equal(await readFile(target, "utf8"), "appeared\n");
+});
+
+test("apply_patch_set revalidates move targets after approval", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-apply-patch-set-"));
+  const source = join(workspace, "source.txt");
+  const target = join(workspace, "target.txt");
+  await writeFile(source, "source\n", "utf8");
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      await writeFile(target, "appeared\n", "utf8");
+      return "approve";
+    },
+    permissionMode: "ask-every-edit",
+  });
+
+  const result = await runtime.execute("apply_patch_set", {
+    files: [{ action: "move", from: "source.txt", path: "target.txt" }],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "PATCH_SET_CHANGED_BEFORE_WRITE");
+  assert.match(result.error, /already exists/);
+  assert.equal(await readFile(source, "utf8"), "source\n");
+  assert.equal(await readFile(target, "utf8"), "appeared\n");
+});
+
+test("apply_patch_set rolls back created and moved files after a later write failure", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-apply-patch-set-"));
+  const blockedPath = join(workspace, "blocked.txt");
+  await writeFile(join(workspace, "source.txt"), "source\n", "utf8");
+  await writeFile(blockedPath, "blocked\n", "utf8");
+  await chmod(blockedPath, 0o444);
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("workspace-write mode should not prompt");
+    },
+    permissionMode: "workspace-write",
+  });
+
+  try {
+    const result = await runtime.execute("apply_patch_set", {
+      files: [
+        { action: "create", path: "created.txt", content: "created\n" },
+        { action: "move", from: "source.txt", path: "moved.txt" },
+        { path: "blocked.txt", hunks: [{ oldStart: 1, oldLines: ["blocked"], newLines: ["BLOCKED"] }] },
+      ],
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "PATCH_SET_WRITE_FAILED");
+    assert.equal(await readFile(join(workspace, "source.txt"), "utf8"), "source\n");
+    await assert.rejects(readFile(join(workspace, "created.txt"), "utf8"), /ENOENT/);
+    await assert.rejects(readFile(join(workspace, "moved.txt"), "utf8"), /ENOENT/);
+    assert.equal(await readFile(blockedPath, "utf8"), "blocked\n");
+  } finally {
+    await chmod(blockedPath, 0o644).catch(() => {});
+  }
+});
+
+test("apply_json_patch applies JSON AST operations", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-json-patch-"));
+  await writeFile(join(workspace, "package.json"), JSON.stringify({ scripts: { test: "node --test" }, keywords: ["cli"], private: true }, null, 2) + "\n", "utf8");
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("workspace-write mode should not prompt");
+    },
+    permissionMode: "workspace-write",
+  });
+
+  const result = await runtime.execute("apply_json_patch", {
+    path: "package.json",
+    operations: [
+      { op: "set", pointer: "/scripts/check", value: "node --check index.js" },
+      { op: "append", pointer: "/keywords", value: "agent" },
+      { op: "delete", pointer: "/private" },
+    ],
+  });
+  const parsed = JSON.parse(await readFile(join(workspace, "package.json"), "utf8"));
+
+  assert.equal(result.ok, true);
+  assert.equal(result.operationsApplied, 3);
+  assert.equal(parsed.scripts.check, "node --check index.js");
+  assert.deepEqual(parsed.keywords, ["cli", "agent"]);
+  assert.equal(Object.prototype.hasOwnProperty.call(parsed, "private"), false);
+});
+
+test("apply_json_patch rejects invalid AST operations before writing", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-json-patch-"));
+  await writeFile(join(workspace, "package.json"), JSON.stringify({ name: "demo" }, null, 2) + "\n", "utf8");
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("invalid JSON patch should fail before approval");
+    },
+    permissionMode: "workspace-write",
+  });
+
+  const result = await runtime.execute("apply_json_patch", {
+    path: "package.json",
+    operations: [{ op: "append", pointer: "/name", value: "bad" }],
+  });
+  const content = await readFile(join(workspace, "package.json"), "utf8");
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /append target must be an array/);
+  assert.equal(content, JSON.stringify({ name: "demo" }, null, 2) + "\n");
+});
+
+test("apply_json_patch rejects array set beyond append position", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-json-patch-"));
+  await writeFile(join(workspace, "package.json"), JSON.stringify({ keywords: ["cli"] }, null, 2) + "\n", "utf8");
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("invalid JSON patch should fail before approval");
+    },
+    permissionMode: "workspace-write",
+  });
+
+  const result = await runtime.execute("apply_json_patch", {
+    path: "package.json",
+    operations: [{ op: "set", pointer: "/keywords/2", value: "agent" }],
+  });
+  const content = await readFile(join(workspace, "package.json"), "utf8");
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /beyond append position/);
+  assert.equal(content, JSON.stringify({ keywords: ["cli"] }, null, 2) + "\n");
+});
+
+test("apply_json_patch revalidates JSON operations after approval", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-json-patch-"));
+  const target = join(workspace, "package.json");
+  await writeFile(target, JSON.stringify({ keywords: [] }, null, 2) + "\n", "utf8");
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      await writeFile(target, JSON.stringify({ keywords: "bad" }, null, 2) + "\n", "utf8");
+      return "approve";
+    },
+    permissionMode: "ask-every-edit",
+  });
+
+  const result = await runtime.execute("apply_json_patch", {
+    path: "package.json",
+    operations: [{ op: "append", pointer: "/keywords", value: "agent" }],
+  });
+  const content = await readFile(target, "utf8");
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "FILE_CHANGED_BEFORE_WRITE");
+  assert.match(result.error, /file changed before write/);
+  assert.equal(content, JSON.stringify({ keywords: "bad" }, null, 2) + "\n");
+});
+
 test("coordination assigns explicit worker modes for complex edit tasks", () => {
   const coordination = analyzeTaskCoordination(
     "Inspect the repo, implement the fix, run tests, and explain residual risk in detail.",
   );
 
   assert.equal(coordination.complex, true);
+  assert.equal(coordination.splitTriggers.some((trigger) => trigger.name === "Independent verification"), true);
+  assert.equal(coordination.parallel[0]?.role, "planner");
   assert.equal(coordination.parallel[0]?.mode, "research");
+  assert.equal(coordination.serial[0]?.role, "coder");
   assert.equal(coordination.serial[0]?.mode, "implement");
+  assert.equal(coordination.verification?.role, "tester");
   assert.equal(coordination.verification?.mode, "verify");
+});
+
+test("coordination assigns security and reviewer role presets for risk separation", () => {
+  const coordination = analyzeTaskCoordination(
+    "修改 shell 权限策略，并审查安全风险、secret 泄漏和 path traversal，最后运行测试验证。",
+  );
+
+  assert.equal(coordination.complex, true);
+  assert.equal(coordination.splitTriggers.some((trigger) => trigger.name === "Safety separation"), true);
+  assert.equal(coordination.agents.some((agent) => agent.role === "security" && agent.mode === "research"), true);
+  assert.equal(coordination.agents.some((agent) => agent.role === "coder" && agent.mode === "implement"), true);
+  assert.equal(coordination.agents.some((agent) => agent.role === "tester" && agent.mode === "verify"), true);
 });
 
 test("simple prompts omit complex coordination protocol", () => {
@@ -97,12 +722,28 @@ test("simple prompts omit complex coordination protocol", () => {
   assert.equal(prompt.includes("Complex-task coordination:"), false);
 });
 
+test("complex prompt includes role presets and split triggers", () => {
+  const coordination = analyzeTaskCoordination(
+    "修改 shell 权限策略，并审查安全风险、secret 泄漏和 path traversal，最后运行测试验证。",
+  );
+  const prompt = buildSystemPrompt("/tmp/workspace", "edit", [], coordination);
+
+  assert.match(prompt, /Split triggers/);
+  assert.match(prompt, /role=security/);
+  assert.match(prompt, /role=coder/);
+  assert.match(prompt, /role=tester/);
+});
+
 test("base prompt states CLI operating procedure", () => {
   const prompt = buildSystemPrompt("/tmp/workspace", "edit", [], { complex: false });
 
   assert.match(prompt, /Core operating procedure/);
   assert.match(prompt, /You cannot access files directly/);
   assert.match(prompt, /Before editing, inspect the relevant current files/);
+  assert.match(prompt, /use propose_patch first/);
+  assert.match(prompt, /Use apply_patch for structured multi-line edits/);
+  assert.match(prompt, /Use propose_patch_set to preview coherent multi-file changes/);
+  assert.match(prompt, /Use apply_json_patch for JSON AST edits/);
   assert.match(prompt, /Never access files outside the workspace/);
   assert.match(prompt, /When done, summarize/);
   assert.match(prompt, /files changed/);
@@ -133,7 +774,36 @@ test("S-COR task policy blocks writes and implement workers", async () => {
 
   runtime.setTaskToolPolicy(scorReviewToolPolicy());
 
+  const proposeResult = await runtime.execute("propose_patch", {
+    path: "blocked.txt",
+    search: "old",
+    replace: "new",
+  });
+  const proposeSetResult = await runtime.execute("propose_patch_set", {
+    files: [{ path: "blocked.txt", hunks: [{ oldStart: 1, oldLines: [], newLines: ["no"] }] }],
+  });
+  const patchResult = await runtime.execute("apply_patch", {
+    path: "blocked.txt",
+    hunks: [{ oldStart: 1, oldLines: [], newLines: ["no"] }],
+  });
+  const patchSetResult = await runtime.execute("apply_patch_set", {
+    files: [{ path: "blocked.txt", hunks: [{ oldStart: 1, oldLines: [], newLines: ["no"] }] }],
+  });
+  const jsonPatchResult = await runtime.execute("apply_json_patch", {
+    path: "blocked.json",
+    operations: [{ op: "set", pointer: "/x", value: true }],
+  });
   const writeResult = await runtime.execute("write_file", { path: "blocked.txt", content: "no" });
+  assert.equal(proposeResult.ok, false);
+  assert.equal(proposeResult.code, "TASK_TOOL_BLOCKED");
+  assert.equal(proposeSetResult.ok, false);
+  assert.equal(proposeSetResult.code, "TASK_TOOL_BLOCKED");
+  assert.equal(patchResult.ok, false);
+  assert.equal(patchResult.code, "TASK_TOOL_BLOCKED");
+  assert.equal(patchSetResult.ok, false);
+  assert.equal(patchSetResult.code, "TASK_TOOL_BLOCKED");
+  assert.equal(jsonPatchResult.ok, false);
+  assert.equal(jsonPatchResult.code, "TASK_TOOL_BLOCKED");
   assert.equal(writeResult.ok, false);
   assert.equal(writeResult.code, "TASK_TOOL_BLOCKED");
 
@@ -374,17 +1044,97 @@ test("workflow state records planning, tool execution, and completion", () => {
   let workflow = createWorkflowState({ requestType: "edit" });
   workflow = advanceWorkflowState(workflow, { type: "planned" });
   workflow = advanceWorkflowState(workflow, { type: "tool-start", tool: "read_file", step: 1 });
-  workflow = advanceWorkflowState(workflow, { type: "tool-start", tool: "edit_file", step: 2 });
-  workflow = advanceWorkflowState(workflow, { type: "completed", step: 3 });
+  workflow = advanceWorkflowState(workflow, { type: "tool-start", tool: "propose_patch_set", step: 2 });
+  workflow = advanceWorkflowState(workflow, { type: "tool-start", tool: "edit_file", step: 3 });
+  workflow = advanceWorkflowState(workflow, { type: "completed", step: 4 });
 
   assert.equal(workflow.status, "completed");
   assert.deepEqual(workflow.transitions.map((transition) => transition.to).filter(Boolean), [
     "initialized",
     "planned",
     "researching",
+    "planning",
     "implementing",
     "completed",
   ]);
+});
+
+test("agent state records model responses, tool calls, files, commands, and observations", () => {
+  const state = createAgentState({ task: "fix tests", cwd: "/tmp/project" });
+  recordModelStep(state, {
+    step: 1,
+    startedAt: 1000,
+    endedAt: 1030,
+    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    message: {
+      role: "assistant",
+      content: "I will inspect the failure.",
+      tool_calls: [{ id: "call-1", function: { name: "read_file", arguments: "{\"path\":\"src/a.js\"}" } }],
+    },
+  });
+  recordToolStep(state, {
+    step: 1,
+    name: "read_file",
+    args: { path: "src/a.js" },
+    result: { ok: true, content: "const a = 1;" },
+    startedAt: 1030,
+    endedAt: 1045,
+  });
+  recordToolStep(state, {
+    step: 2,
+    name: "run_shell",
+    args: { command: "npm test" },
+    result: { ok: false, failureSummary: "AssertionError: expected redirect" },
+    startedAt: 2000,
+    endedAt: 2050,
+  });
+  recordToolStep(state, {
+    step: 3,
+    name: "edit_file",
+    args: { path: "src/a.js" },
+    result: { ok: true, activity: { target: "src/a.js", additions: 1, deletions: 1 } },
+    startedAt: 3000,
+    endedAt: 3020,
+  });
+
+  assert.deepEqual(state.filesRead, ["src/a.js"]);
+  assert.deepEqual(state.filesEdited, ["src/a.js"]);
+  assert.deepEqual(state.commandsRun, ["npm test"]);
+  assert.equal(state.steps.length, 4);
+  assert.equal(state.usage.totalTokens, 15);
+  assert.match(buildAgentStateSummary(state), /AssertionError/);
+});
+
+test("live context compaction keeps protected context and stores state summary", () => {
+  const state = createAgentState({ task: "fix tests", cwd: "/tmp/project" });
+  recordToolStep(state, {
+    step: 1,
+    name: "run_shell",
+    args: { command: "npm test" },
+    result: { ok: false, failureSummary: "AssertionError: expected redirect" },
+    startedAt: 1000,
+    endedAt: 1010,
+  });
+  const messages = [
+    { role: "system", content: "system prompt" },
+    { role: "system", content: "project rules" },
+    { role: "user", content: "fix tests" },
+    { role: "assistant", content: "a".repeat(200) },
+    { role: "assistant", content: "b".repeat(200) },
+  ];
+
+  const compacted = compactLiveMessages(messages, {
+    protectedPrefixCount: 3,
+    agentState: state,
+    step: 2,
+    maxChars: 100,
+  });
+
+  assert.equal(compacted, true);
+  assert.deepEqual(messages.slice(0, 3).map((message) => message.content), ["system prompt", "project rules", "fix tests"]);
+  assert.match(messages[3].content, /Run state summary/);
+  assert.match(messages[3].content, /npm test failed/);
+  assert.equal(state.contextCompactions.length, 1);
 });
 
 test("shell guardrails classify destructive commands as blocked", async () => {
@@ -415,6 +1165,66 @@ test("shell guardrails classify destructive commands as blocked", async () => {
 
   assert.equal(approvedResult.ok, false);
   assert.equal(approvedResult.code, "SHELL_COMMAND_BLOCKED");
+});
+
+test("shell guardrails block interactive commands", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-shell-policy-"));
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("interactive shell command should not prompt");
+    },
+  });
+
+  assert.equal(classifyShellCommand("vim src/index.js").level, "block");
+  assert.equal(classifyShellCommand("python").level, "block");
+  assert.equal(classifyShellCommand("python -c \"print(1)\"").level, "allow");
+  assert.equal(classifyShellCommand("node --test").level, "allow");
+  const result = await runtime.execute("run_shell", { command: "node" });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "SHELL_COMMAND_BLOCKED");
+});
+
+test("run_shell defaults to short timeout and truncates output", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-shell-output-"));
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("approved command should not prompt");
+    },
+    allowShellWithoutPrompt: true,
+  });
+
+  const timeoutResult = await runtime.execute("run_shell", { command: "node -e \"setTimeout(() => {}, 80)\"" });
+  const outputResult = await runtime.execute("run_shell", { command: "node -e \"console.log('x'.repeat(25000))\"" });
+
+  assert.equal(timeoutResult.ok, true);
+  assert.equal(outputResult.ok, true);
+  assert.equal(outputResult.stdoutTruncated, true);
+  assert.match(outputResult.stdout, /output truncated to 20KB/);
+  assert.equal(Buffer.byteLength(outputResult.stdout, "utf8") < 21 * 1024, true);
+});
+
+test("run_shell summarizes high-signal failure output", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-shell-output-"));
+  const runtime = createToolRuntime({
+    cwd: workspace,
+    prompter: async () => {
+      throw new Error("approved command should not prompt");
+    },
+    allowShellWithoutPrompt: true,
+  });
+
+  const result = await runtime.execute("run_shell", {
+    command: "node -e \"console.log('noise '.repeat(1000)); console.error('AssertionError: expected 1 received 2'); console.error('src/math.js:12:5'); process.exit(1)\"",
+  });
+  const compact = compactToolResult("run_shell", result);
+
+  assert.equal(result.ok, false);
+  assert.match(result.failureSummary, /AssertionError/);
+  assert.match(result.failureSummary, /src\/math\.js:12:5/);
+  assert.match(compact.failureSummary, /AssertionError/);
 });
 
 test("project index summarizes manifests, scripts, source, and tests", async () => {
@@ -551,13 +1361,14 @@ test("task spec and verification planner produce executable contracts", () => {
   });
   const plan = buildVerificationPlan({
     taskSpec,
-    projectIndex: { scripts: { check: "node --check index.js", test: "node --test" } },
+    projectIndex: { packageManager: "pnpm", scripts: { check: "node --check index.js", test: "node --test", build: "vite build" } },
   });
 
   assert.equal(taskSpec.requestType, "debug");
   assert.equal(taskSpec.constraints.activeSkills.includes("post-cor"), true);
   assert.equal(plan.required, true);
-  assert.deepEqual(plan.commands.map((command) => command.command), ["npm run check", "npm test"]);
+  assert.deepEqual(plan.commands.map((command) => command.kind), ["check", "unit-test", "build"]);
+  assert.deepEqual(plan.commands.map((command) => command.command), ["pnpm run check", "pnpm test", "pnpm run build"]);
 });
 
 test("context builder keeps higher priority messages within budget", () => {
@@ -574,14 +1385,47 @@ test("project memory records and reloads facts, decisions, and failures", async 
   const projectDir = await mkdtemp(join(tmpdir(), "deecoo-memory-"));
   const store = { projectDir };
 
-  await recordProjectMemory(store, { projectFact: "Uses npm scripts." });
+  await recordProjectMemory(store, { projectFact: "Uses npm scripts.", sourceRunId: "run-1", confidence: "high" });
   await recordProjectMemory(store, { decision: "Prefer focused verification." });
   await recordProjectMemory(store, { failure: "Prior test failed." });
   const memory = await loadProjectMemory(store);
 
+  assert.equal(memory.scope, "project");
   assert.equal(memory.facts[0].text, "Uses npm scripts.");
+  assert.equal(memory.facts[0].scope, "project");
+  assert.equal(memory.facts[0].kind, "fact");
+  assert.equal(memory.facts[0].sourceRunId, "run-1");
+  assert.equal(memory.facts[0].confidence, "high");
   assert.equal(memory.decisions[0].text, "Prefer focused verification.");
   assert.equal(memory.failures[0].text, "Prior test failed.");
+  assert.match(projectMemoryContextMessage(memory).content, /Project memory \(long-term, project-scoped\)/);
+});
+
+test("long-term memory is global and separate from project memory", async () => {
+  const memoryRoot = await mkdtemp(join(tmpdir(), "deecoo-long-term-memory-"));
+  const projectDir = await mkdtemp(join(tmpdir(), "deecoo-project-memory-"));
+  const store = { memoryRoot, projectDir };
+
+  await recordProjectMemory(store, { projectFact: "This repo uses npm." });
+  await recordLongTermMemory(store, { preference: "Prefer concise Chinese summaries.", source: "user" });
+  await recordLongTermMemory(store, { fact: "User works across multiple repositories.", confidence: "low" });
+
+  const projectMemory = await loadProjectMemory(store);
+  const longTermMemory = await loadLongTermMemory(store);
+  const layers = memoryLayerSummary({
+    session: { id: "session-1", summary: "prior turn", turns: [{ user: "hi" }], artifacts: [] },
+    projectMemory,
+    longTermMemory,
+  });
+
+  assert.equal(projectMemory.facts[0].scope, "project");
+  assert.equal(longTermMemory.scope, "global");
+  assert.equal(longTermMemory.preferences[0].kind, "preference");
+  assert.equal(longTermMemory.preferences[0].scope, "global");
+  assert.match(longTermMemoryContextMessage(longTermMemory).content, /Global long-term memory/);
+  assert.equal(layers.sessionMemory.recentTurns, 1);
+  assert.equal(layers.projectMemory.facts, 1);
+  assert.equal(layers.longTermMemory.preferences, 1);
 });
 
 test("output adapters persist summary and structured outputs", async () => {
@@ -592,15 +1436,60 @@ test("output adapters persist summary and structured outputs", async () => {
     task: "review",
     result: {
       finalText: "Done",
+      requestType: "edit",
+      usage: { totalTokens: 42 },
       workflow: { status: "completed", phase: "done" },
       verification: { status: "passed", commands: [] },
+      agentState: {
+        schemaVersion: 1,
+        task: "review",
+        cwd: projectDir,
+        filesRead: ["src/a.js"],
+        filesEdited: ["src/a.js"],
+        commandsRun: ["npm test"],
+        observations: [{ summary: "tests passed" }],
+        steps: [{ step: 1, type: "tool" }],
+        contextCompactions: [],
+        usage: { totalTokens: 42 },
+      },
       reviewReport: { schema_version: 1, findings: [] },
     },
   });
 
-  assert.equal(outputs.length, 3);
+  assert.equal(outputs.length, 4);
   assert.equal(outputs.some((output) => output.fileName.endsWith("review-report.json")), true);
   assert.equal(outputs.some((output) => output.fileName.endsWith("summary.md")), true);
+  assert.equal(outputs.some((output) => output.fileName.endsWith("run-result.json")), true);
+});
+
+test("structured run result exposes stable machine-readable fields", () => {
+  const result = structuredRunResult({
+    task: "fix tests",
+    result: {
+      finalText: "Done",
+      requestType: "debug",
+      usage: { totalTokens: 10 },
+      workflow: { status: "completed" },
+      verification: { status: "passed" },
+      agentState: {
+        schemaVersion: 1,
+        task: "fix tests",
+        cwd: "/tmp/project",
+        filesRead: ["src/a.js"],
+        filesEdited: ["src/a.js"],
+        commandsRun: ["npm test"],
+        observations: Array.from({ length: 50 }, (_value, index) => ({ summary: `observation ${index}` })),
+        steps: Array.from({ length: 50 }, (_value, index) => ({ step: index + 1, type: "tool" })),
+        contextCompactions: [{ step: 10 }],
+      },
+    },
+  });
+
+  assert.equal(result.schemaVersion, 1);
+  assert.equal(result.requestType, "debug");
+  assert.equal(result.agentState.filesEdited[0], "src/a.js");
+  assert.equal(result.agentState.observations.length, 40);
+  assert.equal(result.agentState.recentSteps.length, 40);
 });
 
 test("tool runtime exposes capability metadata", async () => {
@@ -609,6 +1498,11 @@ test("tool runtime exposes capability metadata", async () => {
   const capabilities = runtime.capabilities();
 
   assert.equal(capabilities.some((tool) => tool.name === "edit_file" && tool.requiresApproval), true);
+  assert.equal(capabilities.some((tool) => tool.name === "propose_patch" && !tool.mutates), true);
+  assert.equal(capabilities.some((tool) => tool.name === "propose_patch_set" && !tool.mutates), true);
+  assert.equal(capabilities.some((tool) => tool.name === "apply_patch" && tool.requiresApproval), true);
+  assert.equal(capabilities.some((tool) => tool.name === "apply_patch_set" && tool.requiresApproval), true);
+  assert.equal(capabilities.some((tool) => tool.name === "apply_json_patch" && tool.requiresApproval), true);
   assert.equal(capabilities.some((tool) => tool.name === "agent" && tool.category === "orchestration"), true);
 });
 
@@ -640,4 +1534,40 @@ test("subagent scheduler enforces a per-task worker limit", async () => {
   assert.equal(blocked.ok, false);
   assert.equal(blocked.code, "WORKER_LIMIT_REACHED");
   assert.equal(runtime.snapshot().length, 8);
+});
+
+test("subagent runtime records role presets separately from tool mode", async () => {
+  const client = {
+    async chatCompletion(request) {
+      const system = request.messages.find((message) => message.role === "system" && /Worker role/.test(message.content));
+      assert.match(system.content, /Worker role: security/);
+      assert.match(system.content, /Worker mode: research/);
+      assert.match(system.content, /Security role:/);
+      return { choices: [{ message: { role: "assistant", content: "security checked" } }] };
+    },
+  };
+  const tools = {
+    schemas: [],
+    async execute() {
+      return { ok: false, error: "unexpected" };
+    },
+  };
+  const runtime = createSubagentRuntime({
+    client,
+    workerTools: tools,
+    cwd: "/tmp/project",
+    config: { model: "test" },
+  });
+
+  const result = await runtime.start({
+    description: "Security Agent",
+    role: "security",
+    mode: "research",
+    prompt: "Check auth risks.",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.role, "security");
+  assert.equal(result.mode, "research");
+  assert.equal(runtime.snapshot()[0].role, "security");
 });

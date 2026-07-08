@@ -237,9 +237,16 @@ export async function showTrace({ sessionStore, session }) {
     "requestType: " + (audit.requestType ?? "-"),
     "workflow: " + (audit.workflow?.status ?? "-") + " / " + (audit.workflow?.phase ?? "-"),
     "verification: " + (audit.verification?.status ?? "-"),
+    "memory: " + memoryLayerPreview(audit.memoryLayers),
+    "agentState: " + (audit.agentState?.steps?.length ?? 0) + " steps, " + (audit.agentState?.contextCompactions?.length ?? 0) + " compactions",
+    "files read: " + listPreview(audit.agentState?.filesRead),
+    "files edited: " + listPreview(audit.agentState?.filesEdited),
+    "commands: " + listPreview(audit.agentState?.commandsRun),
     "steps: " + (audit.trace?.length ?? 0),
     "tool calls:",
     ...(audit.trace ?? []).slice(-12).map((entry) => "  - " + entry.tool + " " + (entry.ok ? "ok" : "failed") + " " + truncateOneLine(entry.target, 80)),
+    "recent observations:",
+    ...(audit.agentState?.observations ?? []).slice(-6).map((entry) => "  - " + truncateOneLine(entry.summary, 120)),
     ...evalLines,
   ].join("\n"));
 }
@@ -276,6 +283,23 @@ function normalizeModels(result) {
     return result.models.map((item) => item.id ?? item).filter(Boolean);
   }
   return [];
+}
+
+function listPreview(values) {
+  if (!Array.isArray(values) || values.length === 0) return "-";
+  return values.slice(-6).map((value) => truncateOneLine(value, 60)).join(", ") + (values.length > 6 ? ", ..." : "");
+}
+
+function memoryLayerPreview(layers) {
+  if (!layers) return "-";
+  const session = layers.sessionMemory ? `session:${layers.sessionMemory.recentTurns ?? 0} turns` : "session:-";
+  const project = layers.projectMemory
+    ? `project:${layers.projectMemory.facts ?? 0} facts/${layers.projectMemory.decisions ?? 0} decisions/${layers.projectMemory.failures ?? 0} failures`
+    : "project:-";
+  const global = layers.longTermMemory
+    ? `global:${layers.longTermMemory.preferences ?? 0} prefs/${layers.longTermMemory.facts ?? 0} facts/${layers.longTermMemory.decisions ?? 0} decisions`
+    : "global:-";
+  return [session, project, global].join(", ");
 }
 
 function printUsage(balance) {

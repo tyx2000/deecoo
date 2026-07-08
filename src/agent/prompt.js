@@ -37,6 +37,7 @@ function readPrompt(fileName) {
 
 function coordinationProtocol(coordination) {
   const basis = bulletList(coordination.basis);
+  const triggers = bulletList((coordination.splitTriggers ?? []).map((trigger) => trigger.name + ": " + trigger.reason));
   const phases = bulletList((coordination.phases ?? []).map((phase) => phase.name + ": " + phase.reason));
   const domains = bulletList((coordination.riskDomains ?? []).map((domain) => domain.name + ": " + domain.reason));
   const parallel = bulletList((coordination.parallel ?? []).map(formatWorker));
@@ -51,6 +52,8 @@ function coordinationProtocol(coordination) {
     "- Prefer worker tools for independent research, independent review, or independent verification; keep trivial work in the main context.",
     "- Split basis:",
     basis,
+    "- Split triggers:",
+    triggers,
     "- Phases:",
     phases,
     "- Risk domains:",
@@ -66,7 +69,8 @@ function coordinationProtocol(coordination) {
 
 function formatWorker(worker) {
   const mode = worker.mode ? `mode=${worker.mode}; ` : "";
-  return `${worker.name}: ${mode}${worker.goal} (${worker.reason})`;
+  const role = worker.role ? `role=${worker.role}; ` : "";
+  return `${worker.name}: ${role}${mode}${worker.goal} (${worker.reason})`;
 }
 
 function bulletList(items) {

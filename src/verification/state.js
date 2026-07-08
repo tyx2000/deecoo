@@ -23,7 +23,7 @@ export function emptyVerificationState() {
 export function advanceVerificationState(state, event) {
   const current = state ?? emptyVerificationState();
   if (event.name === "run_shell") return recordCommand(current, event);
-  if ((event.name === "edit_file" || event.name === "write_file") && current.status === "failed") {
+  if ((event.name === "apply_patch" || event.name === "apply_patch_set" || event.name === "apply_json_patch" || event.name === "edit_file" || event.name === "write_file") && current.status === "failed") {
     return transition(current, "fixed-pending-rerun", {
       type: "file-change-after-failure",
       tool: event.name,

@@ -8,11 +8,14 @@ const MAX_SUMMARY_CHARS = 6000;
 const MAX_TURN_CHARS = 2000;
 
 export async function createSessionStore(cwd) {
+  const rootDir = deecooHome();
   const projectId = hash(cwd);
-  const projectDir = join(deecooHome(), "sessions", projectId);
+  const projectDir = join(rootDir, "sessions", projectId);
   await mkdir(projectDir, { recursive: true });
 
   return {
+    rootDir,
+    projectId,
     projectDir,
     async createSession({ model, title, summary = "", turns = [], history } = {}) {
       const now = new Date().toISOString();

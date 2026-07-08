@@ -5,6 +5,7 @@ const BLOCK_PATTERNS = [
   { pattern: /\b(dd|mkfs|diskutil)\b/i, reason: "disk/device mutation" },
   { pattern: /\bchmod\s+-R\s+777\b/i, reason: "broad unsafe permission change" },
   { pattern: /(curl|wget)[^|;&]*\|\s*(sh|bash|zsh)\b/i, reason: "downloaded script execution" },
+  { pattern: /\b(read\s+-p|tail\s+-f|watch)\b/i, reason: "interactive or long-running command" },
 ];
 
 const WARN_PATTERNS = [
@@ -18,6 +19,7 @@ export function classifyShellCommand(command) {
   const text = normalizeShellCommand(command);
   const blocked = [
     ...detectBlockedShellTokens(text),
+    ...detectInteractiveShellCommands(text),
     ...BLOCK_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason),
   ];
   if (blocked.length) {
@@ -70,6 +72,25 @@ function shellCommandSegments(command) {
   }
   if (current.length) segments.push(current);
   return segments;
+}
+
+function detectInteractiveShellCommands(command) {
+  const reasons = [];
+  for (const segment of shellCommandSegments(command)) {
+    if (!segment.length) continue;
+    const commandName = basenameCommand(segment[0]);
+    const args = segment.slice(1);
+    if (["vim", "vi", "nvim", "nano", "emacs", "less", "more", "top", "htop", "ssh", "telnet", "ftp", "sftp", "mysql", "psql", "sqlite3", "redis-cli"].includes(commandName)) {
+      reasons.push("interactive command");
+    }
+    if (["node", "python", "python3", "ruby", "irb"].includes(commandName) && (args.length === 0 || args.includes("-i") || args.includes("--interactive"))) {
+      reasons.push("interactive repl command");
+    }
+    if (["bash", "zsh", "sh", "fish"].includes(commandName) && (args.length === 0 || args.includes("-i") || args.includes("--interactive"))) {
+      reasons.push("interactive shell command");
+    }
+  }
+  return reasons;
 }
 
 function shellTokens(command) {
@@ -156,4 +177,8 @@ function isRecursiveForceRm(segment) {
 
 function isRmCommand(token) {
   return token === "rm" || token.endsWith("/rm");
+}
+
+function basenameCommand(token) {
+  return String(token ?? "").split("/").at(-1);
 }

@@ -38,6 +38,55 @@ export function countLineChanges(original, next) {
   };
 }
 
+export function unifiedDiff(original, next, path) {
+  const before = diffLines(original);
+  const after = diffLines(next);
+  const file = String(path ?? "file");
+  if (original === next) {
+    return [`--- a/${file}`, `+++ b/${file}`].join("\n");
+  }
+
+  const hunks = buildDiffHunks(before, after);
+  return [
+    `--- a/${file}`,
+    `+++ b/${file}`,
+    ...hunks,
+  ].join("\n");
+}
+
+function buildDiffHunks(before, after) {
+  let start = 0;
+  while (start < before.length && start < after.length && before[start] === after[start]) {
+    start += 1;
+  }
+
+  let beforeEnd = before.length - 1;
+  let afterEnd = after.length - 1;
+  while (beforeEnd >= start && afterEnd >= start && before[beforeEnd] === after[afterEnd]) {
+    beforeEnd -= 1;
+    afterEnd -= 1;
+  }
+
+  const contextBeforeStart = Math.max(0, start - 3);
+  const removed = beforeEnd >= start ? before.slice(start, beforeEnd + 1) : [];
+  const added = afterEnd >= start ? after.slice(start, afterEnd + 1) : [];
+  const trailingStart = beforeEnd >= start ? beforeEnd + 1 : start;
+  const trailingContext = before.slice(trailingStart, Math.min(before.length, trailingStart + 3));
+  const leadingContext = before.slice(contextBeforeStart, start);
+  const oldStart = contextBeforeStart + 1;
+  const oldCount = leadingContext.length + removed.length + trailingContext.length;
+  const newStart = contextBeforeStart + 1;
+  const newCount = leadingContext.length + added.length + trailingContext.length;
+
+  return [
+    `@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`,
+    ...leadingContext.map((line) => " " + line),
+    ...removed.map((line) => "-" + line),
+    ...added.map((line) => "+" + line),
+    ...trailingContext.map((line) => " " + line),
+  ];
+}
+
 function lcsLength(before, after) {
   const cellCount = before.length * after.length;
   if (cellCount > 1_000_000) return 0;

@@ -1,7 +1,7 @@
 export const WORKER_TOOL_PROFILES = {
   research: new Set(["list_files", "read_file", "search_text", "git_status", "git_diff"]),
   verify: new Set(["list_files", "read_file", "search_text", "git_status", "git_diff", "run_shell"]),
-  implement: new Set(["list_files", "read_file", "search_text", "git_status", "git_diff", "run_shell", "edit_file", "write_file"]),
+  implement: new Set(["list_files", "read_file", "search_text", "git_status", "git_diff", "run_shell", "propose_patch", "propose_patch_set", "apply_patch", "apply_patch_set", "apply_json_patch", "edit_file", "write_file"]),
 };
 
 export const TOOL_CAPABILITIES = [
@@ -11,12 +11,58 @@ export const TOOL_CAPABILITIES = [
   { name: "git_status", category: "git", mutates: false, requiresApproval: false, description: "Read git status." },
   { name: "git_diff", category: "git", mutates: false, requiresApproval: false, description: "Read git diff." },
   { name: "run_shell", category: "shell", mutates: true, requiresApproval: true, description: "Run a guarded shell command." },
+  { name: "propose_patch", category: "files", mutates: false, requiresApproval: false, description: "Preview a file patch without applying it." },
+  { name: "propose_patch_set", category: "files", mutates: false, requiresApproval: false, description: "Preview a validated structured patch set without applying it." },
+  { name: "apply_patch", category: "files", mutates: true, requiresApproval: true, description: "Apply validated structured file hunks." },
+  { name: "apply_patch_set", category: "files", mutates: true, requiresApproval: true, description: "Apply validated structured hunks across multiple files." },
+  { name: "apply_json_patch", category: "files", mutates: true, requiresApproval: true, description: "Apply structured JSON AST operations." },
   { name: "edit_file", category: "files", mutates: true, requiresApproval: true, description: "Edit a file by unique replacement." },
   { name: "write_file", category: "files", mutates: true, requiresApproval: true, description: "Create or overwrite a file." },
   { name: "agent", category: "orchestration", mutates: false, requiresApproval: false, description: "Run a worker agent." },
   { name: "send_message", category: "orchestration", mutates: false, requiresApproval: false, description: "Continue a worker agent." },
   { name: "task_stop", category: "orchestration", mutates: false, requiresApproval: false, description: "Stop a worker agent." },
 ];
+
+function patchHunkSchema() {
+  return {
+    type: "object",
+    properties: {
+      oldStart: { type: "integer", description: "1-based line where oldLines starts; for insertion, line before which to insert." },
+      oldLines: { type: "array", items: { type: "string" }, description: "Current lines that must match exactly." },
+      newLines: { type: "array", items: { type: "string" }, description: "Replacement lines." },
+    },
+    required: ["oldStart", "oldLines", "newLines"],
+    additionalProperties: false,
+  };
+}
+
+function patchSetParameters() {
+  return {
+    type: "object",
+    properties: {
+      files: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["update", "create", "move"], description: "Patch operation. Defaults to update." },
+            path: { type: "string", description: "File path relative to workspace root." },
+            from: { type: "string", description: "Source path for move operations." },
+            content: { type: "string", description: "Full file content for create operations." },
+            hunks: {
+              type: "array",
+              items: patchHunkSchema(),
+            },
+          },
+          required: ["path"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["files"],
+    additionalProperties: false,
+  };
+}
 
 export function buildToolSchemas({ includeSubagents = true, allowedTools } = {}) {
   const schemas = [
@@ -87,6 +133,92 @@ export function buildToolSchemas({ includeSubagents = true, allowedTools } = {})
     {
       type: "function",
       function: {
+        name: "propose_patch",
+        description:
+          "Preview a patch for a workspace file without writing it. Use for medium, risky, or user-confirmed edits before applying with apply_patch, apply_patch_set, apply_json_patch, edit_file, or write_file. Provide either search+replace for a unique replacement or content for a full-file proposal.",
+        parameters: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "File path relative to workspace root." },
+            search: { type: "string", description: "Exact text to replace. Must match once when used." },
+            replace: { type: "string", description: "Replacement text for search." },
+            content: { type: "string", description: "Full proposed file content. Mutually exclusive with search+replace." },
+          },
+          required: ["path"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "apply_patch",
+        description:
+          "Apply structured hunks to one existing workspace file after validating that each oldLines block still matches the current file. Use after propose_patch or for complex line-based edits. Hunk oldStart is 1-based; oldLines and newLines are arrays of complete lines without line endings.",
+        parameters: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "File path relative to workspace root." },
+            hunks: {
+              type: "array",
+              items: patchHunkSchema(),
+            },
+          },
+          required: ["path", "hunks"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "apply_patch_set",
+        description:
+          "Apply structured hunks to multiple existing workspace files as one validated patch set. The harness reads and validates every file before asking for approval or writing anything. Duplicate paths are rejected; use one file entry per path.",
+        parameters: patchSetParameters(),
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "propose_patch_set",
+        description:
+          "Preview a structured patch set across multiple workspace files without writing anything. The harness validates every file using the same rules as apply_patch_set, including stale hunk context, duplicate paths, create overwrite, and move target overwrite checks.",
+        parameters: patchSetParameters(),
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "apply_json_patch",
+        description:
+          "Apply JSON AST operations to one workspace JSON file. Operations are validated against parsed JSON and preserve JSON formatting with two-space indentation. Paths use JSON Pointer syntax such as /scripts/test or /dependencies/name.",
+        parameters: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "JSON file path relative to workspace root." },
+            operations: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  op: { type: "string", enum: ["set", "delete", "append"], description: "AST operation." },
+                  pointer: { type: "string", description: "JSON Pointer target path." },
+                  value: { description: "Value for set or append." },
+                },
+                required: ["op", "pointer"],
+                additionalProperties: false,
+              },
+            },
+          },
+          required: ["path", "operations"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
         name: "edit_file",
         description:
           "Safely edit an existing workspace file by replacing a unique search string. Shows a diff and asks for confirmation before writing. If the path is missing, inspect the workspace with list_files or search_text before retrying.",
@@ -107,12 +239,14 @@ export function buildToolSchemas({ includeSubagents = true, allowedTools } = {})
       function: {
         name: "write_file",
         description:
-          "Write a workspace file. Shows a diff and asks for confirmation before writing.",
+          "Create or replace a workspace file. Prefer apply_patch/apply_patch_set for partial edits and apply_json_patch for JSON. When overwriting an existing file after reading it, include expectedContent or expectedSha256 so stale full-file writes are rejected.",
         parameters: {
           type: "object",
           properties: {
             path: { type: "string", description: "File path relative to workspace root." },
             content: { type: "string", description: "Full file content to write." },
+            expectedContent: { type: "string", description: "Optional exact current file content required before overwriting an existing file." },
+            expectedSha256: { type: "string", description: "Optional SHA-256 hex digest of the current file content required before overwriting an existing file." },
           },
           required: ["path", "content"],
           additionalProperties: false,
@@ -175,6 +309,12 @@ export function buildToolSchemas({ includeSubagents = true, allowedTools } = {})
                 "Worker tool profile. research is read-only; verify can also run shell commands; implement can edit files.",
             },
             subagent_type: { type: "string", description: "Legacy worker type; prefer mode." },
+            role: {
+              type: "string",
+              enum: ["planner", "coder", "reviewer", "tester", "security"],
+              description:
+                "Worker role preset. planner plans and researches; coder implements; reviewer reviews correctness/design; tester validates; security checks security risks. Role does not grant tools; mode controls tools.",
+            },
             prompt: { type: "string", description: "Self-contained worker instructions." },
           },
           required: ["description", "prompt"],

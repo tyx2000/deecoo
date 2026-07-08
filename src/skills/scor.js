@@ -5,7 +5,7 @@ export function isScorActive(activeSkills = []) {
 export function scorReviewToolPolicy() {
   return {
     name: "s-cor review mode",
-    blockedTools: ["edit_file", "write_file"],
+    blockedTools: ["propose_patch", "propose_patch_set", "apply_patch", "apply_patch_set", "apply_json_patch", "edit_file", "write_file"],
     allowedWorkerModes: ["research", "verify"],
   };
 }

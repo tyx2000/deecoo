@@ -1,8 +1,18 @@
 import { analyzeTaskCoordination } from "./coordination.js";
 import { buildSystemPrompt } from "./prompt.js";
+import {
+  buildAgentStateSummary,
+  createAgentState,
+  recordContextCompaction,
+  recordModelStep,
+  recordToolStep,
+} from "./state.js";
 import { CONTINUE_TRANSITIONS, TERMINAL_TRANSITIONS, continueTransition, terminalTransition } from "./transitions.js";
 import { advanceWorkflowState, createWorkflowState } from "../harness/workflow.js";
 import { createVerificationStateMachine } from "../verification/state.js";
+
+const MAX_LIVE_MESSAGE_CHARS = 180000;
+const RECENT_LIVE_MESSAGES = 10;
 
 export async function runAgent({
   client,
@@ -29,6 +39,7 @@ export async function runAgent({
   const requestType = coordination.requestType;
   const trace = [];
   const transitions = [];
+  const agentState = createAgentState({ task, cwd });
   const verification = createVerificationStateMachine();
   let workflow = advanceWorkflowState(createWorkflowState({ requestType }), { type: "planned" });
   let finalValidationAttempt = 0;
@@ -47,6 +58,11 @@ export async function runAgent({
   let step = 1;
   while (true) {
     throwIfAborted(signal);
+    compactLiveMessages(messages, {
+      protectedPrefixCount: 1 + contextMessages.length + 1,
+      agentState,
+      step,
+    });
     const request = {
       model,
       messages,
@@ -59,6 +75,7 @@ export async function runAgent({
 
     workflow = advanceWorkflowState(workflow, { type: "model-start", step });
     onModelStart?.({ step });
+    const modelStartedAt = Date.now();
     const completion = await requestChatCompletion({
       client,
       request,
@@ -74,6 +91,12 @@ export async function runAgent({
     if (!message) {
       throw new Error("DeepSeek returned no message.");
     }
+    recordModelStep(agentState, {
+      step,
+      message,
+      usage: completion.usage,
+      startedAt: modelStartedAt,
+    });
 
     messages.push(message);
 
@@ -111,6 +134,7 @@ export async function runAgent({
           transition: terminalTransition(TERMINAL_TRANSITIONS.PSEUDO_TOOL_CALL_TEXT, { step }),
           transitions,
           trace,
+          agentState,
           requestType,
           verification: verification.snapshot(),
           workflow: advanceWorkflowState(workflow, { type: "failed", step }),
@@ -126,6 +150,7 @@ export async function runAgent({
         transition: terminalTransition(finalValidation?.ok === false ? TERMINAL_TRANSITIONS.REVIEW_SCHEMA_INVALID : TERMINAL_TRANSITIONS.COMPLETED, { step }),
         transitions,
         trace,
+        agentState,
         requestType,
         reviewReport: finalValidation?.report,
         reviewValidation: finalValidation,
@@ -140,11 +165,14 @@ export async function runAgent({
       workflow = advanceWorkflowState(workflow, { type: "tool-start", tool: name, step });
       onToolStart?.({ name, args });
       throwIfAborted(signal);
+      const toolStartedAt = Date.now();
       const result = await tools.execute(name, args, { signal });
       throwIfAborted(signal);
       const verificationState = verification.observeTool({ name, args, result, step });
       transitions.push(continueTransition(result?.ok === false ? CONTINUE_TRANSITIONS.TOOL_ERROR : CONTINUE_TRANSITIONS.TOOL_USE, { step, tool: name }));
-      trace.push(toolTraceEvent({ step, name, args, result }));
+      const toolEndedAt = Date.now();
+      recordToolStep(agentState, { step, name, args, result, startedAt: toolStartedAt, endedAt: toolEndedAt });
+      trace.push(toolTraceEvent({ step, name, args, result, durationMs: Math.max(0, toolEndedAt - toolStartedAt) }));
       onToolEnd?.({ name, args, result, verification: verificationState });
       messages.push({
         role: "tool",
@@ -154,6 +182,39 @@ export async function runAgent({
     }
     step += 1;
   }
+}
+
+export function compactLiveMessages(messages, { protectedPrefixCount, agentState, step, maxChars = MAX_LIVE_MESSAGE_CHARS } = {}) {
+  const beforeChars = messageChars(messages);
+  if (beforeChars <= maxChars) return false;
+  const beforeMessages = messages.length;
+  const safePrefixCount = Math.max(1, Math.min(protectedPrefixCount ?? 1, messages.length));
+  const protectedMessages = messages.slice(0, safePrefixCount);
+  const dynamicMessages = messages.slice(safePrefixCount).filter((message) => !isRunStateSummary(message));
+  let tailStart = Math.max(0, dynamicMessages.length - RECENT_LIVE_MESSAGES);
+  while (tailStart > 0 && dynamicMessages[tailStart]?.role === "tool") {
+    tailStart -= 1;
+  }
+  const tail = dynamicMessages.slice(tailStart);
+  const summary = {
+    role: "system",
+    content: "Run state summary (local context compaction):\n" + buildAgentStateSummary(agentState),
+  };
+  messages.splice(0, messages.length, ...protectedMessages, summary, ...tail);
+  if (agentState) {
+    recordContextCompaction(agentState, {
+      beforeMessages,
+      afterMessages: messages.length,
+      beforeChars,
+      afterChars: messageChars(messages),
+      step,
+    });
+  }
+  return true;
+}
+
+function isRunStateSummary(message) {
+  return message?.role === "system" && String(message.content ?? "").startsWith("Run state summary (local context compaction):");
 }
 
 async function requestChatCompletion({
@@ -232,6 +293,7 @@ export function compactToolResult(name, result) {
   if (result.files) compact.files = compactArray(result.files, 120);
   if (result.matches) compact.matches = compactArray(result.matches, 80);
   if (result.content !== undefined) compact.content = truncateText(result.content, 30000);
+  if (result.failureSummary !== undefined) compact.failureSummary = truncateText(result.failureSummary, 12000);
   if (result.stdout !== undefined) compact.stdout = truncateText(result.stdout, 12000);
   if (result.stderr !== undefined) compact.stderr = truncateText(result.stderr, 12000);
   if (result.diff !== undefined) compact.diff = truncateText(result.diff, 20000);
@@ -255,7 +317,11 @@ function truncateText(value, maxChars) {
   return text.slice(0, maxChars) + `\n... truncated ${text.length - maxChars} additional characters`;
 }
 
-function toolTraceEvent({ step, name, args, result }) {
+function messageChars(messages) {
+  return messages.reduce((total, message) => total + String(message?.content ?? "").length, 0);
+}
+
+function toolTraceEvent({ step, name, args, result, durationMs }) {
   const activity = result?.activity ?? {};
   return {
     step,
@@ -267,5 +333,6 @@ function toolTraceEvent({ step, name, args, result }) {
     additions: activity.additions ?? 0,
     deletions: activity.deletions ?? 0,
     error: result?.ok === false ? result?.error ?? "" : "",
+    durationMs,
   };
 }

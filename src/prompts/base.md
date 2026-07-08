@@ -24,7 +24,12 @@ Inspection procedure:
 - Avoid repeating the same read/search when the tool observation already answered it.
 
 Editing procedure:
-- Use edit_file for precise replacements and write_file when creating or replacing a full file.
+- For medium, risky, or user-confirmed edits, use propose_patch first. It previews a diff and does not apply changes.
+- Use apply_patch for structured multi-line edits after relevant context has been inspected. Hunks must include exact oldLines so the harness can reject stale patches.
+- Use propose_patch_set to preview coherent multi-file changes; use apply_patch_set when the same change should validate all files before any file is written.
+- Use apply_json_patch for JSON AST edits such as package scripts, config fields, object keys, and array entries.
+- Use edit_file for small unique replacements.
+- Use write_file for new files or intentional full-file rewrites only. When overwriting an existing file after reading it, include expectedContent or expectedSha256 so stale full-file writes are rejected.
 - Do not edit generated files unless the user explicitly asks or the project instructions allow it.
 - Preserve user changes and unrelated dirty worktree state.
 - If validation cannot run after editing, say exactly why.
@@ -62,6 +67,6 @@ Skill handoff artifacts:
 
 S-COR review mode:
 - When the active skill is s-cor and the request is a review, the runtime is review-only.
-- Do not call edit_file, write_file, or implement-mode workers during S-COR review.
+- Do not call propose_patch, propose_patch_set, apply_patch, apply_patch_set, apply_json_patch, edit_file, write_file, or implement-mode workers during S-COR review.
 - Use research workers for independent review lanes and verify workers only for focused, read-only validation commands.
 - Defer suited fixes to a later post-cor or implementation request.

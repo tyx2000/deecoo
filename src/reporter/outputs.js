@@ -13,8 +13,24 @@ export async function saveRunOutputs(store, session, { task, result }) {
   if (result.verification) {
     outputs.push(await writeOutput(dir, `${now}-verification.json`, result.verification));
   }
+  outputs.push(await writeOutput(dir, `${now}-run-result.json`, structuredRunResult({ task, result })));
   outputs.push(await writeOutput(dir, `${now}-summary.md`, summaryMarkdown({ task, result })));
   return outputs;
+}
+
+export function structuredRunResult({ task, result }) {
+  return {
+    schemaVersion: 1,
+    task: String(task ?? ""),
+    finalText: String(result?.finalText ?? ""),
+    stoppedReason: result?.stoppedReason,
+    requestType: result?.requestType,
+    usage: result?.usage ?? {},
+    workflow: result?.workflow ?? {},
+    verification: result?.verification ?? {},
+    agentState: summarizeAgentState(result?.agentState),
+    reviewReport: result?.reviewReport,
+  };
 }
 
 export function summaryMarkdown({ task, result }) {
@@ -35,11 +51,42 @@ export function summaryMarkdown({ task, result }) {
     "- status: " + (result?.verification?.status ?? "not-run"),
     "- commands: " + (result?.verification?.commands?.length ?? 0),
     "",
+    "## Agent State",
+    "",
+    "- steps: " + (result?.agentState?.steps?.length ?? 0),
+    "- files read: " + listSummary(result?.agentState?.filesRead),
+    "- files edited: " + listSummary(result?.agentState?.filesEdited),
+    "- commands run: " + listSummary(result?.agentState?.commandsRun),
+    "- context compactions: " + (result?.agentState?.contextCompactions?.length ?? 0),
+    "",
     "## Output",
     "",
     String(result?.finalText ?? "").trim(),
     "",
   ].join("\n");
+}
+
+function listSummary(values) {
+  if (!Array.isArray(values) || values.length === 0) return "none";
+  return values.slice(-8).join(", ") + (values.length > 8 ? ", ..." : "");
+}
+
+function summarizeAgentState(agentState) {
+  if (!agentState) return undefined;
+  return {
+    schemaVersion: agentState.schemaVersion,
+    task: agentState.task,
+    cwd: agentState.cwd,
+    startedAt: agentState.startedAt,
+    updatedAt: agentState.updatedAt,
+    usage: agentState.usage,
+    filesRead: agentState.filesRead ?? [],
+    filesEdited: agentState.filesEdited ?? [],
+    commandsRun: agentState.commandsRun ?? [],
+    observations: (agentState.observations ?? []).slice(-40),
+    recentSteps: (agentState.steps ?? []).slice(-40),
+    contextCompactions: agentState.contextCompactions ?? [],
+  };
 }
 
 async function writeOutput(dir, fileName, content) {

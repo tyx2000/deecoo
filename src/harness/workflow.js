@@ -27,7 +27,8 @@ export function advanceWorkflowState(state, event) {
 
 function toolPhase(tool) {
   if (tool === "run_shell") return "verifying";
-  if (tool === "edit_file" || tool === "write_file") return "implementing";
+  if (tool === "propose_patch" || tool === "propose_patch_set") return "planning";
+  if (tool === "apply_patch" || tool === "apply_patch_set" || tool === "apply_json_patch" || tool === "edit_file" || tool === "write_file") return "implementing";
   if (tool === "agent" || tool === "send_message" || tool === "task_stop") return "orchestrating";
   return "researching";
 }
