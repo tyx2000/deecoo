@@ -885,7 +885,7 @@ function splitFlushableMarkdown(markdown) {
   return { ready, rest };
 }
 
-function displayWidth(value) {
+export function displayWidth(value) {
   let width = 0;
   for (const char of stripAnsi(value)) {
     width += charWidth(char.codePointAt(0));
@@ -903,9 +903,13 @@ function stripAnsi(value) {
 function charWidth(codePoint) {
   if (codePoint === undefined) return 0;
   if (codePoint === 0) return 0;
+  if (codePoint === 0x200d) return 0;
   if (codePoint < 32 || (codePoint >= 0x7f && codePoint < 0xa0)) return 0;
   if (isCombiningMark(codePoint)) return 0;
+  if (isVariationSelector(codePoint)) return 0;
+  if (isEmojiModifier(codePoint)) return 0;
   if (isWideCodePoint(codePoint)) return 2;
+  if (isEmojiPresentationCodePoint(codePoint)) return 2;
   return 1;
 }
 
@@ -917,6 +921,14 @@ function isCombiningMark(codePoint) {
     (codePoint >= 0x20d0 && codePoint <= 0x20ff) ||
     (codePoint >= 0xfe20 && codePoint <= 0xfe2f)
   );
+}
+
+function isVariationSelector(codePoint) {
+  return (codePoint >= 0xfe00 && codePoint <= 0xfe0f) || (codePoint >= 0xe0100 && codePoint <= 0xe01ef);
+}
+
+function isEmojiModifier(codePoint) {
+  return codePoint >= 0x1f3fb && codePoint <= 0x1f3ff;
 }
 
 function isWideCodePoint(codePoint) {
@@ -934,6 +946,35 @@ function isWideCodePoint(codePoint) {
       (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
       (codePoint >= 0x1f300 && codePoint <= 0x1faff) ||
       (codePoint >= 0x20000 && codePoint <= 0x3fffd))
+  );
+}
+
+function isEmojiPresentationCodePoint(codePoint) {
+  return (
+    codePoint === 0x00a9 ||
+    codePoint === 0x00ae ||
+    codePoint === 0x203c ||
+    codePoint === 0x2049 ||
+    codePoint === 0x2122 ||
+    codePoint === 0x2139 ||
+    (codePoint >= 0x2194 && codePoint <= 0x21aa) ||
+    (codePoint >= 0x231a && codePoint <= 0x231b) ||
+    codePoint === 0x2328 ||
+    codePoint === 0x23cf ||
+    (codePoint >= 0x23e9 && codePoint <= 0x23f3) ||
+    (codePoint >= 0x23f8 && codePoint <= 0x23fa) ||
+    codePoint === 0x24c2 ||
+    (codePoint >= 0x25aa && codePoint <= 0x25ab) ||
+    codePoint === 0x25b6 ||
+    codePoint === 0x25c0 ||
+    (codePoint >= 0x25fb && codePoint <= 0x25fe) ||
+    (codePoint >= 0x2600 && codePoint <= 0x27bf) ||
+    (codePoint >= 0x2934 && codePoint <= 0x2935) ||
+    (codePoint >= 0x2b05 && codePoint <= 0x2b55) ||
+    codePoint === 0x3030 ||
+    codePoint === 0x303d ||
+    codePoint === 0x3297 ||
+    codePoint === 0x3299
   );
 }
 
