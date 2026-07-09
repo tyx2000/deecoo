@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { formatActivityBlock } from "../src/cli/activity.js";
+import { formatActivityBlock, formatActivityStart } from "../src/cli/activity.js";
 import { setTheme } from "../src/terminal/theme.js";
 
 const ANSI_PATTERN = /\x1B\[[0-9;]*m/g;
@@ -102,4 +102,16 @@ test("activity blocks include concise failure details", () => {
 
   assert.match(block, /^● Read\(missing\.js\) failed/);
   assert.match(block, /\n  └ file not found: missing\.js$/);
+});
+
+test("activity start blocks make long-running worker dispatch visible", () => {
+  setTheme("mono-focus");
+  const block = visible(formatActivityStart({
+    name: "agent",
+    args: { description: "Security Reviewer", mode: "research" },
+    decision: { action: "allow", reasons: ["parallel_worker_dispatch"] },
+  }));
+
+  assert.match(block, /^○ Starting Agent\(Security Reviewer\)/);
+  assert.match(block, /why: executed · parallel worker dispatch/);
 });

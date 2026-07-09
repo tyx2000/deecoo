@@ -28,7 +28,7 @@ import {
 import { redact, saveRunAudit } from "../src/observability/audit.js";
 import { classifyShellCommand } from "../src/permissions/shellPolicy.js";
 import { saveRunOutputs, structuredRunResult } from "../src/reporter/outputs.js";
-import { aggregateReviewReport, createReviewFinalValidator, validateReviewReportText } from "../src/reporter/reviewReport.js";
+import { aggregateReviewReport, createReviewFinalValidator, formatReviewReportMarkdown, validateReviewReportText } from "../src/reporter/reviewReport.js";
 import { scorArtifactMetadata, scorReviewToolPolicy } from "../src/skills/scor.js";
 import { advanceVerificationState, emptyVerificationState } from "../src/verification/state.js";
 import { buildVerificationPlan } from "../src/verification/planner.js";
@@ -1437,6 +1437,41 @@ test("review aggregation removes duplicates and sorts by severity", () => {
   assert.equal(report.findings.length, 2);
   assert.equal(report.aggregation.duplicateCount, 1);
   assert.equal(report.findings[0].severity, "P1");
+});
+
+test("review reports render as human-readable markdown for CLI display", () => {
+  const markdown = formatReviewReportMarkdown({
+    schema_version: 1,
+    review: { target: "full project", base: "HEAD", project_context: "js", mode: "security-focused", lanes: ["security"] },
+    findings: [
+      {
+        id: "SCOR-001",
+        severity: "P1",
+        status: "open",
+        confidence: "high",
+        confidence_score: 90,
+        lane: "security",
+        scope: "pre-existing",
+        file: "src/config/settings.js:46",
+        finding: "API key stored without restrictive permissions",
+        impact: "Local users can read plaintext credentials.",
+        evidence: "writeFile creates a secret file without mode 0600.",
+        reliable_solution: "Write the settings file with restrictive permissions and chmod existing files.",
+        solution_fit: "suited=yes; executable=yes; cost=low; verification=focused test",
+        verification_status: "proven-by-code",
+        post_cor_candidate: true,
+      },
+    ],
+    open_questions: [],
+    test_gaps: ["Add a permission-mode regression test."],
+    residual_risks: [],
+    aggregation: { severityCounts: { P0: 0, P1: 1, P2: 0, P3: 0 } },
+  });
+
+  assert.match(markdown, /## Review Summary/);
+  assert.match(markdown, /### P1 SCOR-001: API key stored without restrictive permissions/);
+  assert.match(markdown, /- file: src\/config\/settings\.js:46/);
+  assert.doesNotMatch(markdown, /```json/);
 });
 
 test("audit log redacts secrets before writing", async () => {

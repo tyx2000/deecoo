@@ -26,6 +26,15 @@ export function formatActivityBlock({ name, args, result, decision }) {
   return lines.join("\n");
 }
 
+export function formatActivityStart({ name, args, decision }) {
+  const activity = fallbackActivity(name, args, {});
+  const title = toolCallTitle(name, args, activity);
+  const reason = formatDecisionReason({ decision, result: undefined });
+  const lines = [paint("muted", "○") + " " + paint("title", "Starting " + title)];
+  if (reason) lines.push("  " + TREE + " " + paint("muted", reason));
+  return lines.join("\n");
+}
+
 function formatDecisionReason({ decision, result }) {
   if (result?.code === "ALREADY_AVAILABLE") {
     const at = result.priorStep ? " from step " + result.priorStep : "";
@@ -50,7 +59,7 @@ function humanizeReason(reason) {
 }
 
 function fallbackActivity(name, args, result) {
-  const target = args?.path ?? args?.directory ?? args?.command ?? "";
+  const target = args?.path ?? args?.directory ?? args?.command ?? args?.description ?? "";
   return {
     kind: name,
     label: toolLabel(name),

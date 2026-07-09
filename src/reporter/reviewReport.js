@@ -121,6 +121,48 @@ export function aggregateReviewReport(report) {
   };
 }
 
+export function formatReviewReportMarkdown(report) {
+  const findings = report?.findings ?? [];
+  const review = report?.review ?? {};
+  const lines = [
+    "## Review Summary",
+    "",
+    "- target: " + fallback(review.target),
+    "- mode: " + fallback(review.mode),
+    "- findings: " + String(findings.length),
+  ];
+  const counts = report?.aggregation?.severityCounts ?? severityCounts(findings);
+  const nonzeroCounts = Object.entries(counts).filter(([, count]) => count > 0);
+  if (nonzeroCounts.length) {
+    lines.push("- severity: " + nonzeroCounts.map(([severity, count]) => `${severity}=${count}`).join(", "));
+  }
+  lines.push("");
+
+  if (!findings.length) {
+    lines.push("No findings.");
+  } else {
+    lines.push("## Findings", "");
+    for (const finding of findings) {
+      lines.push(
+        `### ${finding.severity} ${finding.id}: ${finding.finding}`,
+        "",
+        "- file: " + fallback(finding.file),
+        "- confidence: " + fallback(finding.confidence) + " (" + fallback(finding.confidence_score) + ")",
+        "- impact: " + fallback(finding.impact),
+        "- evidence: " + fallback(finding.evidence),
+        "- fix: " + fallback(finding.reliable_solution),
+        "- verification: " + fallback(finding.verification_status),
+        "",
+      );
+    }
+  }
+
+  appendSection(lines, "Open Questions", report?.open_questions);
+  appendSection(lines, "Test Gaps", report?.test_gaps);
+  appendSection(lines, "Residual Risks", report?.residual_risks);
+  return lines.join("\n").trim();
+}
+
 function validateFinding(finding, index, errors) {
   const label = `findings[${index}]`;
   if (!isObject(finding)) {
@@ -224,6 +266,17 @@ function severityCounts(findings) {
     if (counts[finding.severity] !== undefined) counts[finding.severity] += 1;
   }
   return counts;
+}
+
+function appendSection(lines, title, items) {
+  if (!Array.isArray(items) || items.length === 0) return;
+  lines.push("", "## " + title, "");
+  for (const item of items) lines.push("- " + fallback(item));
+}
+
+function fallback(value) {
+  const text = String(value ?? "").trim();
+  return text || "n/a";
 }
 
 function isObject(value) {

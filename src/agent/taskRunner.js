@@ -20,13 +20,13 @@ import {
 } from "../memory/projectMemory.js";
 import { saveRunAudit } from "../observability/audit.js";
 import { saveRunOutputs } from "../reporter/outputs.js";
-import { createReviewFinalValidator } from "../reporter/reviewReport.js";
+import { createReviewFinalValidator, formatReviewReportMarkdown } from "../reporter/reviewReport.js";
 import { buildSessionContext, recordTurn } from "../session/store.js";
 import { artifactContextMessages, saveSkillArtifact } from "../session/artifacts.js";
 import { isScorActive, scorArtifactMetadata, scorReviewToolPolicy } from "../skills/scor.js";
 import { createAssistantStreamPrinter, formatRunFooter, formatToolLine, printAssistantResponse } from "../terminal/markdown.js";
 import { createSpinner } from "../terminal/spinner.js";
-import { formatActivityBlock, printCoordinationPlan } from "../cli/activity.js";
+import { formatActivityBlock, formatActivityStart, printCoordinationPlan } from "../cli/activity.js";
 import { buildVerificationPlan, verificationPlanMessage } from "../verification/planner.js";
 
 export async function runTask({ client, tools, task, cwd, config, sessionStore, session, activeSkills = [], signal }) {
@@ -118,9 +118,18 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
           ? createReviewFinalValidator()
           : createTaskFinalValidator({ taskSpec, verificationPlan }),
       signal: taskDeadline.signal,
-      onModelStart: () => spinner.start(),
+      onModelStart: ({ step }) => {
+        spinner.stop();
+        console.log(formatToolLine("Thinking(step " + step + ") · waiting for model response"));
+        spinner.start();
+      },
       onModelEnd: () => spinner.stop(),
-      onToolStart: () => {},
+      onToolStart: ({ name, args, decision }) => {
+        spinner.stop();
+        console.log(formatActivityStart({ name, args, decision }) + "\n");
+        if (name === "agent") tracer.record({ type: "worker", name, description: args?.description, mode: args?.mode ?? args?.subagent_type });
+        spinner.start();
+      },
       onToolEnd: ({ name, args, result, decision }) => {
         spinner.stop();
         console.log(formatActivityBlock({ name, args, result, decision }) + "\n");
@@ -142,13 +151,14 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
       stoppedReason: result.stoppedReason,
       costUsd,
     });
-    if (streamed && finalTextWasStreamed(streamedContent, result.finalText)) {
+    const displayText = result.reviewReport ? formatReviewReportMarkdown(result.reviewReport) : result.finalText;
+    if (streamed && finalTextWasStreamed(streamedContent, displayText)) {
       streamPrinter.finish(footer);
     } else if (streamed) {
       streamPrinter.finish();
-      printAssistantResponse(result.finalText, footer);
+      printAssistantResponse(displayText, footer);
     } else {
-      printAssistantResponse(result.finalText, footer);
+      printAssistantResponse(displayText, footer);
     }
     if (session && sessionStore) {
       await saveRunAudit(sessionStore, session, {
