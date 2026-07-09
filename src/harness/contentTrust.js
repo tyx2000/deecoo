@@ -42,7 +42,7 @@ export function fenceUntrustedContent(source, text) {
 // Names of tool-result fields that carry untrusted external content.
 const UNTRUSTED_FIELDS = {
   read_file: ["content"],
-  run_shell: ["stdout", "stderr"],
+  run_shell: ["stdout", "stderr", "failureSummary"],
   git_diff: ["diff"],
   git_status: ["status"],
 };
@@ -50,7 +50,7 @@ const UNTRUSTED_FIELDS = {
 // Return a shallow copy of a tool result with its untrusted content fields fenced, plus a
 // combined injection scan. Non-content results pass through unchanged.
 export function markUntrustedToolResult(name, result) {
-  if (!result || result.ok === false) return { result, scan: { suspicious: false, reasons: [] } };
+  if (!result) return { result, scan: { suspicious: false, reasons: [] } };
   const fields = UNTRUSTED_FIELDS[name];
   if (!fields) return { result, scan: { suspicious: false, reasons: [] } };
 

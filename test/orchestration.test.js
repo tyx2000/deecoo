@@ -717,6 +717,12 @@ test("coordination assigns security and reviewer role presets for risk separatio
   assert.equal(coordination.agents.some((agent) => agent.role === "tester" && agent.mode === "verify"), true);
 });
 
+test("coordination does not treat ambiguous continuation as edit without code context", () => {
+  assert.equal(analyzeTaskCoordination("继续分析当前 harness 设计").requestType, "analysis");
+  assert.equal(analyzeTaskCoordination("继续完善输出策略是否合理").requestType, "analysis");
+  assert.equal(analyzeTaskCoordination("继续完善代码实现并运行测试").requestType, "edit");
+});
+
 test("simple prompts omit complex coordination protocol", () => {
   const prompt = buildSystemPrompt("/tmp/workspace", "general", [], { complex: false });
 
@@ -1022,6 +1028,18 @@ test("task final validation rejects weak edit completion without recorded edits"
 
   assert.equal(errors.some((error) => /weak completion/.test(error)), true);
   assert.equal(errors.some((error) => /no successful file edit/.test(error)), true);
+});
+
+test("task final validation allows continuation analysis without recorded edits", () => {
+  const errors = validateTaskFinal({
+    finalText: "已完成当前 harness 状态分析，核心缺口是恢复状态和验证闭环。",
+    requestType: "edit",
+    taskSpec: { goal: "继续分析当前 harness 设计", requestType: "edit" },
+    agentState: { filesEdited: [], commandsRun: [] },
+    trace: [],
+  });
+
+  assert.equal(errors.some((error) => /no successful file edit/.test(error)), false);
 });
 
 test("agent repairs weak edit final before exiting", async () => {
@@ -1847,6 +1865,9 @@ test("runAgent can resume from a serialized message history and finish", async (
     { role: "assistant", content: "partial progress" },
     { role: "user", content: "continue" },
   ];
+  const resumedAgentState = createAgentState({ task: "original task", cwd: "/tmp/project" });
+  resumedAgentState.filesEdited.push("src/a.js");
+  resumedAgentState.commandsRun.push("npm test");
   const result = await runAgent({
     client,
     tools,
@@ -1854,26 +1875,53 @@ test("runAgent can resume from a serialized message history and finish", async (
     cwd: "/tmp/project",
     model: "test",
     stream: false,
-    resume: { messages: priorMessages, step: 5, usage: { totalTokens: 900, promptTokens: 700, completionTokens: 200 } },
+    resume: {
+      messages: priorMessages,
+      step: 5,
+      usage: { totalTokens: 900, promptTokens: 700, completionTokens: 200 },
+      trace: [{ step: 4, tool: "edit_file", target: "src/a.js", ok: true }],
+      transitions: [{ type: "tool_use", step: 4, tool: "edit_file" }],
+      agentState: resumedAgentState,
+      verification: {
+        status: "passed",
+        commands: [{ command: "npm test", ok: true, step: 4 }],
+        transitions: [{ type: "command-result", command: "npm test", ok: true, step: 4 }],
+      },
+      workflow: { status: "executing", phase: "verifying", transitions: [{ type: "tool-start", step: 4 }] },
+    },
   });
 
   assert.equal(result.finalText, "resumed and completed");
   assert.ok(result.steps >= 6);
   assert.ok(result.usage.totalTokens >= 900);
+  assert.deepEqual(result.trace, [{ step: 4, tool: "edit_file", target: "src/a.js", ok: true }]);
+  assert.equal(result.agentState.filesEdited.includes("src/a.js"), true);
+  assert.equal(result.verification.status, "passed");
+  assert.equal(result.workflow.status, "completed");
 });
 
 test("serializeRunState produces a versioned, JSON-serializable snapshot", () => {
   const snapshot = serializeRunState({
     step: 3,
+    messages: [{ role: "user", content: "task" }],
     usage: { totalTokens: 120 },
-    workflow: { status: "executing", phase: "researching" },
+    workflow: { status: "executing", phase: "researching", transitions: [] },
     process: { duplicateRate: 0 },
     requestType: "edit",
+    trace: [{ tool: "read_file", target: "src/a.js", ok: true }],
+    transitions: [{ type: "tool_use", step: 2 }],
+    agentState: { filesRead: ["src/a.js"], filesEdited: ["src/a.js"] },
+    verification: { status: "passed", commands: [{ command: "npm test", ok: true }], transitions: [] },
   });
   assert.equal(snapshot.version, 1);
   assert.equal(snapshot.step, 3);
   assert.equal(snapshot.status, "executing");
   assert.equal(JSON.parse(JSON.stringify(snapshot)).usage.totalTokens, 120);
+  assert.equal(snapshot.messages[0].content, "task");
+  assert.equal(snapshot.trace[0].tool, "read_file");
+  assert.equal(snapshot.agentState.filesEdited[0], "src/a.js");
+  assert.equal(snapshot.verification.status, "passed");
+  assert.equal(snapshot.workflow.phase, "researching");
 });
 
 test("worker results are parsed into a structured contract and aggregated", async () => {

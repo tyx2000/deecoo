@@ -31,12 +31,10 @@ export function analyzeTaskCoordination(task) {
 function classifyRequest(task) {
   const text = String(task ?? "").toLowerCase();
   if (/(报错|错误|失败|bug|debug|修复|fix|failed|error|crash|异常)/i.test(text)) return "debug";
-  const hasEdit = /(修改|新增|实现|继续|完善|改造|搭建|接入|add|implement|update|change|refactor|build)/i.test(text);
+  const hasEdit = hasEditIntent(text);
   const hasReview = /(review|审查|评审|code review|风险|隐患)/i.test(text);
   if (hasReview && !hasEdit) return "review";
-  if (/(修改|新增|实现|继续|完善|改造|搭建|接入|add|implement|update|change|refactor|build)/i.test(text)) {
-    return "edit";
-  }
+  if (hasEdit) return "edit";
   if (/(解释|说明|分析|为什么|架构|方案|路径|是否合理|how|why|explain|analy[sz]e|architecture)/i.test(text)) {
     return "analysis";
   }
@@ -50,7 +48,7 @@ function coordinationBasis(task, requestType) {
   const clauseCount = text.split(/[，,；;。.\n]+/).map((part) => part.trim()).filter(Boolean).length;
   if (clauseCount >= 3) basis.push("request contains multiple distinct requirements");
   if (text.length > 180) basis.push("request is long enough to benefit from staged coordination");
-  if (/(修改|新增|实现|改造|接入|完善|edit|write|implement|refactor|build)/i.test(text)) {
+  if (hasEditIntent(text)) {
     basis.push("task may require code changes");
   }
   if (/(验证|测试|运行|check|test|verify|run)/i.test(text)) {
@@ -69,6 +67,13 @@ function coordinationBasis(task, requestType) {
     basis.push("review work benefits from independent risk perspectives");
   }
   return [...new Set(basis)];
+}
+
+function hasEditIntent(text) {
+  return (
+    /(修改|新增|实现|改造|搭建|接入|edit|write|implement|update|change|refactor|build|add)/i.test(text) ||
+    (/(继续|完善)/i.test(text) && /(代码|实现|功能|文件|修复|测试|验证|code|file|feature|test|verify|fix)/i.test(text))
+  );
 }
 
 const RISK_DOMAIN_DEFINITIONS = [

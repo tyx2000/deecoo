@@ -61,9 +61,17 @@ function taskFinalRepairPrompt({ errors, taskSpec, agentState, attempt }) {
 }
 
 function requiresCodeChange({ task, requestType }) {
-  if (requestType === "edit") return true;
+  if (requestType === "edit") return hasCodeChangeIntent(task);
   if (requestType !== "debug") return false;
-  return /(修复|修改|改|实现|新增|完善|接入|fix|change|update|implement|add|build|refactor)/i.test(task);
+  return hasCodeChangeIntent(task) || /(修复|fix|change|update)/i.test(task);
+}
+
+function hasCodeChangeIntent(task) {
+  const text = String(task ?? "");
+  return (
+    /(修改|新增|实现|改造|搭建|接入|edit|write|implement|update|change|refactor|build|add)/i.test(text) ||
+    (/(继续|完善)/i.test(text) && /(代码|实现|功能|文件|修复|测试|验证|code|file|feature|test|verify|fix)/i.test(text))
+  );
 }
 
 function successfulEditTool(trace) {

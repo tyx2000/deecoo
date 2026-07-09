@@ -60,15 +60,17 @@ export async function runAgent({
   const usage = resume?.usage ? { ...emptyUsage(), ...resume.usage } : emptyUsage();
   const coordination = providedCoordination ?? analyzeTaskCoordination(task);
   const requestType = coordination.requestType;
-  const trace = [];
-  const transitions = [];
-  const agentState = createAgentState({ task, cwd });
+  const trace = Array.isArray(resume?.trace) ? structuredClone(resume.trace) : [];
+  const transitions = Array.isArray(resume?.transitions) ? structuredClone(resume.transitions) : [];
+  const agentState = hydrateAgentState(resume?.agentState, { task, cwd, usage });
   const processController = createProcessController();
   // Expose this run's pinned observations so dispatched workers can reuse them instead of
   // re-reading the same files. Worker tool runtimes lack this hook, so the call safely no-ops.
   tools.setWorkingSetProvider?.(() => (hasWorkingSet(processController) ? buildWorkingSetSummary(processController) : undefined));
-  const verification = createVerificationStateMachine();
-  let workflow = advanceWorkflowState(createWorkflowState({ requestType }), { type: "planned" });
+  const verification = createVerificationStateMachine(resume?.verification);
+  let workflow = resume?.workflow
+    ? structuredClone(resume.workflow)
+    : advanceWorkflowState(createWorkflowState({ requestType }), { type: "planned" });
   let finalValidationAttempt = 0;
   const systemContent = trustToolOutput
     ? buildSystemPrompt(cwd, requestType, activeSkills, coordination) + "\n\n" + CONTENT_TRUST_INSTRUCTION
@@ -296,7 +298,18 @@ export async function runAgent({
       transitions.push(continueTransition(CONTINUE_TRANSITIONS.TOOL_USE, { step, tool: "process_guard" }));
     }
     onEvent?.({ type: "step", step });
-    onCheckpoint?.(serializeRunState({ step, usage, workflow, process: snapshotProcessMetrics(processController), requestType }));
+    onCheckpoint?.(serializeRunState({
+      step,
+      messages,
+      usage,
+      workflow,
+      process: snapshotProcessMetrics(processController),
+      requestType,
+      trace,
+      transitions,
+      agentState,
+      verification: verification.snapshot(),
+    }));
     step += 1;
   }
 }
@@ -337,7 +350,7 @@ function evaluateBudgets({ step, maxSteps, tokens, tokenBudget, deadline, cost =
   return undefined;
 }
 
-export function serializeRunState({ step, usage, workflow, process, requestType }) {
+export function serializeRunState({ step, messages, usage, workflow, process, requestType, trace, transitions, agentState, verification }) {
   return {
     version: 1,
     at: new Date().toISOString(),
@@ -345,8 +358,29 @@ export function serializeRunState({ step, usage, workflow, process, requestType 
     requestType,
     status: workflow?.status,
     phase: workflow?.phase,
+    messages: Array.isArray(messages) ? structuredClone(messages) : undefined,
     usage: { ...usage },
+    workflow: workflow ? structuredClone(workflow) : undefined,
     process: process ? { ...process } : undefined,
+    trace: Array.isArray(trace) ? structuredClone(trace) : [],
+    transitions: Array.isArray(transitions) ? structuredClone(transitions) : [],
+    agentState: agentState ? structuredClone(agentState) : undefined,
+    verification: verification ? structuredClone(verification) : undefined,
+  };
+}
+
+function hydrateAgentState(saved, { task, cwd, usage }) {
+  const base = createAgentState({ task, cwd });
+  if (!saved || typeof saved !== "object") {
+    base.usage = { ...base.usage, ...usage };
+    return base;
+  }
+  return {
+    ...base,
+    ...structuredClone(saved),
+    task: String(saved.task ?? task ?? ""),
+    cwd: String(saved.cwd ?? cwd ?? ""),
+    usage: { ...base.usage, ...(saved.usage ?? {}), ...usage },
   };
 }
 

@@ -1,5 +1,5 @@
-export function createVerificationStateMachine() {
-  let state = emptyVerificationState();
+export function createVerificationStateMachine(initialState) {
+  let state = hydrateVerificationState(initialState);
 
   return {
     observeTool({ name, args = {}, result = {}, step }) {
@@ -9,6 +9,15 @@ export function createVerificationStateMachine() {
     snapshot() {
       return structuredClone(state);
     },
+  };
+}
+
+function hydrateVerificationState(initialState) {
+  if (!initialState || typeof initialState !== "object") return emptyVerificationState();
+  return {
+    status: typeof initialState.status === "string" ? initialState.status : "not-run",
+    commands: Array.isArray(initialState.commands) ? structuredClone(initialState.commands) : [],
+    transitions: Array.isArray(initialState.transitions) ? structuredClone(initialState.transitions) : [],
   };
 }
 

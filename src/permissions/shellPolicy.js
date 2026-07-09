@@ -12,6 +12,8 @@ const BLOCK_PATTERNS = [
 // credential-exfiltration step, so treat any reference as a hard block (the shell is not
 // sandboxed at the OS level, so this policy is the containment boundary).
 const SENSITIVE_PATH_PATTERNS = [
+  { pattern: /(^|[\s"'=:])(?:~?\/|\.\/|[\w./-]+\/)?\.env(?:\.[\w-]+)?\b/i, reason: "dotenv secret file access" },
+  { pattern: /(^|[\s"'=:])(?:~?\/|\.\/|[\w./-]+\/)?\.envrc\b/i, reason: "dotenv shell config access" },
   { pattern: /(^|[\s"'=:])~?\/?\.ssh\b/i, reason: "SSH key/config access" },
   { pattern: /(^|[\s"'=:])~?\/?\.aws\b/i, reason: "AWS credential access" },
   { pattern: /(^|[\s"'=:])~?\/?\.gnupg\b/i, reason: "GPG key access" },
