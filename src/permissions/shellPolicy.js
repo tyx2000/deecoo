@@ -9,10 +9,11 @@ const BLOCK_PATTERNS = [
 ];
 
 const WARN_PATTERNS = [
-  { pattern: /\b(npm|pnpm|yarn)\s+install\b/i, reason: "dependency installation may run scripts or change lockfiles" },
+  { pattern: /\b(npm|pnpm|yarn)\s+(install|i|add|ci)\b/i, reason: "dependency installation may run scripts or change lockfiles" },
   { pattern: /\b(git\s+commit|git\s+merge|git\s+rebase|git\s+push)\b/i, reason: "git history or remote mutation" },
-  { pattern: /\b(rm|mv|cp|chmod|chown)\b/i, reason: "filesystem mutation" },
+  { pattern: /\b(rm|mv|cp|chmod|chown|tee)\b/i, reason: "filesystem mutation" },
   { pattern: /\b(curl|wget)\b/i, reason: "network access" },
+  { pattern: />{1,2}(?!&)(?!\s*\/dev\/null\b)/, reason: "output redirection may write outside the workspace" },
 ];
 
 export function classifyShellCommand(command) {
@@ -29,7 +30,11 @@ export function classifyShellCommand(command) {
       promptLabel: "Blocked shell command",
     };
   }
-  const warned = WARN_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason);
+  const warned = [
+    ...detectInlineCodeExecution(text),
+    ...detectBackgroundExecution(text),
+    ...WARN_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason),
+  ];
   if (warned.length) {
     return {
       level: "warn",
@@ -72,6 +77,23 @@ function shellCommandSegments(command) {
   }
   if (current.length) segments.push(current);
   return segments;
+}
+
+function detectInlineCodeExecution(command) {
+  const reasons = [];
+  for (const segment of shellCommandSegments(command)) {
+    if (!segment.length) continue;
+    const commandName = basenameCommand(segment[0]);
+    if (!["node", "python", "python3", "ruby", "irb", "perl", "php"].includes(commandName)) continue;
+    if (segment.slice(1).some((token) => token === "-e" || token === "-c" || token === "--eval")) {
+      reasons.push("inline interpreter code execution");
+    }
+  }
+  return reasons;
+}
+
+function detectBackgroundExecution(command) {
+  return shellTokens(command).includes("&") ? ["backgrounded/detached process"] : [];
 }
 
 function detectInteractiveShellCommands(command) {
@@ -127,6 +149,18 @@ function shellTokens(command) {
       pushCurrent();
       tokens.push("&&");
       index += 1;
+      continue;
+    }
+    if (char === "&") {
+      const prevChar = command[index - 1];
+      const nextChar = command[index + 1];
+      if (prevChar === ">" || prevChar === "<" || nextChar === ">" || nextChar === "<") {
+        // part of a redirection operator (2>&1, &>file, 0<&3) — not a background boundary
+        current += char;
+        continue;
+      }
+      pushCurrent();
+      tokens.push("&");
       continue;
     }
     if (char === "|" && command[index + 1] === "|") {

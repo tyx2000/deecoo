@@ -83,7 +83,7 @@ export function printHelp() {
     "  deecoo trace",
     "  deecoo theme",
     "  deecoo usage",
-    "  deecoo config <path|init|import-env|show>",
+    "  deecoo config <path|init|import-env|show|reset-shell-approvals>",
     "",
     "Running without a task starts an interactive session in the current workspace.",
     "Inside the session, type / to open the command menu.",

@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createPrompter } from "../src/cli/prompter.js";
-import { addApprovedShellCommand, loadSettingsEnv, setAutoApproveAllShellCommands } from "../src/config/settings.js";
+import {
+  addApprovedShellCommand,
+  loadSettingsEnv,
+  resetShellApprovals,
+  setAutoApproveAllShellCommands,
+} from "../src/config/settings.js";
 import { createToolRuntime } from "../src/tools/runtime.js";
 
 test("--yes prompter auto-approves shell commands only", async () => {
@@ -83,7 +88,7 @@ test("safe shell commands classified as allow-level never prompt", async () => {
     },
   });
 
-  const result = await tools.execute("run_shell", { command: "node -e \"console.log('safe')\"" });
+  const result = await tools.execute("run_shell", { command: "echo safe" });
 
   assert.equal(prompts, 0);
   assert.equal(result.ok, true);
@@ -172,4 +177,47 @@ test("always-all does not bypass hard-blocked commands", async () => {
 
   assert.equal(result.ok, false);
   assert.equal(result.code, "SHELL_COMMAND_BLOCKED");
+});
+
+test("previously-invisible risky commands now reach the prompter instead of silently auto-approving", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-shell-warn-workspace-"));
+  const riskyCommands = [
+    "node -e \"require('child_process').execSync('id')\"",
+    "echo hi > out.txt",
+    "node -e \"console.log('bg')\" &",
+    "npm i left-pad",
+  ];
+
+  for (const command of riskyCommands) {
+    let prompted = false;
+    const tools = createToolRuntime({
+      cwd: workspace,
+      prompter: async (_question, options) => {
+        prompted = options.kind === "shell-command-approval";
+        return "deny";
+      },
+    });
+
+    const result = await tools.execute("run_shell", { command });
+
+    assert.equal(prompted, true, `expected a prompt for: ${command}`);
+    assert.equal(result.ok, false);
+  }
+});
+
+test("config reset-shell-approvals clears both per-command approvals and always-all", async () => {
+  const settingsDir = await mkdtemp(join(tmpdir(), "deecoo-shell-reset-settings-"));
+
+  await addApprovedShellCommand({ settingsPath: settingsDir, command: "chmod 755 ." });
+  await setAutoApproveAllShellCommands({ settingsPath: settingsDir });
+
+  const before = await loadSettingsEnv({ settingsPath: settingsDir });
+  assert.deepEqual(before.permissions.shell.approvedCommands, ["chmod 755 ."]);
+  assert.equal(before.permissions.shell.autoApproveAll, true);
+
+  await resetShellApprovals({ settingsPath: settingsDir });
+
+  const after = await loadSettingsEnv({ settingsPath: settingsDir });
+  assert.deepEqual(after.permissions.shell.approvedCommands, []);
+  assert.equal(after.permissions.shell.autoApproveAll, false);
 });

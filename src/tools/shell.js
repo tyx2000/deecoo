@@ -6,6 +6,17 @@ const execAsync = promisify(exec);
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_OUTPUT_BYTES = 20 * 1024;
 
+const ALWAYS_DECISION_HANDLERS = {
+  always: async (permissionState, approvedCommandKey) => {
+    permissionState.approvedShellCommands?.add(approvedCommandKey);
+    await permissionState.onApproveShellCommand?.(approvedCommandKey);
+  },
+  "always-all": async (permissionState) => {
+    permissionState.autoApproveAllShell = true;
+    await permissionState.onApproveAllShellCommands?.();
+  },
+};
+
 export async function runShell(workspace, args, prompter, allowShellWithoutPrompt, permissionState, signal) {
   if (!args.command) return { ok: false, error: "command is required" };
   const command = String(args.command);
@@ -19,21 +30,17 @@ export async function runShell(workspace, args, prompter, allowShellWithoutPromp
       activity: { kind: "command", label: "Blocked command", target: command, detail: policy.reasons.join(", ") },
     };
   }
-  const approvedCommand = permissionState.approvedShellCommands?.has(approvedCommandKey);
-  const autoApproved =
-    allowShellWithoutPrompt || permissionState.autoApproveAllShell || policy.level === "allow" || approvedCommand;
-  const decision = autoApproved
-    ? "approve"
-    : await prompter(shellPrompt(command, policy), { kind: "shell-command-approval", policy, command });
-  if (decision === "always") {
-    permissionState.approvedShellCommands?.add(approvedCommandKey);
-    await permissionState.onApproveShellCommand?.(approvedCommandKey);
-  }
-  if (decision === "always-all") {
-    permissionState.autoApproveAllShell = true;
-    await permissionState.onApproveAllShellCommands?.();
-  }
-  const allowed = decision === true || decision === "approve" || decision === "always" || decision === "always-all";
+  const commandIsSafe = policy.level === "allow";
+  const hasStandingApproval =
+    allowShellWithoutPrompt ||
+    permissionState.autoApproveAllShell ||
+    permissionState.approvedShellCommands?.has(approvedCommandKey);
+  const decision =
+    commandIsSafe || hasStandingApproval
+      ? "approve"
+      : await prompter(shellPrompt(command, policy), { kind: "shell-command-approval", policy, command });
+  await ALWAYS_DECISION_HANDLERS[decision]?.(permissionState, approvedCommandKey);
+  const allowed = decision !== "deny" && decision !== false;
   if (!allowed) return { ok: false, error: "User denied shell command." };
 
   try {

@@ -3,6 +3,7 @@ import {
   collectSettingsEnv,
   defaultSettingsEnv,
   loadSettingsEnv,
+  resetShellApprovals,
   writeSettingsEnv,
 } from "../config/settings.js";
 
@@ -47,6 +48,13 @@ export async function handleConfigCommand(args) {
     return;
   }
 
+  if (action === "reset-shell-approvals") {
+    const result = await resetShellApprovals({ settingsPath: args.settings });
+    console.log("Cleared shell approvals in " + result.path);
+    console.log("Both per-command approvals and \"Always Approve All Commands\" are reset; future shell prompts will ask again.");
+    return;
+  }
+
   printConfigHelp();
 }
 
@@ -74,6 +82,7 @@ function printConfigHelp() {
     "  deecoo config init",
     "  deecoo config import-env",
     "  deecoo config show",
+    "  deecoo config reset-shell-approvals",
     "",
     "Config defaults to " + appSettingsPath() + ".",
     "Use --settings <path> to override the settings file or directory.",

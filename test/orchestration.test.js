@@ -1254,12 +1254,24 @@ test("shell guardrails block interactive commands", async () => {
 
   assert.equal(classifyShellCommand("vim src/index.js").level, "block");
   assert.equal(classifyShellCommand("python").level, "block");
-  assert.equal(classifyShellCommand("python -c \"print(1)\"").level, "allow");
+  assert.equal(classifyShellCommand("python -c \"print(1)\"").level, "warn");
   assert.equal(classifyShellCommand("node --test").level, "allow");
   const result = await runtime.execute("run_shell", { command: "node" });
 
   assert.equal(result.ok, false);
   assert.equal(result.code, "SHELL_COMMAND_BLOCKED");
+});
+
+test("shell guardrails warn on previously-invisible risky patterns", () => {
+  assert.equal(classifyShellCommand("node -e \"require('child_process').execSync('id')\"").level, "warn");
+  assert.equal(classifyShellCommand("echo hi > out.txt").level, "warn");
+  assert.equal(classifyShellCommand("echo hi >> out.txt").level, "warn");
+  assert.equal(classifyShellCommand("node server.js &").level, "warn");
+  assert.equal(classifyShellCommand("npm i left-pad").level, "warn");
+  assert.equal(classifyShellCommand("pnpm add left-pad").level, "warn");
+
+  assert.equal(classifyShellCommand("echo hi 2>&1").level, "allow");
+  assert.equal(classifyShellCommand("echo hi 2>/dev/null").level, "allow");
 });
 
 test("run_shell defaults to short timeout and truncates output", async () => {
