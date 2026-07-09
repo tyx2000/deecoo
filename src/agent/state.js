@@ -18,6 +18,7 @@ export function createAgentState({ task, cwd }) {
     observations: [],
     steps: [],
     contextCompactions: [],
+    process: undefined,
     usage: emptyUsage(),
   };
 }
@@ -88,7 +89,15 @@ export function recordContextCompaction(state, { beforeMessages, afterMessages, 
   return state;
 }
 
+export function recordProcessSnapshot(state, process) {
+  if (!state || !process) return state;
+  state.process = process;
+  touch(state);
+  return state;
+}
+
 export function buildAgentStateSummary(state) {
+  const process = state?.process;
   return [
     "Task summary:",
     "- Task: " + truncateOneLine(state.task, 500),
@@ -98,6 +107,14 @@ export function buildAgentStateSummary(state) {
     "- files edited: " + listSummary(state.filesEdited),
     "- commands run: " + listSummary(state.commandsRun),
     "- verification observations: " + observationSummary(state.observations),
+    process
+      ? "- process: blocked_duplicates=" +
+        (process.duplicatesBlocked ?? 0) +
+        ", thrash_nudges=" +
+        (process.thrashNudges ?? 0) +
+        ", pinned_files=" +
+        (process.pinnedFiles ?? 0)
+      : "- process: n/a",
     "- token usage: " + state.usage.totalTokens + " total (" + state.usage.promptTokens + " in / " + state.usage.completionTokens + " out)",
     "",
     "Recent steps:",
@@ -160,7 +177,21 @@ function compactModelMessage(message) {
 function compactToolObservation(result) {
   if (!result || typeof result !== "object") return result;
   const out = {};
-  for (const key of ["ok", "code", "error", "recoverable", "suggestion", "cached", "truncated", "path", "bytesWritten", "status"]) {
+  for (const key of [
+    "ok",
+    "code",
+    "error",
+    "recoverable",
+    "suggestion",
+    "cached",
+    "alreadyAvailable",
+    "reason",
+    "priorStep",
+    "truncated",
+    "path",
+    "bytesWritten",
+    "status",
+  ]) {
     if (result[key] !== undefined) out[key] = result[key];
   }
   if (result.activity) out.activity = result.activity;

@@ -5,14 +5,27 @@ import {
   createAgentState,
   recordContextCompaction,
   recordModelStep,
+  recordProcessSnapshot,
   recordToolStep,
 } from "./state.js";
 import { CONTINUE_TRANSITIONS, TERMINAL_TRANSITIONS, continueTransition, terminalTransition } from "./transitions.js";
+import {
+  buildWorkingSetSummary,
+  createProcessController,
+  evaluateToolCall,
+  hasWorkingSet,
+  maybeBuildProcessNudge,
+  recordToolObservation,
+  snapshotProcessMetrics,
+} from "../harness/processController.js";
 import { advanceWorkflowState, createWorkflowState } from "../harness/workflow.js";
 import { createVerificationStateMachine } from "../verification/state.js";
+import { CONTENT_TRUST_INSTRUCTION, markUntrustedToolResult } from "../harness/contentTrust.js";
+import { estimateCostUsd } from "../harness/cost.js";
 
 const MAX_LIVE_MESSAGE_CHARS = 180000;
 const RECENT_LIVE_MESSAGES = 10;
+const MAX_PARALLEL_DISPATCH = 4;
 
 export async function runAgent({
   client,
@@ -26,41 +39,90 @@ export async function runAgent({
   contextMessages = [],
   activeSkills = [],
   stream = true,
+  coordination: providedCoordination,
+  maxSteps = 150,
+  tokenBudget,
+  deadline,
+  costBudgetUsd,
+  priceOverrides,
+  trustToolOutput = true,
+  resume,
   onModelStart,
   onModelEnd,
   onToolStart,
   onToolEnd,
   onTextDelta,
+  onCheckpoint,
+  onEvent,
   finalValidator,
   signal,
 }) {
-  const usage = emptyUsage();
-  const coordination = analyzeTaskCoordination(task);
+  const usage = resume?.usage ? { ...emptyUsage(), ...resume.usage } : emptyUsage();
+  const coordination = providedCoordination ?? analyzeTaskCoordination(task);
   const requestType = coordination.requestType;
   const trace = [];
   const transitions = [];
   const agentState = createAgentState({ task, cwd });
+  const processController = createProcessController();
+  // Expose this run's pinned observations so dispatched workers can reuse them instead of
+  // re-reading the same files. Worker tool runtimes lack this hook, so the call safely no-ops.
+  tools.setWorkingSetProvider?.(() => (hasWorkingSet(processController) ? buildWorkingSetSummary(processController) : undefined));
   const verification = createVerificationStateMachine();
   let workflow = advanceWorkflowState(createWorkflowState({ requestType }), { type: "planned" });
   let finalValidationAttempt = 0;
-  const messages = [
-    {
-      role: "system",
-      content: buildSystemPrompt(cwd, requestType, activeSkills, coordination),
-    },
-    ...contextMessages,
-    {
-      role: "user",
-      content: task,
-    },
-  ];
+  const systemContent = trustToolOutput
+    ? buildSystemPrompt(cwd, requestType, activeSkills, coordination) + "\n\n" + CONTENT_TRUST_INSTRUCTION
+    : buildSystemPrompt(cwd, requestType, activeSkills, coordination);
+  // Resuming a prior run rehydrates its message history and step/usage counters; a fresh run
+  // starts from the system prompt, injected context, and the task.
+  const messages = Array.isArray(resume?.messages) && resume.messages.length
+    ? resume.messages.slice()
+    : [
+        { role: "system", content: systemContent },
+        ...contextMessages,
+        { role: "user", content: task },
+      ];
 
-  let step = 1;
+  const finishRun = ({ finalText, stoppedReason, workflowType, extra = {} }) => {
+    const process = snapshotProcessMetrics(processController);
+    recordProcessSnapshot(agentState, process);
+    return {
+      finalText,
+      messages,
+      steps: step,
+      usage,
+      stoppedReason,
+      transition: terminalTransition(stoppedReason ?? TERMINAL_TRANSITIONS.COMPLETED, { step }),
+      transitions,
+      trace,
+      agentState,
+      requestType,
+      process,
+      verification: verification.snapshot(),
+      workflow: workflowType ? advanceWorkflowState(workflow, { type: workflowType, step }) : workflow,
+      ...extra,
+    };
+  };
+
+  let step = Number.isFinite(resume?.step) ? resume.step + 1 : 1;
   while (true) {
     throwIfAborted(signal);
+    const budgetStop = evaluateBudgets({
+      step,
+      maxSteps,
+      tokens: usage.totalTokens,
+      tokenBudget,
+      deadline,
+      cost: costBudgetUsd ? estimateCostUsd(usage, model, priceOverrides) : 0,
+      costBudgetUsd,
+    });
+    if (budgetStop) {
+      return finishRun({ finalText: budgetStop.message, stoppedReason: budgetStop.reason, workflowType: "failed", extra: { budget: budgetStop } });
+    }
     compactLiveMessages(messages, {
       protectedPrefixCount: 1 + contextMessages.length + 1,
       agentState,
+      processController,
       step,
     });
     const request = {
@@ -86,6 +148,7 @@ export async function runAgent({
       signal,
     });
     addUsage(usage, completion.usage);
+    onEvent?.({ type: "model-call", step, usage: completion.usage });
 
     const message = completion.choices?.[0]?.message;
     if (!message) {
@@ -101,6 +164,8 @@ export async function runAgent({
     messages.push(message);
 
     if (!message.tool_calls?.length) {
+      const process = snapshotProcessMetrics(processController);
+      recordProcessSnapshot(agentState, process);
       const finalText = message.content || "Done.";
       const finalValidation = finalValidator?.({
         finalText,
@@ -111,6 +176,7 @@ export async function runAgent({
         trace,
         verification: verification.snapshot(),
         workflow,
+        process,
         attempt: finalValidationAttempt,
       });
       if (finalValidation && !finalValidation.ok && finalValidationAttempt < finalValidation.maxRepairAttempts) {
@@ -140,6 +206,7 @@ export async function runAgent({
           trace,
           agentState,
           requestType,
+          process,
           verification: verification.snapshot(),
           workflow: advanceWorkflowState(workflow, { type: "failed", step }),
         };
@@ -157,6 +224,7 @@ export async function runAgent({
         trace,
         agentState,
         requestType,
+        process,
         reviewReport: finalValidation?.report,
         reviewValidation: finalValidation,
         verification: verification.snapshot(),
@@ -164,32 +232,128 @@ export async function runAgent({
       };
     }
 
-    for (const call of message.tool_calls) {
+    const evaluated = message.tool_calls.map((call) => {
       const name = call.function?.name;
       const args = parseToolArguments(call.function?.arguments);
       workflow = advanceWorkflowState(workflow, { type: "tool-start", tool: name, step });
-      onToolStart?.({ name, args });
+      const decision = evaluateToolCall(processController, { name, args, step });
+      onToolStart?.({ name, args, decision });
+      return { call, name, args, decision };
+    });
+
+    const runOne = async (item) => {
       throwIfAborted(signal);
-      const toolStartedAt = Date.now();
-      const result = await tools.execute(name, args, { signal });
+      const startedAt = Date.now();
+      const result =
+        item.decision.action === "short_circuit"
+          ? item.decision.result
+          : await tools.execute(item.name, item.args, { signal });
       throwIfAborted(signal);
+      return { ...item, result, startedAt, endedAt: Date.now() };
+    };
+
+    // Independent subagent dispatches are I/O-bound on the model and isolated from the parent
+    // workspace, so run them concurrently; every other tool stays serial because dedup and
+    // observation semantics assume ordered execution.
+    const executedById = new Map();
+    for (const item of evaluated.filter((item) => !isParallelDispatch(item))) {
+      executedById.set(item.call.id, await runOne(item));
+    }
+    for (const executed of await mapWithConcurrency(evaluated.filter(isParallelDispatch), MAX_PARALLEL_DISPATCH, runOne)) {
+      executedById.set(executed.call.id, executed);
+    }
+
+    for (const item of evaluated) {
+      const { name, args, result, startedAt, endedAt } = executedById.get(item.call.id);
+      recordToolObservation(processController, { name, args, result, step });
       const verificationState = verification.observeTool({ name, args, result, step });
       transitions.push(continueTransition(result?.ok === false ? CONTINUE_TRANSITIONS.TOOL_ERROR : CONTINUE_TRANSITIONS.TOOL_USE, { step, tool: name }));
-      const toolEndedAt = Date.now();
-      recordToolStep(agentState, { step, name, args, result, startedAt: toolStartedAt, endedAt: toolEndedAt });
-      trace.push(toolTraceEvent({ step, name, args, result, durationMs: Math.max(0, toolEndedAt - toolStartedAt) }));
-      onToolEnd?.({ name, args, result, verification: verificationState });
+      recordToolStep(agentState, { step, name, args, result, startedAt, endedAt });
+      trace.push(toolTraceEvent({ step, name, args, result, durationMs: Math.max(0, endedAt - startedAt) }));
+      const compacted = compactToolResult(name, result);
+      const { result: trustedResult, scan } = trustToolOutput
+        ? markUntrustedToolResult(name, compacted)
+        : { result: compacted, scan: { suspicious: false, reasons: [] } };
+      onToolEnd?.({ name, args, result, decision: item.decision, verification: verificationState, injection: scan });
+      onEvent?.({
+        type: "tool-call",
+        step,
+        tool: name,
+        ok: result?.ok !== false,
+        reused: result?.alreadyAvailable === true || result?.code === "ALREADY_AVAILABLE",
+        injectionSuspected: scan.suspicious,
+      });
       messages.push({
         role: "tool",
-        tool_call_id: call.id,
-        content: JSON.stringify(compactToolResult(name, result)),
+        tool_call_id: item.call.id,
+        content: JSON.stringify(trustedResult),
       });
     }
+
+    const processNudge = maybeBuildProcessNudge(processController, { step });
+    if (processNudge) {
+      messages.push(processNudge);
+      transitions.push(continueTransition(CONTINUE_TRANSITIONS.TOOL_USE, { step, tool: "process_guard" }));
+    }
+    onEvent?.({ type: "step", step });
+    onCheckpoint?.(serializeRunState({ step, usage, workflow, process: snapshotProcessMetrics(processController), requestType }));
     step += 1;
   }
 }
 
-export function compactLiveMessages(messages, { protectedPrefixCount, agentState, step, maxChars = MAX_LIVE_MESSAGE_CHARS } = {}) {
+function evaluateBudgets({ step, maxSteps, tokens, tokenBudget, deadline, cost = 0, costBudgetUsd }) {
+  if (maxSteps && step > maxSteps) {
+    return {
+      reason: TERMINAL_TRANSITIONS.STEP_BUDGET_EXCEEDED,
+      limit: maxSteps,
+      observed: step,
+      message: `Stopped after reaching the step budget (${maxSteps} steps). The task did not converge; narrow the request or raise DEECOO_MAX_STEPS.`,
+    };
+  }
+  if (tokenBudget && tokens >= tokenBudget) {
+    return {
+      reason: TERMINAL_TRANSITIONS.TOKEN_BUDGET_EXCEEDED,
+      limit: tokenBudget,
+      observed: tokens,
+      message: `Stopped after reaching the token budget (${tokenBudget} tokens used ${tokens}). Narrow the request or raise DEECOO_TOKEN_BUDGET.`,
+    };
+  }
+  if (costBudgetUsd && cost >= costBudgetUsd) {
+    return {
+      reason: TERMINAL_TRANSITIONS.COST_BUDGET_EXCEEDED,
+      limit: costBudgetUsd,
+      observed: cost,
+      message: `Stopped after reaching the cost budget ($${costBudgetUsd}; estimated $${cost.toFixed(4)}). Narrow the request or raise DEECOO_COST_BUDGET_USD.`,
+    };
+  }
+  if (deadline && Date.now() >= deadline) {
+    return {
+      reason: TERMINAL_TRANSITIONS.TASK_DEADLINE_EXCEEDED,
+      limit: deadline,
+      observed: Date.now(),
+      message: "Stopped after reaching the task time budget. Narrow the request or raise DEECOO_TASK_TIMEOUT_MS.",
+    };
+  }
+  return undefined;
+}
+
+export function serializeRunState({ step, usage, workflow, process, requestType }) {
+  return {
+    version: 1,
+    at: new Date().toISOString(),
+    step,
+    requestType,
+    status: workflow?.status,
+    phase: workflow?.phase,
+    usage: { ...usage },
+    process: process ? { ...process } : undefined,
+  };
+}
+
+export function compactLiveMessages(
+  messages,
+  { protectedPrefixCount, agentState, processController, step, maxChars = MAX_LIVE_MESSAGE_CHARS } = {},
+) {
   const beforeChars = messageChars(messages);
   if (beforeChars <= maxChars) return false;
   const beforeMessages = messages.length;
@@ -201,12 +365,19 @@ export function compactLiveMessages(messages, { protectedPrefixCount, agentState
     tailStart -= 1;
   }
   const tail = dynamicMessages.slice(tailStart);
+  const summaryParts = ["Run state summary (local context compaction):", buildAgentStateSummary(agentState)];
+  if (processController) {
+    summaryParts.push("", buildWorkingSetSummary(processController));
+  }
   const summary = {
     role: "system",
-    content: "Run state summary (local context compaction):\n" + buildAgentStateSummary(agentState),
+    content: summaryParts.join("\n"),
   };
   messages.splice(0, messages.length, ...protectedMessages, summary, ...tail);
   if (agentState) {
+    if (processController) {
+      recordProcessSnapshot(agentState, snapshotProcessMetrics(processController));
+    }
     recordContextCompaction(agentState, {
       beforeMessages,
       afterMessages: messages.length,
@@ -252,6 +423,26 @@ function throwIfAborted(signal) {
   throw error;
 }
 
+function isParallelDispatch(item) {
+  return item.name === "agent" && item.decision.action !== "short_circuit";
+}
+
+async function mapWithConcurrency(items, limit, fn) {
+  if (items.length === 0) return [];
+  const results = new Array(items.length);
+  let cursor = 0;
+  const runner = async () => {
+    while (true) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= items.length) return;
+      results[index] = await fn(items[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, runner));
+  return results;
+}
+
 function looksLikePseudoToolCall(content) {
   const text = String(content ?? "");
   return (
@@ -290,7 +481,26 @@ function parseToolArguments(value) {
 export function compactToolResult(name, result) {
   if (!result || typeof result !== "object") return result;
   const compact = {};
-  for (const key of ["ok", "code", "error", "recoverable", "suggestion", "cached", "truncated", "path", "requestedPath", "bytesWritten", "status", "task_id", "mode", "stoppedReason"]) {
+  for (const key of [
+    "ok",
+    "code",
+    "error",
+    "recoverable",
+    "suggestion",
+    "cached",
+    "alreadyAvailable",
+    "reason",
+    "priorStep",
+    "signature",
+    "truncated",
+    "path",
+    "requestedPath",
+    "bytesWritten",
+    "status",
+    "task_id",
+    "mode",
+    "stoppedReason",
+  ]) {
     if (result[key] !== undefined) compact[key] = result[key];
   }
   if (result.activity) compact.activity = result.activity;
@@ -335,6 +545,7 @@ function toolTraceEvent({ step, name, args, result, durationMs }) {
     ok: result?.ok !== false,
     code: result?.code ?? "",
     cached: Boolean(result?.cached),
+    alreadyAvailable: Boolean(result?.alreadyAvailable || result?.code === "ALREADY_AVAILABLE"),
     additions: activity.additions ?? 0,
     deletions: activity.deletions ?? 0,
     error: result?.ok === false ? result?.error ?? "" : "",

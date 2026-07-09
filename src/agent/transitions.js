@@ -3,6 +3,10 @@ export const TERMINAL_TRANSITIONS = Object.freeze({
   PSEUDO_TOOL_CALL_TEXT: "pseudo_tool_call_text",
   REVIEW_SCHEMA_INVALID: "review_schema_invalid",
   TASK_CONTRACT_INVALID: "task_contract_invalid",
+  STEP_BUDGET_EXCEEDED: "step_budget_exceeded",
+  TOKEN_BUDGET_EXCEEDED: "token_budget_exceeded",
+  COST_BUDGET_EXCEEDED: "cost_budget_exceeded",
+  TASK_DEADLINE_EXCEEDED: "task_deadline_exceeded",
 });
 
 export const CONTINUE_TRANSITIONS = Object.freeze({

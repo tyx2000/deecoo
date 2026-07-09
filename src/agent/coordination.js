@@ -5,12 +5,14 @@ export function analyzeTaskCoordination(task) {
   const phases = selectPhases(task, requestType, riskDomains);
   const splitTriggers = selectSplitTriggers(task, requestType, basis, riskDomains, phases);
   const plan = buildWorkerPlan({ task, requestType, basis, riskDomains, phases, splitTriggers });
+  // Require a genuine structural signal (multiple requirements, risk domains, phases, or split
+  // triggers) rather than raw length — a long but single-purpose task should not force a split,
+  // since each worker carries fixed context-ingestion overhead.
   const complex =
     basis.length >= 2 ||
     riskDomains.length >= 2 ||
     phases.length >= 3 ||
-    splitTriggers.length >= 2 ||
-    String(task ?? "").length > 180;
+    splitTriggers.length >= 2;
 
   return {
     requestType,

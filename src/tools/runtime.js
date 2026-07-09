@@ -35,12 +35,19 @@ export function createToolRuntime({
     taskToolPolicy: undefined,
   };
   let subagentRuntime;
+  let workingSetProvider;
 
   const runtime = {
     schemas: buildToolSchemas({ includeSubagents: true }),
     workerSchemas: buildToolSchemas({ includeSubagents: false }),
     capabilities() {
       return TOOL_CAPABILITIES;
+    },
+    setWorkingSetProvider(provider) {
+      workingSetProvider = provider;
+    },
+    getWorkingSetSummary() {
+      return workingSetProvider ? workingSetProvider() : undefined;
     },
     setSubagentRuntime(runtime) {
       subagentRuntime = runtime;

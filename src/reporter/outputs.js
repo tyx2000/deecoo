@@ -29,6 +29,7 @@ export function structuredRunResult({ task, result }) {
     workflow: result?.workflow ?? {},
     verification: result?.verification ?? {},
     agentState: summarizeAgentState(result?.agentState),
+    process: result?.process ?? result?.agentState?.process,
     reviewReport: result?.reviewReport,
   };
 }
@@ -58,6 +59,8 @@ export function summaryMarkdown({ task, result }) {
     "- files edited: " + listSummary(result?.agentState?.filesEdited),
     "- commands run: " + listSummary(result?.agentState?.commandsRun),
     "- context compactions: " + (result?.agentState?.contextCompactions?.length ?? 0),
+    "- process duplicates blocked: " + (result?.process?.duplicatesBlocked ?? result?.agentState?.process?.duplicatesBlocked ?? 0),
+    "- process thrash nudges: " + (result?.process?.thrashNudges ?? result?.agentState?.process?.thrashNudges ?? 0),
     "",
     "## Output",
     "",
@@ -86,6 +89,7 @@ function summarizeAgentState(agentState) {
     observations: (agentState.observations ?? []).slice(-40),
     recentSteps: (agentState.steps ?? []).slice(-40),
     contextCompactions: agentState.contextCompactions ?? [],
+    process: agentState.process,
   };
 }
 

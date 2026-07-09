@@ -43,6 +43,52 @@ test("activity blocks make no-output commands explicit", () => {
   assert.match(block, /\n  └ \(No output\)$/);
 });
 
+test("activity blocks explain why a reused observation was served", () => {
+  setTheme("mono-focus");
+  const block = visible(formatActivityBlock({
+    name: "read_file",
+    args: { path: "src/a.js" },
+    result: {
+      ok: true,
+      code: "ALREADY_AVAILABLE",
+      priorStep: 4,
+      reason: "duplicate_idempotent_success",
+      content: "const a = 1;\n",
+      activity: { kind: "process-guard", label: "Reused observation", target: "src/a.js" },
+    },
+  }));
+
+  assert.match(block, /why: reused earlier result from step 4 · duplicate idempotent success/);
+});
+
+test("activity blocks explain why a repeated failure was blocked", () => {
+  setTheme("mono-focus");
+  const block = visible(formatActivityBlock({
+    name: "search_text",
+    args: { query: "missing" },
+    result: {
+      ok: false,
+      code: "DUPLICATE_FAILURE_LOOP",
+      reason: "duplicate_failure_loop",
+      error: "Repeated the same failing tool call.",
+    },
+  }));
+
+  assert.match(block, /why: blocked repeated identical failure/);
+});
+
+test("activity blocks omit the why line for an ordinary execution", () => {
+  setTheme("mono-focus");
+  const block = visible(formatActivityBlock({
+    name: "read_file",
+    args: { path: "src/a.js" },
+    result: { ok: true, content: "const a = 1;\n", activity: { kind: "read_file", label: "Read a file", target: "src/a.js" } },
+    decision: { action: "allow", reasons: [] },
+  }));
+
+  assert.doesNotMatch(block, /why:/);
+});
+
 test("activity blocks include concise failure details", () => {
   setTheme("mono-focus");
   const block = visible(formatActivityBlock({

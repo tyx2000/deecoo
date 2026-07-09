@@ -66,7 +66,7 @@ export function formatActionPrompt(text) {
   return paint("action", ` ${text} `);
 }
 
-export function formatRunFooter({ elapsedMs, steps, usage, stoppedReason }) {
+export function formatRunFooter({ elapsedMs, steps, usage, stoppedReason, costUsd }) {
   const parts = [`time ${formatElapsed(elapsedMs)}`, `steps ${steps ?? 0}`];
   if (usage?.totalTokens || usage?.promptTokens || usage?.completionTokens) {
     parts.push(
@@ -75,6 +75,7 @@ export function formatRunFooter({ elapsedMs, steps, usage, stoppedReason }) {
   } else {
     parts.push("tokens unavailable");
   }
+  if (Number(costUsd) > 0) parts.push(`cost ~$${Number(costUsd) < 0.01 ? Number(costUsd).toFixed(4) : Number(costUsd).toFixed(2)}`);
   if (stoppedReason) parts.push(`status ${stoppedReason}`);
   return parts.join(" | ");
 }

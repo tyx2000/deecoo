@@ -14,6 +14,13 @@ export function loadConfig(env, args = {}) {
     maxTokens: numberFrom(env.DEECOO_MAX_TOKENS, 4096),
     timeoutMs: numberFrom(env.DEECOO_TIMEOUT_MS, 120000),
     retryAttempts: numberFrom(env.DEECOO_API_RETRIES, 5),
+    maxSteps: numberFrom(env.DEECOO_MAX_STEPS, 150),
+    tokenBudget: optionalNumberFrom(env.DEECOO_TOKEN_BUDGET),
+    costBudgetUsd: optionalNumberFrom(env.DEECOO_COST_BUDGET_USD),
+    pricePromptPerM: optionalNumberFrom(env.DEECOO_PRICE_PROMPT_PER_M),
+    priceCompletionPerM: optionalNumberFrom(env.DEECOO_PRICE_COMPLETION_PER_M),
+    taskTimeoutMs: optionalNumberFrom(env.DEECOO_TASK_TIMEOUT_MS),
+    workerTimeoutMs: optionalNumberFrom(env.DEECOO_WORKER_TIMEOUT_MS),
     permissionMode: normalizePermissionMode(env.DEECOO_PERMISSION_MODE ?? "ask-once"),
     theme: env.DEECOO_THEME ?? "tokyo-night",
     reasoningEffort: env.DEECOO_REASONING_EFFORT,
@@ -30,6 +37,13 @@ function numberFrom(value, fallback) {
   if (value === undefined || value === null || value === "") return fallback;
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
+
+function optionalNumberFrom(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
   return parsed;
 }
 

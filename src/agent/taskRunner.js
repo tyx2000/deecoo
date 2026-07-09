@@ -1,6 +1,8 @@
 import { runAgent } from "./loop.js";
 import { createSubagentRuntime } from "./subagents/runtime.js";
 import { analyzeTaskCoordination } from "./coordination.js";
+import { createRunTracer } from "../harness/tracer.js";
+import { estimateCostUsd } from "../harness/cost.js";
 import { buildContextMessages, contextItem } from "../context/builder.js";
 import { buildProjectIndex, buildProjectIndexMessages } from "../context/projectIndex.js";
 import { buildReviewScopeMessages } from "../context/reviewScope.js";
@@ -62,6 +64,13 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
     activeSkills,
     requestType: coordination.requestType,
   });
+  // Workers get a lighter, codebase-orientation slice of context (workspace snapshot + project
+  // index + review scope) rather than the full orchestration context (session history, memory
+  // layers, task spec, verification plan), which only the coordinating agent needs.
+  const workerContextMessages = buildContextMessages([
+    ...workspaceSnapshotMessages.map((message) => contextItem(message, 65)),
+    ...projectIndexMessages.map((message) => contextItem(message, 60)),
+  ]);
   tools.resetTaskPermissions?.();
   if (isScorActive(activeSkills) && coordination.requestType === "review") {
     tools.setTaskToolPolicy?.(scorReviewToolPolicy());
@@ -74,12 +83,16 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
       cwd,
       config,
       activeSkills,
-      contextMessages: [...baseContextMessages, ...reviewScopeMessages],
+      contextMessages: [...workerContextMessages, ...reviewScopeMessages],
+      parentWorkingSet: () => tools.getWorkingSetSummary?.(),
       signal,
     }),
   );
   printCoordinationPlan(coordination);
 
+  const taskDeadline = createTaskDeadline(signal, config.taskTimeoutMs);
+  const tracer = createRunTracer();
+  const priceOverrides = { pricePromptPerM: config.pricePromptPerM, priceCompletionPerM: config.priceCompletionPerM };
   try {
     const result = await runAgent({
       client,
@@ -91,19 +104,26 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
       reasoningEffort: config.reasoningEffort,
       thinking: config.thinking,
       stream: coordination.requestType === "review" ? false : config.stream,
+      coordination,
+      maxSteps: config.maxSteps,
+      tokenBudget: config.tokenBudget,
+      costBudgetUsd: config.costBudgetUsd,
+      priceOverrides,
+      deadline: taskDeadline.deadline,
       contextMessages: [...baseContextMessages, ...reviewScopeMessages],
       activeSkills,
+      onEvent: (event) => tracer.record(event),
       finalValidator:
         coordination.requestType === "review"
           ? createReviewFinalValidator()
           : createTaskFinalValidator({ taskSpec, verificationPlan }),
-      signal,
+      signal: taskDeadline.signal,
       onModelStart: () => spinner.start(),
       onModelEnd: () => spinner.stop(),
       onToolStart: () => {},
-      onToolEnd: ({ name, args, result }) => {
+      onToolEnd: ({ name, args, result, decision }) => {
         spinner.stop();
-        console.log(formatActivityBlock({ name, args, result }) + "\n");
+        console.log(formatActivityBlock({ name, args, result, decision }) + "\n");
       },
       onTextDelta: ({ content }) => {
         spinner.stop();
@@ -114,11 +134,13 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
     });
 
     const elapsedMs = Date.now() - startedAt;
+    const costUsd = estimateCostUsd(result.usage, config.model, priceOverrides);
     const footer = formatRunFooter({
       elapsedMs,
       steps: result.steps,
       usage: result.usage,
       stoppedReason: result.stoppedReason,
+      costUsd,
     });
     if (streamed && finalTextWasStreamed(streamedContent, result.finalText)) {
       streamPrinter.finish(footer);
@@ -138,11 +160,14 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
         verificationPlan,
         memoryLayers,
         elapsedMs,
+        costUsd,
+        tracer: tracer.snapshot(),
         finalText: result.finalText,
         usage: result.usage,
         workflow: result.workflow,
         verification: result.verification,
         agentState: result.agentState,
+        process: result.process,
         transitions: result.transitions,
         trace: result.trace,
         reviewReport: result.reviewReport,
@@ -165,6 +190,14 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
     };
   } catch (error) {
     spinner.stop();
+    if (taskDeadline.timedOut) {
+      if (streamed) streamPrinter.finish();
+      console.log(formatToolLine("task stopped: time budget exceeded"));
+      return {
+        elapsedMs: Date.now() - startedAt,
+        timedOut: true,
+      };
+    }
     if (isAbortError(error, signal)) {
       if (streamed) streamPrinter.finish();
       console.log(formatToolLine("task interrupted"));
@@ -178,8 +211,30 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
       elapsedMs: Date.now() - startedAt,
     };
   } finally {
+    taskDeadline.dispose();
     await refreshProjectDescription(cwd);
   }
+}
+
+function createTaskDeadline(parentSignal, timeoutMs) {
+  if (!timeoutMs) return { signal: parentSignal, deadline: undefined, timedOut: false, dispose: () => {} };
+  const controller = new AbortController();
+  const state = { signal: controller.signal, deadline: Date.now() + timeoutMs, timedOut: false, dispose: () => {} };
+  const timer = setTimeout(() => {
+    state.timedOut = true;
+    controller.abort(new Error("Task time budget exceeded."));
+  }, timeoutMs);
+  const onParentAbort = () => controller.abort(parentSignal?.reason);
+  if (parentSignal?.aborted) {
+    controller.abort(parentSignal.reason);
+  } else {
+    parentSignal?.addEventListener?.("abort", onParentAbort, { once: true });
+  }
+  state.dispose = () => {
+    clearTimeout(timer);
+    parentSignal?.removeEventListener?.("abort", onParentAbort);
+  };
+  return state;
 }
 
 async function refreshProjectDescription(cwd) {

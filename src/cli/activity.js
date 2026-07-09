@@ -8,20 +8,45 @@ const BRANCH = paint("muted", "├");
 const VERTICAL = paint("muted", "│");
 const PREVIEW_LIMIT = 5;
 
-export function formatActivityBlock({ name, args, result }) {
+export function formatActivityBlock({ name, args, result, decision }) {
   const activity = result?.activity ?? fallbackActivity(name, args, result);
   const ok = result?.ok !== false;
   const statusDot = paint(ok ? "success" : "error", "●");
   const title = formatActivityTitle({ name, args, activity, ok });
+  const reason = formatDecisionReason({ decision, result });
   const summary = formatActivitySummary({ name, args, result, activity });
+  const detailLines = reason ? [paint("muted", reason), ...summary] : summary;
   const lines = [statusDot + " " + title];
-  if (summary.length === 0) return lines.join("\n");
+  if (detailLines.length === 0) return lines.join("\n");
 
-  for (const [index, line] of summary.entries()) {
-    const marker = index === summary.length - 1 ? TREE : BRANCH;
+  for (const [index, line] of detailLines.entries()) {
+    const marker = index === detailLines.length - 1 ? TREE : BRANCH;
     lines.push("  " + marker + " " + line);
   }
   return lines.join("\n");
+}
+
+function formatDecisionReason({ decision, result }) {
+  if (result?.code === "ALREADY_AVAILABLE") {
+    const at = result.priorStep ? " from step " + result.priorStep : "";
+    return "why: reused earlier result" + at + reasonSuffix(result.reason);
+  }
+  if (result?.code === "DUPLICATE_FAILURE_LOOP") {
+    return "why: blocked repeated identical failure" + reasonSuffix(result.reason);
+  }
+  const reasons = decision?.reasons ?? [];
+  if (reasons.length) {
+    return "why: executed · " + reasons.map(humanizeReason).join(", ");
+  }
+  return "";
+}
+
+function reasonSuffix(reason) {
+  return reason ? " · " + humanizeReason(reason) : "";
+}
+
+function humanizeReason(reason) {
+  return String(reason ?? "").replace(/_/g, " ");
 }
 
 function fallbackActivity(name, args, result) {

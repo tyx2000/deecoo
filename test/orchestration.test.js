@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { analyzeTaskCoordination } from "../src/agent/coordination.js";
-import { compactLiveMessages, compactToolResult } from "../src/agent/loop.js";
+import { compactLiveMessages, compactToolResult, serializeRunState } from "../src/agent/loop.js";
 import { runAgent } from "../src/agent/loop.js";
 import { buildSystemPrompt } from "../src/agent/prompt.js";
-import { createSubagentRuntime } from "../src/agent/subagents/runtime.js";
+import { aggregateWorkerResults, createSubagentRuntime } from "../src/agent/subagents/runtime.js";
 import { buildAgentStateSummary, createAgentState, recordModelStep, recordToolStep } from "../src/agent/state.js";
 import { buildContextMessages, contextItem } from "../src/context/builder.js";
 import { buildProjectIndex } from "../src/context/projectIndex.js";
@@ -1658,4 +1658,299 @@ test("subagent runtime records role presets separately from tool mode", async ()
   assert.equal(result.role, "security");
   assert.equal(result.mode, "research");
   assert.equal(runtime.snapshot()[0].role, "security");
+});
+
+test("subagent workers receive the coordinating agent's shared working set", async () => {
+  let seenSharedContext;
+  const client = {
+    async chatCompletion(request) {
+      seenSharedContext = request.messages.find((message) => /already inspected by the coordinating agent/i.test(message.content ?? ""));
+      return { choices: [{ message: { role: "assistant", content: "done" } }] };
+    },
+  };
+  const tools = {
+    schemas: [],
+    async execute() {
+      return { ok: false, error: "unexpected" };
+    },
+  };
+  const runtime = createSubagentRuntime({
+    client,
+    workerTools: tools,
+    cwd: "/tmp/project",
+    config: { model: "test" },
+    parentWorkingSet: () => "### file: src/a.js\nexport const answer = 42;",
+  });
+
+  await runtime.start({ description: "worker", prompt: "use the pinned context" });
+
+  assert.ok(seenSharedContext, "worker should receive a shared working-set message");
+  assert.match(seenSharedContext.content, /src\/a\.js/);
+  assert.match(seenSharedContext.content, /export const answer = 42/);
+});
+
+test("independent subagent dispatches in one turn run concurrently", async () => {
+  let active = 0;
+  let maxActive = 0;
+  const tools = {
+    schemas: [{ function: { name: "agent" } }],
+    setWorkingSetProvider() {},
+    async execute(name) {
+      if (name !== "agent") return { ok: false, error: "unexpected tool: " + name };
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      active -= 1;
+      return { ok: true, result: "worker done" };
+    },
+  };
+  let modelCalls = 0;
+  const client = {
+    async chatCompletion() {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return {
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                tool_calls: [
+                  { id: "w1", function: { name: "agent", arguments: JSON.stringify({ prompt: "lane one" }) } },
+                  { id: "w2", function: { name: "agent", arguments: JSON.stringify({ prompt: "lane two" }) } },
+                  { id: "w3", function: { name: "agent", arguments: JSON.stringify({ prompt: "lane three" }) } },
+                ],
+              },
+            },
+          ],
+        };
+      }
+      return { choices: [{ message: { role: "assistant", content: "synthesized" } }] };
+    },
+  };
+
+  const result = await runAgent({
+    client,
+    tools,
+    task: "dispatch three independent research lanes in parallel",
+    cwd: "/tmp/project",
+    model: "test",
+    stream: false,
+  });
+
+  assert.equal(result.finalText, "synthesized");
+  assert.ok(maxActive >= 2, `expected concurrent dispatch, saw max ${maxActive} active`);
+});
+
+test("runAgent stops at the step budget instead of looping forever, and emits checkpoints", async () => {
+  const tools = {
+    schemas: [{ function: { name: "noop" } }],
+    setWorkingSetProvider() {},
+    async execute() {
+      return { ok: true, result: "ok" };
+    },
+  };
+  const client = {
+    async chatCompletion() {
+      return {
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              tool_calls: [{ id: "c" + Math.random().toString(36).slice(2), function: { name: "noop", arguments: "{}" } }],
+            },
+          },
+        ],
+      };
+    },
+  };
+  const checkpoints = [];
+  const result = await runAgent({
+    client,
+    tools,
+    task: "loop without converging",
+    cwd: "/tmp/project",
+    model: "test",
+    stream: false,
+    maxSteps: 3,
+    onCheckpoint: (snapshot) => checkpoints.push(snapshot),
+  });
+
+  assert.match(result.stoppedReason, /step_budget/);
+  assert.equal(result.budget.limit, 3);
+  assert.ok(checkpoints.length >= 1);
+  assert.equal(checkpoints[0].version, 1);
+  assert.ok(Number.isFinite(checkpoints[0].step));
+});
+
+test("runAgent stops at the token budget", async () => {
+  const tools = {
+    schemas: [{ function: { name: "noop" } }],
+    setWorkingSetProvider() {},
+    async execute() {
+      return { ok: true };
+    },
+  };
+  const client = {
+    async chatCompletion() {
+      return {
+        choices: [{ message: { role: "assistant", tool_calls: [{ id: "c" + Math.random(), function: { name: "noop", arguments: "{}" } }] } }],
+        usage: { total_tokens: 500 },
+      };
+    },
+  };
+  const result = await runAgent({ client, tools, task: "spend tokens", cwd: "/tmp/project", model: "test", stream: false, tokenBudget: 800 });
+
+  assert.match(result.stoppedReason, /token_budget/);
+  assert.ok(result.usage.totalTokens >= 800);
+});
+
+test("runAgent stops at the cost budget", async () => {
+  const tools = {
+    schemas: [{ function: { name: "noop" } }],
+    setWorkingSetProvider() {},
+    async execute() {
+      return { ok: true };
+    },
+  };
+  const client = {
+    async chatCompletion() {
+      return {
+        choices: [{ message: { role: "assistant", tool_calls: [{ id: "c" + Math.random(), function: { name: "noop", arguments: "{}" } }] } }],
+        usage: { prompt_tokens: 2_000_000, completion_tokens: 2_000_000, total_tokens: 4_000_000 },
+      };
+    },
+  };
+  const result = await runAgent({
+    client,
+    tools,
+    task: "spend money",
+    cwd: "/tmp/project",
+    model: "deepseek-v4-pro",
+    stream: false,
+    costBudgetUsd: 0.5,
+  });
+
+  assert.match(result.stoppedReason, /cost_budget/);
+  assert.ok(result.budget.observed >= 0.5);
+});
+
+test("runAgent can resume from a serialized message history and finish", async () => {
+  const tools = { schemas: [], setWorkingSetProvider() {}, async execute() { return { ok: true }; } };
+  const client = {
+    async chatCompletion() {
+      return { choices: [{ message: { role: "assistant", content: "resumed and completed" } }] };
+    },
+  };
+  const priorMessages = [
+    { role: "system", content: "system prompt" },
+    { role: "user", content: "original task" },
+    { role: "assistant", content: "partial progress" },
+    { role: "user", content: "continue" },
+  ];
+  const result = await runAgent({
+    client,
+    tools,
+    task: "original task",
+    cwd: "/tmp/project",
+    model: "test",
+    stream: false,
+    resume: { messages: priorMessages, step: 5, usage: { totalTokens: 900, promptTokens: 700, completionTokens: 200 } },
+  });
+
+  assert.equal(result.finalText, "resumed and completed");
+  assert.ok(result.steps >= 6);
+  assert.ok(result.usage.totalTokens >= 900);
+});
+
+test("serializeRunState produces a versioned, JSON-serializable snapshot", () => {
+  const snapshot = serializeRunState({
+    step: 3,
+    usage: { totalTokens: 120 },
+    workflow: { status: "executing", phase: "researching" },
+    process: { duplicateRate: 0 },
+    requestType: "edit",
+  });
+  assert.equal(snapshot.version, 1);
+  assert.equal(snapshot.step, 3);
+  assert.equal(snapshot.status, "executing");
+  assert.equal(JSON.parse(JSON.stringify(snapshot)).usage.totalTokens, 120);
+});
+
+test("worker results are parsed into a structured contract and aggregated", async () => {
+  const client = {
+    async chatCompletion() {
+      return {
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content:
+                "Checked auth paths.\n```json\n" +
+                JSON.stringify({
+                  summary: "auth reviewed",
+                  status: "done",
+                  findings: [{ file: "src/auth.js", line: 10, severity: "high", summary: "missing authz check" }],
+                  residualRisks: ["token rotation not covered"],
+                }) +
+                "\n```",
+            },
+          },
+        ],
+      };
+    },
+  };
+  const tools = { schemas: [], async execute() { return { ok: false, error: "unexpected" }; } };
+  const runtime = createSubagentRuntime({ client, workerTools: tools, cwd: "/tmp/project", config: { model: "test" } });
+
+  const started = await runtime.start({ description: "Security Agent", role: "security", mode: "research", prompt: "check auth" });
+  assert.equal(started.structured.status, "done");
+  assert.equal(started.structured.findings[0].file, "src/auth.js");
+
+  const aggregate = runtime.aggregate();
+  assert.equal(aggregate.findings.length, 1);
+  assert.equal(aggregate.findings[0].severity, "high");
+  assert.deepEqual(aggregate.residualRisks, ["token rotation not covered"]);
+  assert.equal(aggregate.byStatus.done, 1);
+});
+
+test("aggregateWorkerResults dedupes findings and ranks by severity", () => {
+  const aggregate = aggregateWorkerResults([
+    {
+      role: "a",
+      status: "completed",
+      structured: { status: "done", findings: [{ file: "x", summary: "dup", severity: "low" }, { file: "y", summary: "critical", severity: "high" }], residualRisks: ["r1"] },
+    },
+    {
+      role: "b",
+      status: "completed",
+      structured: { status: "done", findings: [{ file: "x", summary: "dup", severity: "low" }], residualRisks: ["r1", "r2"] },
+    },
+  ]);
+
+  assert.equal(aggregate.findings.length, 2);
+  assert.equal(aggregate.findings[0].summary, "critical");
+  assert.deepEqual(aggregate.residualRisks.sort(), ["r1", "r2"]);
+  assert.equal(aggregate.byStatus.done, 2);
+});
+
+test("a worker that exceeds its time budget is stopped with WORKER_TIMEOUT", async () => {
+  const client = {
+    chatCompletion(_request, options = {}) {
+      return new Promise((_resolve, reject) => {
+        options.signal?.addEventListener("abort", () => {
+          const error = new Error("aborted");
+          error.name = "AbortError";
+          reject(error);
+        });
+      });
+    },
+  };
+  const tools = { schemas: [], async execute() { return { ok: false }; } };
+  const runtime = createSubagentRuntime({ client, workerTools: tools, cwd: "/tmp/project", config: { model: "test", workerTimeoutMs: 30 } });
+
+  const result = await runtime.start({ description: "slow worker", prompt: "hang forever" });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "WORKER_TIMEOUT");
+  assert.equal(result.status, "stopped");
 });

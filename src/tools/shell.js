@@ -1,6 +1,6 @@
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
-import { classifyShellCommand, normalizeShellCommand } from "../permissions/shellPolicy.js";
+import { classifyShellCommand, normalizeShellCommand, sanitizeShellEnv } from "../permissions/shellPolicy.js";
 
 const execAsync = promisify(exec);
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -48,6 +48,7 @@ export async function runShell(workspace, args, prompter, allowShellWithoutPromp
       cwd: workspace,
       timeout: Number(args.timeoutMs ?? DEFAULT_TIMEOUT_MS),
       maxBuffer: 4 * 1024 * 1024,
+      env: sanitizeShellEnv(process.env),
       signal,
     });
     const stdoutResult = truncateOutput(stdout);

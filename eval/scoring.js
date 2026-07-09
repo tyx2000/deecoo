@@ -1,27 +1,38 @@
+import { analyzeProcessQuality } from "../src/harness/processController.js";
+
+// Outcome-first weighting: did the task achieve its goal (completion + expected changes +
+// verification + required output), with process quality kept as a small secondary signal.
 const DEFAULT_WEIGHTS = {
-  completion: 25,
-  requestType: 10,
-  requiredTools: 15,
-  disallowedTools: 15,
-  verification: 20,
+  completion: 20,
+  outcome: 25,
+  requestType: 8,
+  requiredTools: 8,
+  disallowedTools: 8,
+  verification: 15,
   output: 10,
-  toolErrors: 5,
+  toolErrors: 3,
+  processEfficiency: 3,
 };
 
 const PASSING_SCORE = 80;
+
+const MUTATING_TOOLS = new Set(["edit_file", "write_file", "apply_patch", "apply_patch_set", "apply_json_patch"]);
 
 export function scoreEvalCase(caseDefinition, run) {
   const normalizedRun = normalizeEvalRun(run);
   const expected = caseDefinition.expected ?? {};
   const weights = { ...DEFAULT_WEIGHTS, ...(caseDefinition.weights ?? {}) };
+  const processQuality = analyzeProcessQuality(normalizedRun);
   const checks = [
     scoreCompletion(normalizedRun, weights.completion),
+    scoreOutcome(expected, normalizedRun, weights.outcome),
     scoreRequestType(expected, normalizedRun, weights.requestType),
     scoreRequiredTools(expected, normalizedRun, weights.requiredTools),
     scoreDisallowedTools(expected, normalizedRun, weights.disallowedTools),
     scoreVerification(expected, normalizedRun, weights.verification),
     scoreOutput(expected, normalizedRun, weights.output),
     scoreToolErrors(expected, normalizedRun, weights.toolErrors),
+    scoreProcessEfficiency(expected, processQuality, weights.processEfficiency),
   ].filter((check) => check.weight > 0);
 
   const score = Math.round(checks.reduce((sum, check) => sum + check.score, 0));
@@ -35,6 +46,7 @@ export function scoreEvalCase(caseDefinition, run) {
     score: normalizedScore,
     passed: normalizedScore >= (caseDefinition.passingScore ?? PASSING_SCORE) && checks.every((check) => !check.required || check.passed),
     checks,
+    processQuality,
     summary: {
       workflowStatus: normalizedRun.workflow?.status ?? "unknown",
       verificationStatus: normalizedRun.verification?.status ?? "not-run",
@@ -42,6 +54,8 @@ export function scoreEvalCase(caseDefinition, run) {
       steps: normalizedRun.steps ?? normalizedRun.trace?.length ?? 0,
       toolCalls: toolCalls(normalizedRun).length,
       totalTokens: normalizedRun.usage?.totalTokens ?? normalizedRun.usage?.total_tokens ?? 0,
+      processEfficiency: processQuality.efficiency,
+      duplicateRate: processQuality.duplicateRate,
     },
   };
 }
@@ -98,6 +112,48 @@ function scoreCompletion(run, weight) {
     weight,
     detail: passed ? "workflow completed with final output" : "workflow did not complete with final output",
   });
+}
+
+function scoreOutcome(expected, run, weight) {
+  const expectChanged = expected.expectFilesChanged ?? [];
+  const expectNoChanges = expected.expectNoFileChanges === true;
+  if (!expectChanged.length && !expectNoChanges) return skippedCheck("outcome", weight);
+
+  const changed = changedFiles(run);
+  if (expectNoChanges) {
+    const passed = changed.size === 0;
+    return checkResult({
+      name: "outcome",
+      passed,
+      required: true,
+      weight,
+      detail: passed ? "no files changed, as expected" : "unexpected changes: " + [...changed].join(", "),
+    });
+  }
+
+  const missing = expectChanged.filter((path) => !changed.has(path));
+  return checkResult({
+    name: "outcome",
+    passed: missing.length === 0,
+    required: true,
+    weight,
+    detail: missing.length ? "expected changes missing: " + missing.join(", ") : "changed: " + expectChanged.join(", "),
+  });
+}
+
+function changedFiles(run) {
+  const set = new Set();
+  for (const call of toolCalls(run)) {
+    if (!MUTATING_TOOLS.has(call.tool) || call.ok === false) continue;
+    if (call.target) set.add(String(call.target));
+  }
+  for (const entry of run?.trace ?? []) {
+    const files = entry.result?.paths ?? entry.result?.files;
+    if (Array.isArray(files)) {
+      for (const file of files) set.add(String(file?.path ?? file));
+    }
+  }
+  return set;
 }
 
 function scoreRequestType(expected, run, weight) {
@@ -182,12 +238,31 @@ function scoreToolErrors(expected, run, weight) {
   });
 }
 
+function scoreProcessEfficiency(expected, processQuality, weight) {
+  if (expected.ignoreProcessEfficiency) return skippedCheck("processEfficiency", weight);
+  const minEfficiency = expected.minProcessEfficiency ?? 0.55;
+  const maxDuplicateRate = expected.maxDuplicateRate ?? 0.35;
+  const maxInspectionStreak = expected.maxInspectionStreak ?? 6;
+  const passed =
+    processQuality.efficiency >= minEfficiency &&
+    processQuality.duplicateRate <= maxDuplicateRate &&
+    processQuality.inspectionStreakMax <= maxInspectionStreak;
+  return checkResult({
+    name: "processEfficiency",
+    passed,
+    required: Boolean(expected.requireProcessEfficiency),
+    weight,
+    detail: `efficiency=${processQuality.efficiency}, duplicateRate=${processQuality.duplicateRate}, inspectionStreakMax=${processQuality.inspectionStreakMax}`,
+  });
+}
+
 function toolCalls(run) {
   return (run?.trace ?? []).map((entry) => ({
     tool: entry.tool ?? entry.name,
     ok: entry.ok ?? entry.result?.ok,
     code: entry.code ?? entry.result?.code,
     target: entry.target ?? entry.args?.path ?? entry.args?.command ?? "",
+    alreadyAvailable: entry.alreadyAvailable ?? entry.cached,
   }));
 }
 

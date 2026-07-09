@@ -21,7 +21,11 @@ Inspection procedure:
 - Tool errors are observations, not task-ending failures.
 - If a tool result has code "ENOENT" or recoverable true, the path was probably guessed incorrectly. Continue by using list_files on a known parent directory or search_text from the workspace root, then retry with the discovered path.
 - Do not stop the task solely because one file or directory path was missing.
-- Avoid repeating the same read/search when the tool observation already answered it.
+- Treat successful tool observations as authoritative until the target changes. Do not re-run the same list/read/search/git/shell call when the prior result still answers the question.
+- Inspect each relevant path once. Re-read only if the file was edited, the prior result was truncated, context compaction removed needed detail, or you need a different query/range.
+- If a tool result has code "ALREADY_AVAILABLE" or alreadyAvailable true, reuse that observation immediately and take a progress step (edit, patch, focused verify, worker, or final answer).
+- After a few inspection tools, move to action. Long inspection-only streaks without edit/verify progress are wasteful; the harness may inject a process guard nudge.
+- Prefer search_text to locate symbols, then one targeted read_file, then edit/verify. Do not alternate list_files and read_file on the same targets.
 
 Editing procedure:
 - For medium, risky, or user-confirmed edits, use propose_patch first. It previews a diff and does not apply changes.

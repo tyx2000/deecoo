@@ -8,6 +8,18 @@ const BLOCK_PATTERNS = [
   { pattern: /\b(read\s+-p|tail\s+-f|watch)\b/i, reason: "interactive or long-running command" },
 ];
 
+// Sensitive paths a workspace command should never need to touch. Reading them is the classic
+// credential-exfiltration step, so treat any reference as a hard block (the shell is not
+// sandboxed at the OS level, so this policy is the containment boundary).
+const SENSITIVE_PATH_PATTERNS = [
+  { pattern: /(^|[\s"'=:])~?\/?\.ssh\b/i, reason: "SSH key/config access" },
+  { pattern: /(^|[\s"'=:])~?\/?\.aws\b/i, reason: "AWS credential access" },
+  { pattern: /(^|[\s"'=:])~?\/?\.gnupg\b/i, reason: "GPG key access" },
+  { pattern: /\/etc\/(shadow|sudoers)\b/i, reason: "system credential file access" },
+  { pattern: /\bid_(rsa|ed25519|ecdsa|dsa)\b/i, reason: "private key access" },
+  { pattern: /(^|[\s"'=:])~?\/?\.(netrc|npmrc|pypirc|docker\/config\.json|kube\/config)\b/i, reason: "service credential file access" },
+];
+
 const WARN_PATTERNS = [
   { pattern: /\b(npm|pnpm|yarn)\s+(install|i|add|ci)\b/i, reason: "dependency installation may run scripts or change lockfiles" },
   { pattern: /\b(git\s+commit|git\s+merge|git\s+rebase|git\s+push)\b/i, reason: "git history or remote mutation" },
@@ -22,6 +34,7 @@ export function classifyShellCommand(command) {
     ...detectBlockedShellTokens(text),
     ...detectInteractiveShellCommands(text),
     ...BLOCK_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason),
+    ...SENSITIVE_PATH_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason),
   ];
   if (blocked.length) {
     return {
@@ -51,6 +64,20 @@ export function classifyShellCommand(command) {
 
 export function normalizeShellCommand(command) {
   return String(command ?? "").trim().replace(/\s+/g, " ");
+}
+
+const SECRET_ENV_PATTERN = /(^|_)(API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE[_-]?KEY|AUTH)($|_)/i;
+
+// Remove secret-looking variables from the environment handed to a child shell process so an
+// injected or careless command cannot read the agent's own credentials out of `env`.
+export function sanitizeShellEnv(env = {}) {
+  const clean = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (SECRET_ENV_PATTERN.test(key)) continue;
+    if (key.startsWith("DEEPSEEK_") || key.startsWith("ANTHROPIC_")) continue;
+    clean[key] = value;
+  }
+  return clean;
 }
 
 function detectBlockedShellTokens(command) {

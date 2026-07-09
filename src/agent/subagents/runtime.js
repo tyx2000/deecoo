@@ -4,8 +4,9 @@ import { normalizeWorkerMode } from "../../tools/definitions.js";
 
 const MAX_WORKER_PROMPT_CHARS = 8000;
 const MAX_WORKERS_PER_TASK = 8;
+const MAX_SHARED_WORKING_SET_CHARS = 16000;
 
-export function createSubagentRuntime({ client, createWorkerTools, workerTools, cwd, config, activeSkills = [], contextMessages = [], signal }) {
+export function createSubagentRuntime({ client, createWorkerTools, workerTools, cwd, config, activeSkills = [], contextMessages = [], parentWorkingSet, signal }) {
   const workers = new Map();
 
   return {
@@ -59,6 +60,10 @@ export function createSubagentRuntime({ client, createWorkerTools, workerTools, 
         usage: worker.usage,
       }));
     },
+
+    aggregate() {
+      return aggregateWorkerResults([...workers.values()]);
+    },
   };
 
   function createWorker({ description, prompt, mode, role }) {
@@ -74,6 +79,7 @@ export function createSubagentRuntime({ client, createWorkerTools, workerTools, 
       tools,
       messages: [
         ...contextMessages,
+        ...sharedWorkingSetMessages(),
         {
           role: "system",
           content: workerSystemPrompt({ mode, role, tools }),
@@ -84,43 +90,84 @@ export function createSubagentRuntime({ client, createWorkerTools, workerTools, 
     };
   }
 
+  function sharedWorkingSetMessages() {
+    const summary = parentWorkingSet?.();
+    if (!summary) return [];
+    const bounded = summary.length > MAX_SHARED_WORKING_SET_CHARS ? summary.slice(0, MAX_SHARED_WORKING_SET_CHARS) + "\n... shared working set truncated" : summary;
+    return [
+      {
+        role: "user",
+        content:
+          "Context already inspected by the coordinating agent — reuse these observations instead of re-reading the same files:\n\n" +
+          bounded,
+      },
+    ];
+  }
+
   async function runWorkerTurn({ worker, prompt, action }) {
     worker.status = "running";
-    const result = await runAgent({
-      client,
-      tools: worker.tools,
-      task: prompt,
-      cwd,
-      model: config.model,
-      maxTokens: config.maxTokens,
-      reasoningEffort: config.reasoningEffort,
-      thinking: config.thinking,
-      stream: false,
-      contextMessages: worker.messages,
-      activeSkills,
-      signal,
-    });
-    worker.messages = result.messages ?? worker.messages;
-    worker.status = "completed";
-    worker.completedAt = new Date().toISOString();
-    addUsage(worker.usage, result.usage);
-    return {
-      ok: true,
-      task_id: worker.id,
-      role: worker.role,
-      mode: worker.mode,
-      status: worker.status,
-      summary: "Worker " + action + " (" + worker.role + "/" + worker.mode + "): " + worker.description,
-      result: result.finalText,
-      usage: result.usage,
-      stoppedReason: result.stoppedReason,
-      activity: {
-        kind: "subagent",
-        label: action === "started" ? "Ran worker" : "Continued worker",
-        target: worker.description,
-        detail: worker.role + "/" + worker.mode,
-      },
-    };
+    const deadline = createWorkerDeadline(signal, config?.workerTimeoutMs);
+    try {
+      const result = await runAgent({
+        client,
+        tools: worker.tools,
+        task: prompt,
+        cwd,
+        model: config.model,
+        maxTokens: config.maxTokens,
+        reasoningEffort: config.reasoningEffort,
+        thinking: config.thinking,
+        stream: false,
+        maxSteps: config.maxSteps,
+        tokenBudget: config.workerTokenBudget,
+        deadline: deadline.deadline,
+        contextMessages: worker.messages,
+        activeSkills,
+        signal: deadline.signal,
+      });
+      worker.messages = result.messages ?? worker.messages;
+      worker.status = "completed";
+      worker.completedAt = new Date().toISOString();
+      worker.structured = parseWorkerStructured(result.finalText);
+      addUsage(worker.usage, result.usage);
+      return {
+        ok: true,
+        task_id: worker.id,
+        role: worker.role,
+        mode: worker.mode,
+        status: worker.status,
+        summary: "Worker " + action + " (" + worker.role + "/" + worker.mode + "): " + worker.description,
+        result: result.finalText,
+        structured: worker.structured,
+        usage: result.usage,
+        stoppedReason: result.stoppedReason,
+        activity: {
+          kind: "subagent",
+          label: action === "started" ? "Ran worker" : "Continued worker",
+          target: worker.description,
+          detail: worker.role + "/" + worker.mode,
+        },
+      };
+    } catch (error) {
+      if (deadline.timedOut) {
+        worker.status = "stopped";
+        worker.completedAt = new Date().toISOString();
+        return {
+          ok: false,
+          task_id: worker.id,
+          role: worker.role,
+          mode: worker.mode,
+          status: "stopped",
+          code: "WORKER_TIMEOUT",
+          error: "Worker exceeded its time budget and was stopped.",
+          summary: "Worker timed out (" + worker.role + "/" + worker.mode + "): " + worker.description,
+          activity: { kind: "subagent", label: "Worker timed out", target: worker.description, detail: worker.role + "/" + worker.mode },
+        };
+      }
+      throw error;
+    } finally {
+      deadline.dispose();
+    }
   }
 }
 
@@ -138,7 +185,107 @@ function workerSystemPrompt({ mode, role, tools }) {
     mode === "implement" ? "This worker may edit files only within the delegated scope." : "",
     "Report concrete file paths, line numbers when available, commands run, verification status, and residual risks.",
     "Do not spawn additional workers. Use the available workspace tools directly.",
+    "End your reply with a fenced ```json block matching this shape so the coordinator can aggregate results:",
+    '{"summary": string, "status": "done" | "blocked" | "needs-followup", "findings": [{"file": string, "line": number, "severity": "high"|"medium"|"low", "summary": string}], "filesTouched": string[], "commandsRun": string[], "residualRisks": string[]}',
   ].filter(Boolean).join("\n");
+}
+
+export function aggregateWorkerResults(workers = []) {
+  const findings = [];
+  const residualRisks = new Set();
+  const filesTouched = new Set();
+  const commandsRun = new Set();
+  const seen = new Set();
+  const byStatus = {};
+
+  for (const worker of workers) {
+    const structured = worker.structured;
+    const status = structured?.status ?? worker.status ?? "unknown";
+    byStatus[status] = (byStatus[status] ?? 0) + 1;
+    if (!structured) continue;
+    for (const finding of structured.findings ?? []) {
+      const key = (finding.file ?? "") + "::" + (finding.summary ?? "");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      findings.push({ ...finding, source: worker.role ?? worker.description });
+    }
+    for (const risk of structured.residualRisks ?? []) residualRisks.add(risk);
+    for (const file of structured.filesTouched ?? []) filesTouched.add(file);
+    for (const command of structured.commandsRun ?? []) commandsRun.add(command);
+  }
+
+  findings.sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
+  return {
+    workers: workers.length,
+    byStatus,
+    findings,
+    residualRisks: [...residualRisks],
+    filesTouched: [...filesTouched],
+    commandsRun: [...commandsRun],
+  };
+}
+
+function parseWorkerStructured(finalText) {
+  const text = String(finalText ?? "");
+  const match = text.match(/```json\s*([\s\S]*?)```/i);
+  if (!match) return undefined;
+  try {
+    return normalizeWorkerStructured(JSON.parse(match[1].trim()));
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeWorkerStructured(parsed) {
+  if (!parsed || typeof parsed !== "object") return undefined;
+  return {
+    summary: typeof parsed.summary === "string" ? parsed.summary : undefined,
+    status: typeof parsed.status === "string" ? parsed.status : undefined,
+    findings: Array.isArray(parsed.findings) ? parsed.findings.map(normalizeFinding).filter(Boolean) : [],
+    filesTouched: Array.isArray(parsed.filesTouched) ? parsed.filesTouched.map(String) : [],
+    commandsRun: Array.isArray(parsed.commandsRun) ? parsed.commandsRun.map(String) : [],
+    residualRisks: Array.isArray(parsed.residualRisks) ? parsed.residualRisks.map(String) : [],
+  };
+}
+
+function normalizeFinding(finding) {
+  if (typeof finding === "string") return { summary: finding };
+  if (!finding || typeof finding !== "object") return undefined;
+  const summary = finding.summary ?? finding.title;
+  return {
+    file: finding.file ? String(finding.file) : undefined,
+    line: Number.isFinite(finding.line) ? finding.line : undefined,
+    severity: finding.severity ? String(finding.severity).toLowerCase() : undefined,
+    summary: summary ? String(summary) : undefined,
+  };
+}
+
+function severityRank(severity) {
+  if (severity === "high") return 3;
+  if (severity === "medium") return 2;
+  if (severity === "low") return 1;
+  return 0;
+}
+
+function createWorkerDeadline(parentSignal, timeoutMs) {
+  if (!timeoutMs) return { signal: parentSignal, deadline: undefined, timedOut: false, dispose: () => {} };
+  const controller = new AbortController();
+  const state = { signal: controller.signal, deadline: Date.now() + timeoutMs, timedOut: false, dispose: () => {} };
+  const timer = setTimeout(() => {
+    state.timedOut = true;
+    controller.abort(new Error("Worker time budget exceeded."));
+  }, timeoutMs);
+  const onParentAbort = () => controller.abort(parentSignal?.reason);
+  if (parentSignal?.aborted) {
+    controller.abort(parentSignal.reason);
+  } else {
+    parentSignal?.addEventListener?.("abort", onParentAbort, { once: true });
+  }
+  state.dispose = () => {
+    clearTimeout(timer);
+    parentSignal?.removeEventListener?.("abort", onParentAbort);
+  };
+  return state;
 }
 
 function normalizeWorkerRole(value, mode, description) {

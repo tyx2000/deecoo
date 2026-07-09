@@ -59,6 +59,22 @@ The resulting `~/.deecoo/settings.json` looks like:
 
 `DEEPSEEK_API_KEY` follows DeepSeek's official SDK examples. `DEECOO_*` variables are Deecoo-owned runtime settings, including `DEECOO_BASE_URL` for multi-provider routing.
 
+Run budgets bound the agent loop so a task cannot loop or fan out unbounded:
+
+```text
+DEECOO_MAX_STEPS=150            Hard cap on agent loop iterations (default 150).
+DEECOO_TOKEN_BUDGET=            Stop the run once total tokens reach this (default: off).
+DEECOO_COST_BUDGET_USD=         Stop the run once estimated spend reaches this (default: off).
+DEECOO_PRICE_PROMPT_PER_M=      Override prompt price (USD per 1M tokens) for cost estimates.
+DEECOO_PRICE_COMPLETION_PER_M=  Override completion price (USD per 1M tokens).
+DEECOO_TASK_TIMEOUT_MS=         Wall-clock budget for a whole task (default: off).
+DEECOO_WORKER_TIMEOUT_MS=       Wall-clock budget for a single dispatched worker (default: off).
+```
+
+When a budget is hit the run ends with a terminal `*_budget_exceeded` / `task_deadline_exceeded` reason and a clear message rather than hanging. Each step emits a versioned, JSON-serializable checkpoint (`serializeRunState`) via `onCheckpoint`, and a typed event stream (`onEvent`) drives a live run tracer (`createRunTracer`) whose metrics are persisted with the run audit. `runAgent` accepts a `resume` snapshot (message history + step + usage) to continue a prior run.
+
+Operational hardening: tool output (file contents, shell stdout, git diffs) is fenced as untrusted data with an injection scan, so the model treats it as data, not instructions. Shell commands that touch credential paths (`~/.ssh`, `~/.aws`, `id_rsa`, `/etc/shadow`, …) are hard-blocked, and secret-looking environment variables are stripped from the child process. The run footer reports estimated cost.
+
 Configuration precedence:
 
 ```text
