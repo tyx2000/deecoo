@@ -4,20 +4,30 @@
 // instructions never reach the reasoning context at all. The model can request the raw text as
 // data by quarantine id if it genuinely needs it.
 
-const IMPERATIVE_LINE = /^\s*(?:ignore|disregard|forget|override|stop|now|instead|you must|you should|please|do not|don't|execute|run|delete|remove|send|upload|post|reveal|print|export|act as|you are now|system\s*:|assistant\s*:|new instructions?\b)/i;
+// Lines that are genuine attempts to redirect the assistant/model — precise enough that
+// ordinary source code (export/run/print/return ...) is NOT withheld, only injection phrasing.
+const INJECTION_LINE_PATTERNS = [
+  /\b(ignore|disregard|forget|override)\b[^.\n]*\b(previous|prior|above|earlier|all|any|the)\b[^.\n]*\b(instruction|prompt|rule|context|message)/i,
+  /\b(you are now|act as|pretend to be|from now on you)\b/i,
+  /\bnew\s+(instructions?|task|directive|system\s*prompt)\b/i,
+  /^\s*(system|assistant|developer)\s*:/i,
+  /\b(exfiltrat|leak|reveal|send|upload|post|email|print)\b[^.\n]*\b(secret|token|api[_ -]?key|password|credential|\.env|environment)\b/i,
+  /\bdo (?:not|n't)\b[^.\n]*\b(tell|inform|mention|report)\b[^.\n]*\buser\b/i,
+];
 const CONTROL_TOKEN = /<\s*\/?\s*(?:system|tool_calls?|invoke|function_calls?)\b|\bDSML\b|UNTRUSTED_TOOL_OUTPUT/gi;
 
-// Return an inert projection of untrusted text: lines that read as direct instructions to the
-// assistant are withheld (replaced by a redaction marker) and control tokens are neutralized.
+// Return an inert projection of untrusted text: lines that match an injection pattern (an
+// attempt to redirect the model) are withheld; all other lines — including ordinary code — are
+// preserved, with only control tokens neutralized.
 export function projectUntrustedContent(text) {
   const value = String(text ?? "");
   const withheld = [];
   const projected = value
     .split(/\r?\n/)
     .map((line) => {
-      if (IMPERATIVE_LINE.test(line)) {
+      if (INJECTION_LINE_PATTERNS.some((pattern) => pattern.test(line))) {
         withheld.push(line.trim());
-        return "[withheld: instruction-like line]";
+        return "[withheld: injection-like line]";
       }
       return line.replace(CONTROL_TOKEN, "[neutralized]");
     })
@@ -41,6 +51,11 @@ export function createQuarantine() {
     },
     list() {
       return [...store.values()].map((entry) => ({ id: entry.id, meta: entry.meta, withheldCount: entry.withheld.length }));
+    },
+    // Full entries including raw content and withheld lines, for audit/human review — never
+    // re-injected into the model context, but recoverable out-of-band.
+    snapshot() {
+      return [...store.values()].map((entry) => ({ id: entry.id, meta: entry.meta, withheld: entry.withheld, content: entry.content }));
     },
     size: () => store.size,
   };

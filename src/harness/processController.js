@@ -260,16 +260,18 @@ export function recordToolObservation(controller, { name, args, result, step, la
 // identical-repeat guard misses. Scans the recent signature stream for a block of period p
 // (2..maxPeriod) that repeats at least `minRepeats` times back-to-back.
 export function detectOscillation(controller, { maxPeriod = 4, minRepeats = 2 } = {}) {
-  const signatures = controller.history.map((item) => item.signature);
   for (let period = 2; period <= maxPeriod; period += 1) {
     const needed = period * minRepeats;
-    if (signatures.length < needed) continue;
-    const window = signatures.slice(-needed);
-    const block = window.slice(0, period);
+    if (controller.history.length < needed) continue;
+    const window = controller.history.slice(-needed);
+    // A cycle that includes real progress (an edit, patch, verify shell, or worker) is genuine
+    // iterative work, not thrashing — never flag it as oscillation.
+    if (window.some((item) => item.progress || (PROGRESS_TOOLS.has(item.name) && item.ok && !item.alreadyAvailable))) continue;
+    const block = window.slice(0, period).map((item) => item.signature);
     if (new Set(block).size < 2) continue; // identical repeats are handled elsewhere
     let matches = true;
     for (let i = period; i < window.length && matches; i += 1) {
-      if (window[i] !== window[i - period]) matches = false;
+      if (window[i].signature !== window[i - period].signature) matches = false;
     }
     if (matches) {
       return { oscillating: true, period, repeats: minRepeats, cycle: controller.history.slice(-period).map((item) => `${item.name}(${item.target || ""})`) };

@@ -111,6 +111,7 @@ export async function runAgent({
       process,
       verification: verification.snapshot(),
       workflow: workflowType ? advanceWorkflowState(workflow, { type: workflowType, step }) : workflow,
+      quarantine: quarantine.snapshot(),
       ...extra,
     };
   };
@@ -219,6 +220,7 @@ export async function runAgent({
           requestType,
           process,
           verification: verification.snapshot(),
+          quarantine: quarantine.snapshot(),
           workflow: advanceWorkflowState(workflow, { type: "failed", step }),
         };
       }
@@ -239,6 +241,7 @@ export async function runAgent({
         reviewReport: finalValidation?.report,
         reviewValidation: finalValidation,
         verification: verification.snapshot(),
+        quarantine: quarantine.snapshot(),
         workflow,
       };
     }

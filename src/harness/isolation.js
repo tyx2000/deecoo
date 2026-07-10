@@ -12,8 +12,10 @@ export function createTaskContext({ env = {}, cwd } = {}) {
 }
 
 // Run `fn` with the given env overlay applied to process.env and restored afterward. Serialized
-// through a shared mutex so concurrent tasks never observe each other's mutations.
+// through a shared mutex so concurrent tasks never observe each other's mutations. With no
+// overlay there is nothing to isolate, so run directly and stay fully concurrent.
 export async function withIsolatedEnv(overlay = {}, fn) {
+  if (!overlay || Object.keys(overlay).length === 0) return fn();
   return globalIsolationMutex.run(async () => {
     const applied = Object.keys(overlay);
     const saved = new Map();

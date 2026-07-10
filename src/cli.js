@@ -3,6 +3,7 @@ import readline from "node:readline";
 import { basename, resolve } from "node:path";
 import { handleConfigCommand } from "./commands/config.js";
 import { parseEgressAllowlist } from "./permissions/egress.js";
+import { resolveSecretReference } from "./config/secrets.js";
 import { runSlashCommand, runTopLevelCommand } from "./commands/dispatcher.js";
 import { APP_COMMANDS, EXIT_SIGNAL, SLASH_COMMANDS, isExitCommand, printSlashHelp } from "./commands/registry.js";
 import { parseArgs, applyPositionalCwd, printHelp } from "./cli/args.js";
@@ -54,6 +55,9 @@ export async function main(argv) {
   }
 
   const config = loadConfig(process.env, args);
+  // Dereference an indirect API key (file:PATH / env:NAME) so the raw secret need not be stored
+  // in plaintext settings.json.
+  config.apiKey = (await resolveSecretReference(config.apiKey)) ?? config.apiKey;
   config.theme = setTheme(config.theme);
   const cwd = resolve(args.cwd ?? config.cwd ?? process.cwd());
   const task = args.task.trim();
@@ -110,7 +114,7 @@ export async function main(argv) {
     }
 
     const session = await sessionStore.createSession({ model: config.model });
-    await runInterruptibleTask({ client, tools, task, cwd, config, sessionStore, session });
+    await runInterruptibleTask({ client, tools, task, cwd, config, sessionStore, session, envOverlay: settings.env });
   } finally {
     title.restore();
   }
@@ -219,7 +223,7 @@ async function runInteractiveSession({
         session = await sessionStore.createSession({ model: config.model });
         console.log(formatToolLine(`session: ${session.title}`));
       }
-      await runInterruptibleTask({ client, tools, task, cwd, config, sessionStore, session, activeSkills });
+      await runInterruptibleTask({ client, tools, task, cwd, config, sessionStore, session, activeSkills, envOverlay: settings.env });
       branch = await getGitBranch(cwd);
       console.log("");
     }

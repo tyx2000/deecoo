@@ -30,6 +30,15 @@ export function createReplayTools(fixture = [], { schemas = [], strict = true } 
     if (entry?.key && !byKey.has(entry.key)) byKey.set(entry.key, entry.result);
   }
 
+  const replayExecute = async (name, args) => {
+    const key = toolCallKey(name, args);
+    if (byKey.has(key)) return byKey.get(key);
+    // Strict replay is keyed only — an unmatched call is a miss, never a wrong queued result.
+    if (strict) return { ok: false, error: "No tool replay fixture for " + name, code: "REPLAY_MISS" };
+    if (queue.length) return queue.shift().result;
+    return { ok: true };
+  };
+
   return {
     schemas,
     workerSchemas: schemas,
@@ -40,18 +49,9 @@ export function createReplayTools(fixture = [], { schemas = [], strict = true } 
     setSubagentRuntime() {},
     resetTaskPermissions() {},
     createWorkerTools() {
-      return { schemas, async execute(name, args, options) {
-        return this.__replay(name, args, options);
-      } };
+      return { schemas, execute: replayExecute };
     },
-    async execute(name, args) {
-      const key = toolCallKey(name, args);
-      if (byKey.has(key)) return byKey.get(key);
-      // Strict replay is keyed only — an unmatched call is a miss, never a wrong queued result.
-      if (strict) return { ok: false, error: "No tool replay fixture for " + name, code: "REPLAY_MISS" };
-      if (queue.length) return queue.shift().result;
-      return { ok: true };
-    },
+    execute: replayExecute,
   };
 }
 

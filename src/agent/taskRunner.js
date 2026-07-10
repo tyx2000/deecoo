@@ -5,6 +5,7 @@ import { createRunTracer } from "../harness/tracer.js";
 import { estimateCostUsd, isModelPriceKnown } from "../harness/cost.js";
 import { createRateLimiter, rateLimitClient } from "../llm/rateLimiter.js";
 import { createSecretRegistry } from "../config/secrets.js";
+import { withIsolatedEnv } from "../harness/isolation.js";
 import { buildContextMessages, contextItem } from "../context/builder.js";
 import { buildProjectIndex, buildProjectIndexMessages } from "../context/projectIndex.js";
 import { buildReviewScopeMessages } from "../context/reviewScope.js";
@@ -31,7 +32,15 @@ import { createSpinner } from "../terminal/spinner.js";
 import { formatActivityBlock, formatActivityStart, printCoordinationPlan } from "../cli/activity.js";
 import { buildVerificationPlan, verificationPlanMessage } from "../verification/planner.js";
 
-export async function runTask({ client, tools, task, cwd, config, sessionStore, session, activeSkills = [], signal }) {
+export async function runTask({ client, tools, task, cwd, config, sessionStore, session, activeSkills = [], envOverlay, signal }) {
+  // Apply this task's environment in an isolated, self-restoring scope so concurrent in-process
+  // tasks never clobber each other's env or leak into the global process environment.
+  return withIsolatedEnv(envOverlay ?? {}, () =>
+    runTaskInner({ client, tools, task, cwd, config, sessionStore, session, activeSkills, signal }),
+  );
+}
+
+async function runTaskInner({ client, tools, task, cwd, config, sessionStore, session, activeSkills = [], signal }) {
   const spinner = createSpinner("Thinking");
   const streamPrinter = createAssistantStreamPrinter();
   let streamed = false;
@@ -199,6 +208,7 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
         transitions: result.transitions,
         trace: result.trace,
         reviewReport: result.reviewReport,
+        quarantine: result.quarantine,
         messages: result.messages,
       });
       await saveRunOutputs(sessionStore, session, { task, result });
