@@ -22,6 +22,7 @@ import { advanceWorkflowState, createWorkflowState } from "../harness/workflow.j
 import { createVerificationStateMachine } from "../verification/state.js";
 import { CONTENT_TRUST_INSTRUCTION, markUntrustedToolResult } from "../harness/contentTrust.js";
 import { estimateCostUsd } from "../harness/cost.js";
+import { createMutex } from "../harness/mutex.js";
 
 const MAX_LIVE_MESSAGE_CHARS = 180000;
 const RECENT_LIVE_MESSAGES = 10;
@@ -64,6 +65,10 @@ export async function runAgent({
   const transitions = Array.isArray(resume?.transitions) ? structuredClone(resume.transitions) : [];
   const agentState = hydrateAgentState(resume?.agentState, { task, cwd, usage });
   const processController = createProcessController();
+  // Concurrent dispatches record their observations while running, so guard the shared
+  // controller with a mutex; each dispatch records under its own stable lane so a mutation in
+  // one never invalidates another's observations. Serial tools use the default (main) lane.
+  const recordMutex = createMutex();
   // Expose this run's pinned observations so dispatched workers can reuse them instead of
   // re-reading the same files. Worker tool runtimes lack this hook, so the call safely no-ops.
   tools.setWorkingSetProvider?.(() => (hasWorkingSet(processController) ? buildWorkingSetSummary(processController) : undefined));
@@ -239,8 +244,11 @@ export async function runAgent({
       const args = parseToolArguments(call.function?.arguments);
       workflow = advanceWorkflowState(workflow, { type: "tool-start", tool: name, step });
       const decision = evaluateToolCall(processController, { name, args, step });
+      // Concurrent dispatches get a stable per-dispatch lane; serial tools stay in the main
+      // lane so their cross-turn dedup is unchanged.
+      const lane = isParallelDispatch({ name, decision }) ? "dispatch:" + call.id : undefined;
       onToolStart?.({ name, args, decision });
-      return { call, name, args, decision };
+      return { call, name, args, decision, lane };
     });
 
     const runOne = async (item) => {
@@ -251,6 +259,9 @@ export async function runAgent({
           ? item.decision.result
           : await tools.execute(item.name, item.args, { signal });
       throwIfAborted(signal);
+      // Record while running (under the mutex) so concurrent dispatches never race on the
+      // shared controller and each stays isolated in its own lane.
+      await recordMutex.run(() => recordToolObservation(processController, { name: item.name, args: item.args, result, step, lane: item.lane }));
       return { ...item, result, startedAt, endedAt: Date.now() };
     };
 
@@ -267,7 +278,6 @@ export async function runAgent({
 
     for (const item of evaluated) {
       const { name, args, result, startedAt, endedAt } = executedById.get(item.call.id);
-      recordToolObservation(processController, { name, args, result, step });
       const verificationState = verification.observeTool({ name, args, result, step });
       transitions.push(continueTransition(result?.ok === false ? CONTINUE_TRANSITIONS.TOOL_ERROR : CONTINUE_TRANSITIONS.TOOL_USE, { step, tool: name }));
       recordToolStep(agentState, { step, name, args, result, startedAt, endedAt });

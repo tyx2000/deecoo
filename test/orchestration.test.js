@@ -1792,6 +1792,9 @@ test("independent subagent dispatches in one turn run concurrently", async () =>
 
   assert.equal(result.finalText, "synthesized");
   assert.ok(maxActive >= 2, `expected concurrent dispatch, saw max ${maxActive} active`);
+  // Each concurrent dispatch records on the shared controller under the mutex; a race would
+  // drop updates, so all three must be counted.
+  assert.equal(result.process.totalTools, 3);
 });
 
 test("runAgent stops at the step budget instead of looping forever, and emits checkpoints", async () => {
