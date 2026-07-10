@@ -21,6 +21,7 @@ export function loadConfig(env, args = {}) {
     priceCompletionPerM: optionalNumberFrom(env.DEECOO_PRICE_COMPLETION_PER_M),
     taskTimeoutMs: optionalNumberFrom(env.DEECOO_TASK_TIMEOUT_MS),
     workerTimeoutMs: optionalNumberFrom(env.DEECOO_WORKER_TIMEOUT_MS),
+    egressAllowlist: env.DEECOO_EGRESS_ALLOWLIST,
     permissionMode: normalizePermissionMode(env.DEECOO_PERMISSION_MODE ?? "ask-once"),
     theme: env.DEECOO_THEME ?? "tokyo-night",
     reasoningEffort: env.DEECOO_REASONING_EFFORT,

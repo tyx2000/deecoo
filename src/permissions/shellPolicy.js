@@ -1,3 +1,5 @@
+import { egressViolations } from "./egress.js";
+
 const BLOCK_PATTERNS = [
   { pattern: /\bgit\s+reset\s+--hard\b/i, reason: "destructive git reset" },
   { pattern: /\bgit\s+clean\s+-[^\s]*[fd][^\s]*/i, reason: "destructive git clean" },
@@ -20,6 +22,19 @@ const SENSITIVE_PATH_PATTERNS = [
   { pattern: /\/etc\/(shadow|sudoers)\b/i, reason: "system credential file access" },
   { pattern: /\bid_(rsa|ed25519|ecdsa|dsa)\b/i, reason: "private key access" },
   { pattern: /(^|[\s"'=:])~?\/?\.(netrc|npmrc|pypirc|docker\/config\.json|kube\/config)\b/i, reason: "service credential file access" },
+  // The agent's own credential store and environment are prime exfiltration targets — the env
+  // is scrubbed for child processes, but the on-disk settings file and /proc must be blocked too.
+  { pattern: /\.deecoo\/settings\.json/i, reason: "agent credential store access" },
+  { pattern: /\/proc\/\S*\/environ\b/i, reason: "process environment access" },
+  { pattern: /\b(printenv|echo)\b[^|;&]*\$?\b\w*(API[_-]?KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|DEEPSEEK|ANTHROPIC)\w*/i, reason: "secret environment variable read" },
+  { pattern: /(^|[\s|;&])(printenv|env)\s*($|[|;&#])/i, reason: "full environment dump" },
+];
+
+// Network commands shaped like data exfiltration: uploading local files/data or opening raw
+// sockets. Plain fetches stay at warn; sending data out is a hard block.
+const EGRESS_PATTERNS = [
+  { pattern: /\b(curl|wget)\b[^|;&]*(--data\b|--data-binary\b|--data-urlencode\b|\s-d\s|--post-file\b|--upload-file\b|\s-T\s|\s-F\s|--form\b)/i, reason: "network upload / data exfiltration" },
+  { pattern: /\b(nc|ncat|netcat)\b/i, reason: "raw socket / netcat channel" },
 ];
 
 const WARN_PATTERNS = [
@@ -30,13 +45,16 @@ const WARN_PATTERNS = [
   { pattern: />{1,2}(?!&)(?!\s*\/dev\/null\b)/, reason: "output redirection may write outside the workspace" },
 ];
 
-export function classifyShellCommand(command) {
+export function classifyShellCommand(command, { egressAllowlist } = {}) {
   const text = normalizeShellCommand(command);
+  const disallowedHosts = egressViolations(text, egressAllowlist);
   const blocked = [
     ...detectBlockedShellTokens(text),
     ...detectInteractiveShellCommands(text),
     ...BLOCK_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason),
     ...SENSITIVE_PATH_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason),
+    ...EGRESS_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason),
+    ...(disallowedHosts.length ? ["network egress to non-allowlisted host: " + disallowedHosts.join(", ")] : []),
   ];
   if (blocked.length) {
     return {

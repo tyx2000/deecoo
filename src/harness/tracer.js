@@ -16,6 +16,9 @@ export function createRunTracer({ max = 2000 } = {}) {
     completionTokens: 0,
     totalTokens: 0,
   };
+  // Metrics are cumulative and always exact; only the retained event ring is bounded, and we
+  // count evicted events so the trace is never silently lossy.
+  let dropped = 0;
   let startedAt;
   let endedAt;
 
@@ -25,7 +28,7 @@ export function createRunTracer({ max = 2000 } = {}) {
     startedAt ??= stamped.at;
     endedAt = stamped.at;
     events.push(stamped);
-    if (events.length > max) events.splice(0, events.length - max);
+    if (events.length > max) dropped += events.splice(0, events.length - max).length;
     applyMetrics(metrics, stamped);
   };
 
@@ -36,6 +39,7 @@ export function createRunTracer({ max = 2000 } = {}) {
       return {
         ...metrics,
         events: events.length,
+        droppedEvents: dropped,
         elapsedMs: startedAt !== undefined ? Math.max(0, (endedAt ?? startedAt) - startedAt) : 0,
       };
     },

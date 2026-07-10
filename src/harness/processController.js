@@ -35,8 +35,9 @@ const DEFAULTS = {
 };
 
 export function createProcessController(options = {}) {
-  const config = { ...DEFAULTS, ...options };
-  return {
+  const { restore, ...configOptions } = options;
+  const config = { ...DEFAULTS, ...configOptions };
+  const controller = {
     config,
     history: [],
     observations: new Map(),
@@ -55,6 +56,43 @@ export function createProcessController(options = {}) {
     // lane, which keeps existing behavior exactly.
     laneMutation: new Map(),
   };
+  if (restore) restoreProcessController(controller, restore);
+  return controller;
+}
+
+// Serialize enough of the controller that a resumed run keeps its dedup memory and pinned
+// working set instead of re-reading everything it had already inspected.
+export function serializeProcessController(controller) {
+  return {
+    history: controller.history.slice(-controller.config.maxHistory),
+    observations: [...controller.observations.entries()],
+    workingSet: {
+      files: [...controller.workingSet.files.entries()],
+      searches: controller.workingSet.searches.slice(),
+      lists: controller.workingSet.lists.slice(),
+      git: { ...controller.workingSet.git },
+    },
+    metrics: { ...controller.metrics },
+    lastMutationStep: controller.lastMutationStep,
+    lastProgressStep: controller.lastProgressStep,
+    laneMutation: [...controller.laneMutation.entries()],
+  };
+}
+
+function restoreProcessController(controller, snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return;
+  if (Array.isArray(snapshot.history)) controller.history = structuredClone(snapshot.history);
+  if (Array.isArray(snapshot.observations)) controller.observations = new Map(structuredClone(snapshot.observations));
+  if (snapshot.workingSet) {
+    controller.workingSet.files = new Map(structuredClone(snapshot.workingSet.files ?? []));
+    controller.workingSet.searches = structuredClone(snapshot.workingSet.searches ?? []);
+    controller.workingSet.lists = structuredClone(snapshot.workingSet.lists ?? []);
+    controller.workingSet.git = structuredClone(snapshot.workingSet.git ?? {});
+  }
+  if (snapshot.metrics) controller.metrics = { ...controller.metrics, ...snapshot.metrics };
+  if (Number.isFinite(snapshot.lastMutationStep)) controller.lastMutationStep = snapshot.lastMutationStep;
+  if (Number.isFinite(snapshot.lastProgressStep)) controller.lastProgressStep = snapshot.lastProgressStep;
+  if (Array.isArray(snapshot.laneMutation)) controller.laneMutation = new Map(snapshot.laneMutation);
 }
 
 function laneMutationStep(controller, lane) {
@@ -218,11 +256,51 @@ export function recordToolObservation(controller, { name, args, result, step, la
   return entry;
 }
 
+// Detect A→B→A→B style oscillation: a repeating cycle of non-identical tool calls that the
+// identical-repeat guard misses. Scans the recent signature stream for a block of period p
+// (2..maxPeriod) that repeats at least `minRepeats` times back-to-back.
+export function detectOscillation(controller, { maxPeriod = 4, minRepeats = 2 } = {}) {
+  const signatures = controller.history.map((item) => item.signature);
+  for (let period = 2; period <= maxPeriod; period += 1) {
+    const needed = period * minRepeats;
+    if (signatures.length < needed) continue;
+    const window = signatures.slice(-needed);
+    const block = window.slice(0, period);
+    if (new Set(block).size < 2) continue; // identical repeats are handled elsewhere
+    let matches = true;
+    for (let i = period; i < window.length && matches; i += 1) {
+      if (window[i] !== window[i - period]) matches = false;
+    }
+    if (matches) {
+      return { oscillating: true, period, repeats: minRepeats, cycle: controller.history.slice(-period).map((item) => `${item.name}(${item.target || ""})`) };
+    }
+  }
+  return { oscillating: false };
+}
+
 export function maybeBuildProcessNudge(controller, { step } = {}) {
-  const streak = inspectionStreak(controller);
   const cooldown = controller.config.thrashNudgeCooldownSteps;
+  const canNudge = step - controller.lastNudgeStep > cooldown;
+
+  const oscillation = detectOscillation(controller);
+  if (oscillation.oscillating && canNudge) {
+    controller.lastNudgeStep = step;
+    controller.metrics.thrashNudges += 1;
+    return {
+      role: "user",
+      content: [
+        "Process guard (harness):",
+        `- You are oscillating: the tool sequence ${oscillation.cycle.join(" -> ")} has repeated with period ${oscillation.period} and is not making progress.`,
+        "Required next step:",
+        "1. Break the loop — do not repeat that sequence.",
+        "2. Choose a materially different approach: make a concrete edit, run a decisive verification, delegate a worker, or explain the blocker to the user.",
+      ].join("\n"),
+    };
+  }
+
+  const streak = inspectionStreak(controller);
   if (streak < controller.config.thrashInspectionStreak) return undefined;
-  if (step - controller.lastNudgeStep <= cooldown) return undefined;
+  if (!canNudge) return undefined;
 
   controller.lastNudgeStep = step;
   controller.metrics.thrashNudges += 1;

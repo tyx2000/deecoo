@@ -21,7 +21,7 @@ export async function runShell(workspace, args, prompter, allowShellWithoutPromp
   if (!args.command) return { ok: false, error: "command is required" };
   const command = String(args.command);
   const approvedCommandKey = normalizeShellCommand(command);
-  const policy = classifyShellCommand(command);
+  const policy = classifyShellCommand(command, { egressAllowlist: permissionState.egressAllowlist });
   if (policy.level === "block") {
     return {
       ok: false,

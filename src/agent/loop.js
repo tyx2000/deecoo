@@ -16,6 +16,7 @@ import {
   hasWorkingSet,
   maybeBuildProcessNudge,
   recordToolObservation,
+  serializeProcessController,
   snapshotProcessMetrics,
 } from "../harness/processController.js";
 import { advanceWorkflowState, createWorkflowState } from "../harness/workflow.js";
@@ -23,6 +24,7 @@ import { createVerificationStateMachine } from "../verification/state.js";
 import { CONTENT_TRUST_INSTRUCTION, markUntrustedToolResult } from "../harness/contentTrust.js";
 import { estimateCostUsd } from "../harness/cost.js";
 import { createMutex } from "../harness/mutex.js";
+import { createQuarantine } from "../harness/quarantine.js";
 
 const MAX_LIVE_MESSAGE_CHARS = 180000;
 const RECENT_LIVE_MESSAGES = 10;
@@ -55,16 +57,18 @@ export async function runAgent({
   onTextDelta,
   onCheckpoint,
   onEvent,
+  secretRegistry,
   finalValidator,
   signal,
 }) {
+  const quarantine = createQuarantine();
   const usage = resume?.usage ? { ...emptyUsage(), ...resume.usage } : emptyUsage();
   const coordination = providedCoordination ?? analyzeTaskCoordination(task);
   const requestType = coordination.requestType;
   const trace = Array.isArray(resume?.trace) ? structuredClone(resume.trace) : [];
   const transitions = Array.isArray(resume?.transitions) ? structuredClone(resume.transitions) : [];
   const agentState = hydrateAgentState(resume?.agentState, { task, cwd, usage });
-  const processController = createProcessController();
+  const processController = createProcessController({ restore: resume?.processController });
   // Concurrent dispatches record their observations while running, so guard the shared
   // controller with a mutex; each dispatch records under its own stable lane so a mutation in
   // one never invalidates another's observations. Serial tools use the default (main) lane.
@@ -283,9 +287,16 @@ export async function runAgent({
       recordToolStep(agentState, { step, name, args, result, startedAt, endedAt });
       trace.push(toolTraceEvent({ step, name, args, result, durationMs: Math.max(0, endedAt - startedAt) }));
       const compacted = compactToolResult(name, result);
-      const { result: trustedResult, scan } = trustToolOutput
+      let { result: trustedResult, scan } = trustToolOutput
         ? markUntrustedToolResult(name, compacted)
         : { result: compacted, scan: { suspicious: false, reasons: [] } };
+      // Data/instruction separation: when injection is suspected, quarantine the raw content
+      // out-of-band and show the model only an inert projection with imperative lines withheld.
+      if (trustToolOutput && scan.suspicious) {
+        trustedResult = quarantineSuspiciousResult(name, trustedResult, quarantine);
+      }
+      // Redact any known secret values that a tool surfaced before the model or logs see them.
+      if (secretRegistry) trustedResult = redactResultSecrets(trustedResult, secretRegistry);
       onToolEnd?.({ name, args, result, decision: item.decision, verification: verificationState, injection: scan });
       onEvent?.({
         type: "tool-call",
@@ -314,6 +325,7 @@ export async function runAgent({
       usage,
       workflow,
       process: snapshotProcessMetrics(processController),
+      processController: serializeProcessController(processController),
       requestType,
       trace,
       transitions,
@@ -360,7 +372,7 @@ function evaluateBudgets({ step, maxSteps, tokens, tokenBudget, deadline, cost =
   return undefined;
 }
 
-export function serializeRunState({ step, messages, usage, workflow, process, requestType, trace, transitions, agentState, verification }) {
+export function serializeRunState({ step, messages, usage, workflow, process, processController, requestType, trace, transitions, agentState, verification }) {
   return {
     version: 1,
     at: new Date().toISOString(),
@@ -372,6 +384,7 @@ export function serializeRunState({ step, messages, usage, workflow, process, re
     usage: { ...usage },
     workflow: workflow ? structuredClone(workflow) : undefined,
     process: process ? { ...process } : undefined,
+    processController: processController ? structuredClone(processController) : undefined,
     trace: Array.isArray(trace) ? structuredClone(trace) : [],
     transitions: Array.isArray(transitions) ? structuredClone(transitions) : [],
     agentState: agentState ? structuredClone(agentState) : undefined,
@@ -469,6 +482,37 @@ function throwIfAborted(signal) {
 
 function isParallelDispatch(item) {
   return item.name === "agent" && item.decision.action !== "short_circuit";
+}
+
+const QUARANTINE_FIELDS = ["content", "stdout", "stderr", "diff", "status", "failureSummary", "result", "summary"];
+
+function quarantineSuspiciousResult(name, result, quarantine) {
+  if (!result || typeof result !== "object") return result;
+  const next = { ...result };
+  for (const field of QUARANTINE_FIELDS) {
+    if (typeof next[field] !== "string" || next[field].length === 0) continue;
+    const held = quarantine.store(next[field], { tool: name, field });
+    next[field] =
+      `[quarantined ${held.id}: ${held.withheld.length} instruction-like line(s) withheld; inert projection below]\n` + held.safe;
+  }
+  next.quarantined = quarantine.list().map((entry) => entry.id);
+  return next;
+}
+
+const SECRET_REDACTABLE_FIELDS = ["content", "stdout", "stderr", "diff", "status", "failureSummary", "result", "summary", "error"];
+
+function redactResultSecrets(result, secretRegistry) {
+  if (!result || typeof result !== "object") return result;
+  let next = result;
+  for (const field of SECRET_REDACTABLE_FIELDS) {
+    if (typeof result[field] !== "string" || result[field].length === 0) continue;
+    const redacted = secretRegistry.redact(result[field]);
+    if (redacted !== result[field]) {
+      if (next === result) next = { ...result };
+      next[field] = redacted;
+    }
+  }
+  return next;
 }
 
 async function mapWithConcurrency(items, limit, fn) {

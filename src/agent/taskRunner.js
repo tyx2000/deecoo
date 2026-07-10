@@ -2,7 +2,9 @@ import { runAgent } from "./loop.js";
 import { createSubagentRuntime } from "./subagents/runtime.js";
 import { analyzeTaskCoordination } from "./coordination.js";
 import { createRunTracer } from "../harness/tracer.js";
-import { estimateCostUsd } from "../harness/cost.js";
+import { estimateCostUsd, isModelPriceKnown } from "../harness/cost.js";
+import { createRateLimiter, rateLimitClient } from "../llm/rateLimiter.js";
+import { createSecretRegistry } from "../config/secrets.js";
 import { buildContextMessages, contextItem } from "../context/builder.js";
 import { buildProjectIndex, buildProjectIndexMessages } from "../context/projectIndex.js";
 import { buildReviewScopeMessages } from "../context/reviewScope.js";
@@ -75,9 +77,16 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
   if (isScorActive(activeSkills) && coordination.requestType === "review") {
     tools.setTaskToolPolicy?.(scorReviewToolPolicy());
   }
+  // One rate limiter shared by the main agent and every worker, so parallel dispatch cannot
+  // independently burst the provider; a 429 anywhere triggers a cooldown all callers respect.
+  const rateLimiter = createRateLimiter({ maxConcurrent: config.maxConcurrentRequests ?? 5 });
+  const limitedClient = rateLimitClient(client, rateLimiter);
+  // Redact concrete secret values (API keys, tokens) from anything a tool surfaces to the model.
+  const secretRegistry = createSecretRegistry(process.env);
+  if (config.apiKey) secretRegistry.add(config.apiKey, "DEEPSEEK_API_KEY");
   tools.setSubagentRuntime?.(
     createSubagentRuntime({
-      client,
+      client: limitedClient,
       createWorkerTools: tools.createWorkerTools?.bind(tools),
       workerTools: tools.createWorkerTools?.({ mode: "research" }) ?? tools,
       cwd,
@@ -93,9 +102,12 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
   const taskDeadline = createTaskDeadline(signal, config.taskTimeoutMs);
   const tracer = createRunTracer();
   const priceOverrides = { pricePromptPerM: config.pricePromptPerM, priceCompletionPerM: config.priceCompletionPerM };
+  if (config.costBudgetUsd && !isModelPriceKnown(config.model, priceOverrides)) {
+    console.log(formatToolLine(`cost budget set but no price is known for model "${config.model}"; the budget is inactive. Set DEECOO_PRICE_PROMPT_PER_M and DEECOO_PRICE_COMPLETION_PER_M.`));
+  }
   try {
     const result = await runAgent({
-      client,
+      client: limitedClient,
       tools,
       task,
       cwd,
@@ -112,7 +124,13 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
       deadline: taskDeadline.deadline,
       contextMessages: [...baseContextMessages, ...reviewScopeMessages],
       activeSkills,
+      secretRegistry,
       onEvent: (event) => tracer.record(event),
+      onCheckpoint: session && sessionStore
+        ? (snapshot) => {
+            void persistCheckpoint(sessionStore, session, snapshot);
+          }
+        : undefined,
       finalValidator:
         coordination.requestType === "review"
           ? createReviewFinalValidator()
@@ -193,6 +211,8 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
         assistant: result.finalText,
         model: config.model,
       });
+      // The run finished; drop its resumable checkpoint (kept only for crash/interrupt recovery).
+      await sessionStore.clearCheckpoint?.(session.id);
     }
     return {
       elapsedMs,
@@ -223,6 +243,21 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
   } finally {
     taskDeadline.dispose();
     await refreshProjectDescription(cwd);
+  }
+}
+
+const lastCheckpointWrite = new Map();
+
+// Persist a resumable checkpoint to disk, throttled so a fast loop does not thrash the FS.
+// The full message history is written so a crashed/interrupted run can actually be resumed.
+async function persistCheckpoint(sessionStore, session, snapshot) {
+  const now = Date.now();
+  if (now - (lastCheckpointWrite.get(session.id) ?? 0) < 2500) return;
+  lastCheckpointWrite.set(session.id, now);
+  try {
+    await sessionStore.saveCheckpoint(session.id, snapshot);
+  } catch {
+    // A failed checkpoint must never fail the task.
   }
 }
 

@@ -17,6 +17,7 @@ export function createToolRuntime({
   onApproveShellCommand,
   autoApproveAllShell = false,
   onApproveAllShellCommands,
+  egressAllowlist,
 }) {
   const workspace = resolve(cwd);
   let realWorkspace;
@@ -31,6 +32,7 @@ export function createToolRuntime({
     onApproveShellCommand,
     autoApproveAllShell,
     onApproveAllShellCommands,
+    egressAllowlist,
     readCache: new Map(),
     taskToolPolicy: undefined,
   };

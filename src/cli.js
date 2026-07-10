@@ -2,6 +2,7 @@
 import readline from "node:readline";
 import { basename, resolve } from "node:path";
 import { handleConfigCommand } from "./commands/config.js";
+import { parseEgressAllowlist } from "./permissions/egress.js";
 import { runSlashCommand, runTopLevelCommand } from "./commands/dispatcher.js";
 import { APP_COMMANDS, EXIT_SIGNAL, SLASH_COMMANDS, isExitCommand, printSlashHelp } from "./commands/registry.js";
 import { parseArgs, applyPositionalCwd, printHelp } from "./cli/args.js";
@@ -72,6 +73,7 @@ export async function main(argv) {
     autoApproveAllShell: settings.permissions.shell.autoApproveAll,
     onApproveShellCommand: (command) => addApprovedShellCommand({ settingsPath: args.settings, command }),
     onApproveAllShellCommands: () => setAutoApproveAllShellCommands({ settingsPath: args.settings }),
+    egressAllowlist: parseEgressAllowlist(config.egressAllowlist),
   });
   const sessionStore = await createSessionStore(cwd);
 

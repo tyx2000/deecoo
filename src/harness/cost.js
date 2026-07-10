@@ -18,6 +18,14 @@ export function resolveModelPrice(model, overrides = {}) {
   return DEFAULT_PRICES[key] ?? FALLBACK_PRICE;
 }
 
+// True only when we have a real price for this model (a built-in entry or an explicit
+// override). A cost budget on an unknown model would silently never trip, so callers should
+// warn instead of enforcing a phantom budget.
+export function isModelPriceKnown(model, overrides = {}) {
+  if (numeric(overrides.pricePromptPerM) !== undefined || numeric(overrides.priceCompletionPerM) !== undefined) return true;
+  return Boolean(DEFAULT_PRICES[String(model ?? "").toLowerCase()]);
+}
+
 export function estimateCostUsd(usage, model, overrides = {}) {
   const price = resolveModelPrice(model, overrides);
   const promptTokens = Number(usage?.promptTokens ?? usage?.prompt_tokens ?? 0);

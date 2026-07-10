@@ -56,6 +56,22 @@ export async function createSessionStore(cwd) {
       }
       await unlink(join(projectDir, `${id}.json`));
     },
+    async saveCheckpoint(sessionId, checkpoint) {
+      if (!isSafeSessionId(sessionId)) return;
+      await writeFile(join(projectDir, `${sessionId}.checkpoint.json`), JSON.stringify(checkpoint), "utf8");
+    },
+    async loadCheckpoint(sessionId) {
+      if (!isSafeSessionId(sessionId)) return undefined;
+      try {
+        return JSON.parse(await readFile(join(projectDir, `${sessionId}.checkpoint.json`), "utf8"));
+      } catch {
+        return undefined;
+      }
+    },
+    async clearCheckpoint(sessionId) {
+      if (!isSafeSessionId(sessionId)) return;
+      await unlink(join(projectDir, `${sessionId}.checkpoint.json`)).catch(() => {});
+    },
   };
 }
 
