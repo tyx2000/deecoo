@@ -155,7 +155,6 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
         spinner.stop();
         console.log(formatActivityStart({ name, args, decision }) + "\n");
         if (name === "agent") tracer.record({ type: "worker", name, description: args?.description, mode: args?.mode ?? args?.subagent_type });
-        spinner.start();
       },
       onToolEnd: ({ name, args, result, decision }) => {
         spinner.stop();

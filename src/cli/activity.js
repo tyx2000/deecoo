@@ -103,19 +103,23 @@ function toolCallTitle(name, args, activity) {
   if (name === "read_file") return "Read(" + truncateOneLine(args?.path ?? activity.target ?? "", 120) + ")";
   if (name === "list_files") return "List(" + truncateOneLine(args?.directory ?? activity.target ?? ".", 120) + ")";
   if (name === "search_text") return "Search(" + truncateOneLine(args?.query ?? "", 90) + ")";
-  if (name === "propose_patch") return "Patch(" + truncateOneLine(args?.path ?? activity.target ?? "", 120) + ")";
+  if (name === "propose_patch") return "Patch(" + fileTarget(args, activity) + ")";
   if (name === "propose_patch_set") return "PatchSet(" + truncateOneLine(activity.target ?? "files", 120) + ")";
-  if (name === "apply_patch") return "ApplyPatch(" + truncateOneLine(args?.path ?? activity.target ?? "", 120) + ")";
+  if (name === "apply_patch") return "ApplyPatch(" + fileTarget(args, activity) + ")";
   if (name === "apply_patch_set") return "ApplyPatchSet(" + truncateOneLine(activity.target ?? "files", 120) + ")";
-  if (name === "apply_json_patch") return "JsonPatch(" + truncateOneLine(args?.path ?? activity.target ?? "", 120) + ")";
-  if (name === "edit_file") return "Edit(" + truncateOneLine(args?.path ?? activity.target ?? "", 120) + ")";
-  if (name === "write_file") return "Write(" + truncateOneLine(args?.path ?? activity.target ?? "", 120) + ")";
+  if (name === "apply_json_patch") return "JsonPatch(" + fileTarget(args, activity) + ")";
+  if (name === "edit_file") return "Edit(" + fileTarget(args, activity) + ")";
+  if (name === "write_file") return "Write(" + fileTarget(args, activity) + ")";
   if (name === "git_status") return "Git(status)";
   if (name === "git_diff") return args?.staged ? "Git(diff --staged)" : "Git(diff)";
   if (name === "agent") return "Agent(" + truncateOneLine(activity.target ?? args?.description ?? "worker", 120) + ")";
   if (name === "send_message") return "AgentMessage(" + truncateOneLine(args?.to ?? activity.target ?? "worker", 80) + ")";
   if (name === "task_stop") return "AgentStop(" + truncateOneLine(args?.task_id ?? activity.target ?? "worker", 80) + ")";
   return toolLabel(name) + formatTargetSuffix(activity.target);
+}
+
+function fileTarget(args, activity) {
+  return truncateOneLine(args?.path || activity.target || "<invalid arguments>", 120);
 }
 
 function formatTargetSuffix(target) {

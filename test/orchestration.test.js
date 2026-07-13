@@ -187,6 +187,36 @@ test("apply_patch rejects stale hunk context before writing", async () => {
   assert.equal(content, "one\ntwo\nthree\n");
 });
 
+test("apply_patch relocates uniquely matching hunk context", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-apply-patch-"));
+  await writeFile(join(workspace, "target.txt"), "shifted\none\ntwo\nthree\n", "utf8");
+  const runtime = createToolRuntime({ cwd: workspace, prompter: async () => "approve", permissionMode: "workspace-write" });
+
+  const result = await runtime.execute("apply_patch", {
+    path: "target.txt",
+    hunks: [{ oldStart: 2, oldLines: ["two", "three"], newLines: ["TWO", "THREE"] }],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(await readFile(join(workspace, "target.txt"), "utf8"), "shifted\none\nTWO\nTHREE\n");
+});
+
+test("apply_patch rejects ambiguous relocated context", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "deecoo-apply-patch-"));
+  await writeFile(join(workspace, "target.txt"), "same\nother\nsame\n", "utf8");
+  const runtime = createToolRuntime({ cwd: workspace, prompter: async () => "approve", permissionMode: "workspace-write" });
+
+  const result = await runtime.execute("apply_patch", {
+    path: "target.txt",
+    hunks: [{ oldStart: 2, oldLines: ["same"], newLines: ["next"] }],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "PATCH_CONTEXT_MISMATCH");
+  assert.match(result.error, /not unique/);
+  assert.equal(await readFile(join(workspace, "target.txt"), "utf8"), "same\nother\nsame\n");
+});
+
 test("apply_patch supports insertion hunks and blocks read-only writes", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "deecoo-apply-patch-"));
   await writeFile(join(workspace, "target.txt"), "one\ntwo\n", "utf8");
@@ -1102,6 +1132,52 @@ test("agent repairs weak edit final before exiting", async () => {
   assert.equal(result.stoppedReason, undefined);
   assert.equal(result.transitions.some((transition) => transition.reason === "final_validation_repair"), true);
   assert.deepEqual(result.agentState.filesEdited, ["src/a.js"]);
+});
+
+test("agent reports malformed tool JSON without executing empty arguments", async () => {
+  const replies = [
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [{ id: "call-1", function: { name: "write_file", arguments: '{"path":"index.html","content":"truncated' } }],
+    },
+    { role: "assistant", content: "The incomplete write was rejected; no file was changed." },
+  ];
+  let executions = 0;
+  let observedResult;
+  const client = {
+    async chatCompletion() {
+      return {
+        choices: [{ message: replies.shift() }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      };
+    },
+  };
+  const tools = {
+    schemas: [{ type: "function", function: { name: "write_file", parameters: { type: "object" } } }],
+    setWorkingSetProvider() {},
+    async execute() {
+      executions += 1;
+      return { ok: true };
+    },
+  };
+
+  const result = await runAgent({
+    client,
+    tools,
+    task: "create index.html",
+    cwd: "/tmp/workspace",
+    model: "test",
+    stream: false,
+    onToolEnd: ({ result: toolResult }) => {
+      observedResult = toolResult;
+    },
+  });
+
+  assert.equal(executions, 0);
+  assert.equal(observedResult.code, "INVALID_TOOL_ARGUMENTS");
+  assert.match(observedResult.error, /incomplete or invalid JSON/);
+  assert.equal(result.trace[0].code, "INVALID_TOOL_ARGUMENTS");
 });
 
 test("verification state records failure, fix, and rerun pass", () => {

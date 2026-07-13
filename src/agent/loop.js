@@ -248,21 +248,28 @@ export async function runAgent({
 
     const evaluated = message.tool_calls.map((call) => {
       const name = call.function?.name;
-      const args = parseToolArguments(call.function?.arguments);
+      const parsedArguments = parseToolArguments(call.function?.arguments);
+      const args = parsedArguments.args;
       workflow = advanceWorkflowState(workflow, { type: "tool-start", tool: name, step });
       const decision = evaluateToolCall(processController, { name, args, step });
       // Concurrent dispatches get a stable per-dispatch lane; serial tools stay in the main
       // lane so their cross-turn dedup is unchanged.
       const lane = isParallelDispatch({ name, decision }) ? "dispatch:" + call.id : undefined;
       onToolStart?.({ name, args, decision });
-      return { call, name, args, decision, lane };
+      return { call, name, args, argumentError: parsedArguments.error, decision, lane };
     });
 
     const runOne = async (item) => {
       throwIfAborted(signal);
       const startedAt = Date.now();
-      const result =
-        item.decision.action === "short_circuit"
+      const result = item.argumentError
+        ? {
+            ok: false,
+            code: "INVALID_TOOL_ARGUMENTS",
+            error: "Tool arguments were incomplete or invalid JSON. Retry with one complete, valid JSON object.",
+            recoverable: true,
+          }
+        : item.decision.action === "short_circuit"
           ? item.decision.result
           : await tools.execute(item.name, item.args, { signal });
       throwIfAborted(signal);
@@ -560,12 +567,16 @@ function addUsage(total, usage) {
 }
 
 function parseToolArguments(value) {
-  if (!value) return {};
-  if (typeof value === "object") return value;
+  if (!value) return { args: {}, error: "missing tool arguments" };
+  if (typeof value === "object") return { args: value };
   try {
-    return JSON.parse(value);
-  } catch {
-    return {};
+    const args = JSON.parse(value);
+    if (!args || typeof args !== "object" || Array.isArray(args)) {
+      return { args: {}, error: "tool arguments must be a JSON object" };
+    }
+    return { args };
+  } catch (error) {
+    return { args: {}, error: error instanceof Error ? error.message : "invalid JSON" };
   }
 }
 

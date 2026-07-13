@@ -115,3 +115,15 @@ test("activity start blocks make long-running worker dispatch visible", () => {
   assert.match(block, /^○ Starting Agent\(Security Reviewer\)/);
   assert.match(block, /why: executed · parallel worker dispatch/);
 });
+
+test("activity blocks label missing file arguments explicitly", () => {
+  setTheme("mono-focus");
+  const block = visible(formatActivityBlock({
+    name: "write_file",
+    args: {},
+    result: { ok: false, code: "INVALID_TOOL_ARGUMENTS", error: "Tool arguments were incomplete or invalid JSON." },
+  }));
+
+  assert.match(block, /^● Write\(<invalid arguments>\) failed/);
+  assert.match(block, /Tool arguments were incomplete or invalid JSON/);
+});

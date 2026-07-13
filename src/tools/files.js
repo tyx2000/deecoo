@@ -826,7 +826,15 @@ function planStructuredPatch(original, hunks) {
     if (![...oldLines, ...newLines].every((line) => typeof line === "string" && !line.includes("\n") && !line.includes("\r"))) {
       return { ok: false, error: `hunk ${index + 1} lines must be strings without line endings` };
     }
-    normalized.push({ oldStart, oldLines, newLines, index });
+    const resolved = resolveHunkStart(parsed.lines, { oldStart, oldLines });
+    if (!resolved.ok) {
+      return {
+        ok: false,
+        error: `hunk ${index + 1} context mismatch at line ${oldStart}${resolved.ambiguous ? "; matching context is not unique" : ""}`,
+        code: "PATCH_CONTEXT_MISMATCH",
+      };
+    }
+    normalized.push({ oldStart: resolved.oldStart, requestedOldStart: oldStart, oldLines, newLines, index });
   }
 
   normalized.sort((a, b) => a.oldStart - b.oldStart || a.index - b.index);
@@ -839,14 +847,6 @@ function planStructuredPatch(original, hunks) {
     }
     if (oldIndex < previousEnd) {
       return { ok: false, error: `hunk ${hunk.index + 1} overlaps a previous hunk` };
-    }
-    const actual = parsed.lines.slice(oldIndex, oldIndex + hunk.oldLines.length);
-    if (!sameLines(actual, hunk.oldLines)) {
-      return {
-        ok: false,
-        error: `hunk ${hunk.index + 1} context mismatch at line ${hunk.oldStart}`,
-        code: "PATCH_CONTEXT_MISMATCH",
-      };
     }
     previousEnd = oldIndex + Math.max(hunk.oldLines.length, 1);
   }
@@ -863,6 +863,23 @@ function planStructuredPatch(original, hunks) {
     content: serializeTextLines(next, parsed),
     hunks: normalized,
   };
+}
+
+function resolveHunkStart(lines, { oldStart, oldLines }) {
+  const requestedIndex = oldStart - 1;
+  const maxStart = oldLines.length ? lines.length - oldLines.length : lines.length;
+  if (requestedIndex >= 0 && requestedIndex <= maxStart) {
+    const actual = lines.slice(requestedIndex, requestedIndex + oldLines.length);
+    if (sameLines(actual, oldLines)) return { ok: true, oldStart };
+  }
+  if (oldLines.length === 0) return { ok: false };
+
+  const matches = [];
+  for (let index = 0; index <= maxStart; index += 1) {
+    if (sameLines(lines.slice(index, index + oldLines.length), oldLines)) matches.push(index + 1);
+    if (matches.length > 1) return { ok: false, ambiguous: true };
+  }
+  return matches.length === 1 ? { ok: true, oldStart: matches[0] } : { ok: false };
 }
 
 function planJsonPatch(original, operations) {

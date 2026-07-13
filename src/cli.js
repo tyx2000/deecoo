@@ -103,13 +103,13 @@ export async function main(argv) {
         tools,
         settingsPath: args.settings,
         startInteractive: (options = {}) =>
-          runInteractiveSession({ client, tools, cwd, config, sessionStore, settingsPath: args.settings, ...options }),
+          runInteractiveSession({ client, tools, cwd, config, sessionStore, settingsPath: args.settings, envOverlay: settings.env, ...options }),
       });
       return;
     }
 
     if (!task) {
-      await runInteractiveSession({ client, tools, cwd, config, sessionStore, settingsPath: args.settings });
+      await runInteractiveSession({ client, tools, cwd, config, sessionStore, settingsPath: args.settings, envOverlay: settings.env });
       return;
     }
 
@@ -154,6 +154,7 @@ async function runInteractiveSession({
   initialSession,
   settingsPath,
   initialActiveSkills = [],
+  envOverlay = {},
 }) {
   let session = initialSession;
   const activeSkills = [...initialActiveSkills];
@@ -223,7 +224,7 @@ async function runInteractiveSession({
         session = await sessionStore.createSession({ model: config.model });
         console.log(formatToolLine(`session: ${session.title}`));
       }
-      await runInterruptibleTask({ client, tools, task, cwd, config, sessionStore, session, activeSkills, envOverlay: settings.env });
+      await runInterruptibleTask({ client, tools, task, cwd, config, sessionStore, session, activeSkills, envOverlay });
       branch = await getGitBranch(cwd);
       console.log("");
     }
