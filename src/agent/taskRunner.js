@@ -23,7 +23,7 @@ import {
 } from "../memory/projectMemory.js";
 import { saveRunAudit } from "../observability/audit.js";
 import { saveRunOutputs } from "../reporter/outputs.js";
-import { createReviewFinalValidator, formatReviewReportMarkdown } from "../reporter/reviewReport.js";
+import { createReviewFinalValidator, formatReviewDisplayText } from "../reporter/reviewReport.js";
 import { buildSessionContext, recordTurn } from "../session/store.js";
 import { artifactContextMessages, saveSkillArtifact } from "../session/artifacts.js";
 import { isScorActive, scorArtifactMetadata, scorReviewToolPolicy } from "../skills/scor.js";
@@ -177,7 +177,9 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
       stoppedReason: result.stoppedReason,
       costUsd,
     });
-    const displayText = result.reviewReport ? formatReviewReportMarkdown(result.reviewReport) : result.finalText;
+    const displayText = result.requestType === "review"
+      ? formatReviewDisplayText({ report: result.reviewReport, finalText: result.finalText })
+      : result.finalText;
     if (streamed && finalTextWasStreamed(streamedContent, displayText)) {
       streamPrinter.finish(footer);
     } else if (streamed) {

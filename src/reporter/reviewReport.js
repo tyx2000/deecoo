@@ -163,6 +163,19 @@ export function formatReviewReportMarkdown(report) {
   return lines.join("\n").trim();
 }
 
+export function formatReviewDisplayText({ report, finalText }) {
+  if (report) return formatReviewReportMarkdown(report);
+
+  const prose = stripTrailingReviewJson(finalText);
+  if (prose !== undefined) {
+    return prose || "Review completed, but no human-readable summary was produced.";
+  }
+
+  const parsed = parseWholeReviewJson(finalText);
+  if (parsed) return formatReviewReportMarkdown(aggregateReviewReport(parsed));
+  return String(finalText ?? "").trim() || "Review completed, but no human-readable summary was produced.";
+}
+
 function validateFinding(finding, index, errors) {
   const label = `findings[${index}]`;
   if (!isObject(finding)) {
@@ -193,6 +206,22 @@ function extractJsonCandidates(text) {
   const trimmed = String(text ?? "").trim();
   if (trimmed.startsWith("{") && trimmed.endsWith("}")) candidates.push(trimmed);
   return candidates;
+}
+
+function stripTrailingReviewJson(text) {
+  const value = String(text ?? "").trim();
+  const withoutFence = value.replace(/\n*(?:---[ \t]*\n+)?```json[^\n]*\n[\s\S]*?```\s*$/i, "").trim();
+  return withoutFence === value ? undefined : withoutFence;
+}
+
+function parseWholeReviewJson(text) {
+  const value = String(text ?? "").trim().replace(/^```json[^\n]*\n/i, "").replace(/\n?```\s*$/, "");
+  try {
+    const report = JSON.parse(value);
+    return isObject(report) && isObject(report.review) && Array.isArray(report.findings) ? report : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function reviewRepairPrompt(errors, attempt) {

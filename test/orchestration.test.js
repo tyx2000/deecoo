@@ -28,7 +28,7 @@ import {
 import { redact, saveRunAudit } from "../src/observability/audit.js";
 import { classifyShellCommand } from "../src/permissions/shellPolicy.js";
 import { saveRunOutputs, structuredRunResult } from "../src/reporter/outputs.js";
-import { aggregateReviewReport, createReviewFinalValidator, formatReviewReportMarkdown, validateReviewReportText } from "../src/reporter/reviewReport.js";
+import { aggregateReviewReport, createReviewFinalValidator, formatReviewDisplayText, formatReviewReportMarkdown, validateReviewReportText } from "../src/reporter/reviewReport.js";
 import { scorArtifactMetadata, scorReviewToolPolicy } from "../src/skills/scor.js";
 import { advanceVerificationState, emptyVerificationState } from "../src/verification/state.js";
 import { buildVerificationPlan } from "../src/verification/planner.js";
@@ -1548,6 +1548,42 @@ test("review reports render as human-readable markdown for CLI display", () => {
   assert.match(markdown, /### P1 SCOR-001: API key stored without restrictive permissions/);
   assert.match(markdown, /- file: src\/config\/settings\.js:46/);
   assert.doesNotMatch(markdown, /```json/);
+});
+
+test("review display removes trailing JSON when schema validation failed", () => {
+  const display = formatReviewDisplayText({
+    finalText: [
+      "## 审查结论",
+      "",
+      "发现一个需要修复的问题。",
+      "",
+      "---",
+      "",
+      "```json",
+      '{"schema_version":1,"review":{},"findings":[]}',
+      "```",
+    ].join("\n"),
+  });
+
+  assert.equal(display, "## 审查结论\n\n发现一个需要修复的问题。");
+  assert.doesNotMatch(display, /schema_version|```json/);
+});
+
+test("review display formats a JSON-only report instead of printing raw JSON", () => {
+  const display = formatReviewDisplayText({
+    finalText: JSON.stringify({
+      schema_version: 1,
+      review: { target: "index.html", mode: "deep" },
+      findings: [],
+      open_questions: [],
+      test_gaps: [],
+      residual_risks: [],
+    }),
+  });
+
+  assert.match(display, /## Review Summary/);
+  assert.match(display, /- target: index\.html/);
+  assert.doesNotMatch(display, /schema_version/);
 });
 
 test("audit log redacts secrets before writing", async () => {
