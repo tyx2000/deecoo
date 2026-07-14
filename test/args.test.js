@@ -18,3 +18,19 @@ test("--auto-approve-files aliases --yes-files", () => {
   assert.equal(args.yes, false);
   assert.equal(args.yesFiles, true);
 });
+
+test("config parses provider and key options without treating them as an action", () => {
+  const args = parseArgs(["config", "-provider", "anthropic", "-key", "sk-ant-test", "--model", "claude-sonnet-5"]);
+
+  assert.equal(args.command, "config");
+  assert.equal(args.configAction, undefined);
+  assert.equal(args.provider, "anthropic");
+  assert.equal(args.apiKey, "sk-ant-test");
+  assert.equal(args.model, "claude-sonnet-5");
+  assert.equal(args.task, "");
+});
+
+test("config provider options reject missing values", () => {
+  assert.throws(() => parseArgs(["config", "-provider"]), /Missing value for -provider/);
+  assert.throws(() => parseArgs(["config", "-key"]), /Missing value for -key/);
+});

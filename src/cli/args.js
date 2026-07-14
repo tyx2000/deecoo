@@ -9,6 +9,8 @@ export function parseArgs(argv) {
     configAction: undefined,
     cwd: undefined,
     model: undefined,
+    provider: undefined,
+    apiKey: undefined,
     settings: undefined,
     yes: false,
     yesFiles: false,
@@ -24,6 +26,12 @@ export function parseArgs(argv) {
       args.cwd = argv[++i];
     } else if (arg === "--model") {
       args.model = argv[++i];
+    } else if (args.command === "config" && (arg === "-provider" || arg === "--provider")) {
+      args.provider = requiredOptionValue(argv, i, arg);
+      i += 1;
+    } else if (args.command === "config" && (arg === "-key" || arg === "--key")) {
+      args.apiKey = requiredOptionValue(argv, i, arg);
+      i += 1;
     } else if (arg === "--settings") {
       args.settings = argv[++i];
     } else if (arg === "--yes" || arg === "-y") {
@@ -44,6 +52,8 @@ export function parseArgs(argv) {
     configAction: args.configAction,
     cwd: args.cwd,
     model: args.model,
+    provider: args.provider,
+    apiKey: args.apiKey,
     settings: args.settings,
     yes: args.yes,
     yesFiles: args.yesFiles,
@@ -51,6 +61,12 @@ export function parseArgs(argv) {
     taskParts: args.taskParts,
     task: args.taskParts.join(" "),
   };
+}
+
+function requiredOptionValue(argv, index, option) {
+  const value = argv[index + 1];
+  if (value === undefined || value === "") throw new Error(`Missing value for ${option}.`);
+  return value;
 }
 
 export async function applyPositionalCwd(args) {
@@ -83,6 +99,7 @@ export function printHelp() {
     "  deecoo trace",
     "  deecoo theme",
     "  deecoo usage",
+    "  deecoo config -provider <deepseek|openai|anthropic> -key <api-key>",
     "  deecoo config <path|init|import-env|show|reset-shell-approvals>",
     "",
     "Running without a task starts an interactive session in the current workspace.",

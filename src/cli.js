@@ -13,7 +13,7 @@ import { runTask } from "./agent/taskRunner.js";
 import { loadConfig } from "./config/env.js";
 import { addApprovedShellCommand, applySettingsEnv, loadSettingsEnv, setAutoApproveAllShellCommands } from "./config/settings.js";
 import { ensureProjectDescription } from "./context/workspaceSnapshot.js";
-import { createDeepSeekClient } from "./llm/deepseekClient.js";
+import { createModelClient } from "./llm/clientFactory.js";
 import { createSessionStore } from "./session/store.js";
 import { listCodexSkills, loadCodexSkill } from "./skills/install.js";
 import { formatToolLine } from "./terminal/markdown.js";
@@ -54,7 +54,7 @@ export async function main(argv) {
     return;
   }
 
-  const config = loadConfig(process.env, args);
+  const config = loadConfig(process.env, args, settings);
   // Dereference an indirect API key (file:PATH / env:NAME) so the raw secret need not be stored
   // in plaintext settings.json.
   config.apiKey = (await resolveSecretReference(config.apiKey)) ?? config.apiKey;
@@ -66,7 +66,7 @@ export async function main(argv) {
   title.set(`${basename(cwd) || cwd}###deecoo`);
   await initializeProjectDescription(cwd);
 
-  const client = createDeepSeekClient(config);
+  const client = createModelClient(config);
   const prompter = createPrompter(args.yes);
   const tools = createToolRuntime({
     cwd,
@@ -87,6 +87,7 @@ export async function main(argv) {
 
   printStartupInfo([
     ["Workspace", cwd],
+    ["Provider", config.provider],
     ["Model", config.model],
     ["Permissions", tools.getPermissionMode()],
     ["Theme", getThemeName()],

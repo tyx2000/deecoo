@@ -47,7 +47,7 @@ function coordinationProtocol(coordination) {
     : "  - none";
   return [
     "- This task is classified as complex.",
-    "- Before substantial tool work, provide a concise visible coordination note with split basis, phases, and worker strategy.",
+    "- Keep coordination metadata internal. Do not restate the full plan unless the user asks for it; the CLI reports the current phase as work progresses.",
     "- Do not reveal hidden chain-of-thought; describe coordination and observable work only.",
     "- Prefer worker tools for independent research, independent review, or independent verification; keep trivial work in the main context.",
     "- Split basis:",

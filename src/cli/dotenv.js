@@ -22,7 +22,7 @@ export async function loadDotEnvIfPresent(directory) {
 }
 
 function isSupportedDotEnvKey(key) {
-  return key === "DEEPSEEK_API_KEY" || key.startsWith("DEECOO_");
+  return ["DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"].includes(key) || key.startsWith("DEECOO_");
 }
 
 function stripQuotes(value) {

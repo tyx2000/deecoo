@@ -1,25 +1,34 @@
 export function createDeepSeekClient(config) {
+  return createOpenAICompatibleClient(config, { provider: "DeepSeek", supportsBalance: true });
+}
+
+export function createOpenAICompatibleClient(config, { provider = "Provider", supportsBalance = false, transformRequest = identity } = {}) {
   return {
     async chatCompletion(request, options = {}) {
       return requestJson(config, "/chat/completions", {
         method: "POST",
-        body: JSON.stringify(request),
+        body: JSON.stringify(transformRequest(request)),
       }, options);
     },
     async chatCompletionStream(request, handlers = {}) {
-      return requestChatCompletionStream(config, {
+      return requestChatCompletionStream(config, transformRequest({
         ...request,
         stream: true,
         stream_options: request.stream_options ?? { include_usage: true },
-      }, handlers);
+      }), handlers);
     },
     async listModels() {
       return requestJson(config, "/models", { method: "GET" });
     },
     async getBalance() {
+      if (!supportsBalance) throw new Error(`${provider} does not expose a compatible balance endpoint.`);
       return requestJson(config, "/user/balance", { method: "GET" });
     },
   };
+}
+
+function identity(value) {
+  return value;
 }
 
 async function requestChatCompletionStream(config, request, handlers) {

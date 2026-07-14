@@ -87,7 +87,7 @@ const RISK_DOMAIN_DEFINITIONS = [
     name: "Security",
     reviewer: "Security Reviewer",
     goal: "check auth, authorization, injection, secret handling, path traversal, and unsafe command or file access risks",
-    keywords: /(安全|权限|认证|鉴权|注入|secret|token|api[_ -]?key|path traversal|auth|authorization|permission|injection|xss|csrf|shell|command)/i,
+    keywords: /(安全|权限|认证|鉴权|注入|security|secret|token|api[_ -]?key|path traversal|auth|authorization|permission|injection|xss|csrf|shell|command)/i,
   },
   {
     name: "Edge cases",
@@ -119,9 +119,10 @@ function selectRiskDomains(task, requestType) {
   const text = String(task ?? "");
   const lower = text.toLowerCase();
   const explicit = RISK_DOMAIN_DEFINITIONS.filter((domain) => domain.keywords.test(text));
+  const explicitlyBroad = /(全面|整体风险|所有风险|全量|完整审查|full review|broad review|complete review|overall risk|all risks)/i.test(text);
   const broadReview =
     requestType === "review" &&
-    (/(全面|整体|项目|仓库|所有|全量|full|broad|complete|overall|project|repo|all risks|review this)/i.test(text) || explicit.length === 0);
+    (explicitlyBroad || explicit.length === 0);
 
   if (broadReview) {
     return RISK_DOMAIN_DEFINITIONS.map((domain) => domainToSelection(domain, "broad review should cover this risk domain"));

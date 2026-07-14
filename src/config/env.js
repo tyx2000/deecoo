@@ -1,15 +1,26 @@
-export function loadConfig(env, args = {}) {
-  const apiKey = env.DEEPSEEK_API_KEY;
+import { inferProviderFromModel, normalizeProviderName, providerDefaults } from "./providers.js";
+
+export function loadConfig(env, args = {}, settings = {}) {
+  const cliModelProvider = inferProviderFromModel(args.model);
+  const envModelProvider = inferProviderFromModel(env.DEECOO_MODEL);
+  const provider = normalizeProviderName(
+    env.DEECOO_PROVIDER ?? cliModelProvider ?? envModelProvider ?? settings.activeProvider ?? "deepseek",
+  );
+  const defaults = providerDefaults(provider);
+  const providerSettings = settings.providers?.[provider] ?? {};
+  const apiKey = env[defaults.apiKeyEnv] ?? providerSettings.apiKey;
   if (!apiKey) {
     throw new Error(
-      "Missing DEEPSEEK_API_KEY. Set it in ~/.deecoo/settings.json, your environment, or local .env file.",
+      `No API key configured for provider "${provider}". Run: deecoo config -provider ${provider} -key sk-...`,
     );
   }
 
   return {
+    provider,
+    apiKeyEnv: defaults.apiKeyEnv,
     apiKey,
-    baseUrl: normalizeBaseUrl(env.DEECOO_BASE_URL ?? "https://api.deepseek.com"),
-    model: args.model ?? env.DEECOO_MODEL ?? "deepseek-v4-pro",
+    baseUrl: normalizeBaseUrl(env.DEECOO_BASE_URL ?? providerSettings.baseUrl ?? defaults.baseUrl),
+    model: args.model ?? env.DEECOO_MODEL ?? providerSettings.model ?? defaults.model,
     cwd: env.DEECOO_CWD,
     maxTokens: numberFrom(env.DEECOO_MAX_TOKENS, 4096),
     timeoutMs: numberFrom(env.DEECOO_TIMEOUT_MS, 120000),

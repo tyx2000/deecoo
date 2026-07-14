@@ -5,7 +5,6 @@ const ADD_STYLE = { fg: "#16a34a", effect: "bold" };
 const DELETE_STYLE = { fg: "#dc2626", effect: "bold" };
 const TREE = paint("muted", "└");
 const BRANCH = paint("muted", "├");
-const VERTICAL = paint("muted", "│");
 const PREVIEW_LIMIT = 5;
 
 export function formatActivityBlock({ name, args, result, decision }) {
@@ -239,52 +238,52 @@ function formatActivityChanges(activity) {
 }
 
 
-export function printCoordinationPlan(coordination) {
-  if (!coordination?.complex) return;
-  const agents = coordination.agents ?? [];
-  const phaseCount = coordination.phases?.length ?? 0;
-  console.log(
-    paint("title", "Plan") +
-      paint("muted", " · " + coordination.requestType + " · " + phaseCount + " phases" + (agents.length ? " · " + agents.length + " agents" : "")),
-  );
-  printTreeGroup("Basis", coordination.basis);
-  printTreeGroup("Split", (coordination.splitTriggers ?? []).map((trigger) => trigger.name + " · " + trigger.reason));
-  printTreeGroup("Phases", (coordination.phases ?? []).map((phase) => phase.name + " · " + phase.reason));
-  printTreeGroup("Risk", (coordination.riskDomains ?? []).map((domain) => domain.name + " · " + domain.reason));
-  printWorkerTree("Parallel", coordination.parallel ?? []);
-  printWorkerTree("Serial", coordination.serial ?? []);
-  if (coordination.verification) printWorkerTree("Verification", [coordination.verification]);
-  console.log("  " + TREE + " " + paint("muted", "Worker tools run in-process; overlapping writes remain serial."));
-  console.log("");
+export function createPhaseProgress(coordination) {
+  let currentPhase;
+  const enabled = coordination?.complex === true;
+
+  const transition = (phase, detail = "") => {
+    if (!enabled || !phase || phase === currentPhase) return "";
+    currentPhase = phase;
+    return paint("title", "Phase") + paint("muted", " · ") + paint("title", phase) + (detail ? paint("muted", " · " + detail) : "");
+  };
+
+  return {
+    start() {
+      return transition("Planning", coordinationStartDetail(coordination));
+    },
+    tool({ name, args }) {
+      const phase = phaseForTool(name, args, coordination);
+      return transition(phase, phaseDetail(name, args));
+    },
+  };
 }
 
-function printTreeGroup(title, items) {
-  console.log("  " + BRANCH + " " + paint("title", title));
-  if (!items?.length) {
-    console.log("  " + VERTICAL + " " + TREE + " " + paint("muted", "none"));
-    return;
-  }
-  for (const [index, item] of items.entries()) {
-    const marker = index === items.length - 1 ? TREE : BRANCH;
-    console.log("  " + VERTICAL + " " + marker + " " + paint("muted", item));
-  }
+function coordinationStartDetail(coordination) {
+  const requestType = coordination?.requestType ?? "task";
+  const domains = (coordination?.riskDomains ?? []).map((domain) => domain.name);
+  return domains.length ? requestType + " · focus: " + domains.join(", ") : requestType;
 }
 
-function printWorkerTree(title, workers) {
-  console.log("  " + BRANCH + " " + paint("title", title));
-  if (!workers.length) {
-    console.log("  " + VERTICAL + " " + TREE + " " + paint("muted", "none"));
-    return;
+function phaseForTool(name, args, coordination) {
+  if (name === "agent") {
+    const mode = String(args?.mode ?? args?.subagent_type ?? "research").toLowerCase();
+    if (mode === "verify" || args?.role === "tester") return "Verification";
+    if (mode === "implement" || args?.role === "coder") return "Implementation";
+    if (coordination?.requestType === "review" || args?.role === "reviewer" || args?.role === "security") return "Risk review";
+    return "Research";
   }
-  for (const [index, worker] of workers.entries()) {
-    const marker = index === workers.length - 1 ? TREE : BRANCH;
-    const role = worker.role ? paint("muted", " {" + worker.role + "}") : "";
-    const mode = worker.mode ? paint("muted", " [" + worker.mode + "]") : "";
-    const suffix = worker.reason ? paint("muted", " · " + worker.reason) : "";
-    console.log(
-      "  " + VERTICAL + " " + marker + " " + paint("title", worker.name) + role + mode + paint("muted", " · " + worker.goal) + suffix,
-    );
+  if (name === "run_shell") return "Verification";
+  if (["propose_patch", "propose_patch_set", "apply_patch", "apply_patch_set", "apply_json_patch", "edit_file", "write_file"].includes(name)) {
+    return "Implementation";
   }
+  if (["list_files", "read_file", "search_text", "git_status", "git_diff"].includes(name)) return "Research";
+  return undefined;
+}
+
+function phaseDetail(name, args) {
+  if (name !== "agent") return "";
+  return truncateOneLine(args?.description ?? args?.role ?? "worker", 100);
 }
 
 function compactNumber(value) {

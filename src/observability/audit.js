@@ -5,6 +5,8 @@ const MAX_AUDIT_TEXT = 40000;
 const SECRET_PATTERNS = [
   /(sk-[A-Za-z0-9_-]{12,})/g,
   /(DEEPSEEK_API_KEY\s*[:=]\s*)[^\s"']+/gi,
+  /(OPENAI_API_KEY\s*[:=]\s*)[^\s"']+/gi,
+  /(ANTHROPIC_API_KEY\s*[:=]\s*)[^\s"']+/gi,
   /(Authorization:\s*Bearer\s+)[^\s"']+/gi,
   /([A-Za-z0-9_]*TOKEN[A-Za-z0-9_]*\s*[:=]\s*)[^\s"']+/gi,
   /([A-Za-z0-9_]*SECRET[A-Za-z0-9_]*\s*[:=]\s*)[^\s"']+/gi,

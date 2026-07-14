@@ -94,7 +94,7 @@ export function sanitizeShellEnv(env = {}) {
   const clean = {};
   for (const [key, value] of Object.entries(env)) {
     if (SECRET_ENV_PATTERN.test(key)) continue;
-    if (key.startsWith("DEEPSEEK_") || key.startsWith("ANTHROPIC_")) continue;
+    if (key.startsWith("DEEPSEEK_") || key.startsWith("OPENAI_") || key.startsWith("ANTHROPIC_")) continue;
     clean[key] = value;
   }
   return clean;

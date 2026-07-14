@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { formatActivityBlock, formatActivityStart } from "../src/cli/activity.js";
+import { createPhaseProgress, formatActivityBlock, formatActivityStart } from "../src/cli/activity.js";
 import { setTheme } from "../src/terminal/theme.js";
 
 const ANSI_PATTERN = /\x1B\[[0-9;]*m/g;
@@ -126,4 +126,24 @@ test("activity blocks label missing file arguments explicitly", () => {
 
   assert.match(block, /^● Write\(<invalid arguments>\) failed/);
   assert.match(block, /Tool arguments were incomplete or invalid JSON/);
+});
+
+test("phase progress only reports the phase currently being executed", () => {
+  setTheme("mono-focus");
+  const progress = createPhaseProgress({
+    complex: true,
+    requestType: "review",
+    riskDomains: [{ name: "Correctness" }, { name: "Security" }],
+  });
+
+  assert.equal(visible(progress.start()), "Phase · Planning · review · focus: Correctness, Security");
+  assert.equal(visible(progress.tool({ name: "agent", args: { role: "security", mode: "research", description: "Security Reviewer" } })), "Phase · Risk review · Security Reviewer");
+  assert.equal(progress.tool({ name: "agent", args: { role: "reviewer", mode: "research", description: "Correctness Reviewer" } }), "");
+  assert.equal(visible(progress.tool({ name: "run_shell", args: { command: "npm test" } })), "Phase · Verification");
+});
+
+test("simple tasks do not add phase banners", () => {
+  const progress = createPhaseProgress({ complex: false, requestType: "general" });
+  assert.equal(progress.start(), "");
+  assert.equal(progress.tool({ name: "read_file", args: { path: "README.md" } }), "");
 });

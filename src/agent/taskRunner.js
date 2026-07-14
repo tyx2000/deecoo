@@ -29,7 +29,7 @@ import { artifactContextMessages, saveSkillArtifact } from "../session/artifacts
 import { isScorActive, scorArtifactMetadata, scorReviewToolPolicy } from "../skills/scor.js";
 import { createAssistantStreamPrinter, formatRunFooter, formatToolLine, printAssistantResponse } from "../terminal/markdown.js";
 import { createSpinner } from "../terminal/spinner.js";
-import { formatActivityBlock, formatActivityStart, printCoordinationPlan } from "../cli/activity.js";
+import { createPhaseProgress, formatActivityBlock, formatActivityStart } from "../cli/activity.js";
 import { buildVerificationPlan, verificationPlanMessage } from "../verification/planner.js";
 
 export async function runTask({ client, tools, task, cwd, config, sessionStore, session, activeSkills = [], envOverlay, signal }) {
@@ -92,7 +92,7 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
   const limitedClient = rateLimitClient(client, rateLimiter);
   // Redact concrete secret values (API keys, tokens) from anything a tool surfaces to the model.
   const secretRegistry = createSecretRegistry(process.env);
-  if (config.apiKey) secretRegistry.add(config.apiKey, "DEEPSEEK_API_KEY");
+  if (config.apiKey) secretRegistry.add(config.apiKey, config.apiKeyEnv ?? "PROVIDER_API_KEY");
   tools.setSubagentRuntime?.(
     createSubagentRuntime({
       client: limitedClient,
@@ -106,7 +106,9 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
       signal,
     }),
   );
-  printCoordinationPlan(coordination);
+  const phaseProgress = createPhaseProgress(coordination);
+  const initialPhase = phaseProgress.start();
+  if (initialPhase) console.log(initialPhase + "\n");
 
   const taskDeadline = createTaskDeadline(signal, config.taskTimeoutMs);
   const tracer = createRunTracer();
@@ -153,6 +155,8 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
       onModelEnd: () => spinner.stop(),
       onToolStart: ({ name, args, decision }) => {
         spinner.stop();
+        const phase = phaseProgress.tool({ name, args });
+        if (phase) console.log(phase + "\n");
         console.log(formatActivityStart({ name, args, decision }) + "\n");
         if (name === "agent") tracer.record({ type: "worker", name, description: args?.description, mode: args?.mode ?? args?.subagent_type });
       },

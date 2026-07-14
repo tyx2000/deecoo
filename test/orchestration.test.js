@@ -747,6 +747,26 @@ test("coordination assigns security and reviewer role presets for risk separatio
   assert.equal(coordination.agents.some((agent) => agent.role === "tester" && agent.mode === "verify"), true);
 });
 
+test("project-scoped security review does not expand into every generic risk domain", () => {
+  const coordination = analyzeTaskCoordination("review the project for security issues");
+
+  assert.deepEqual(coordination.riskDomains.map((domain) => domain.name), ["Correctness", "Security"]);
+  assert.deepEqual(coordination.parallel.map((worker) => worker.name), ["Correctness Reviewer", "Security Reviewer"]);
+});
+
+test("explicitly broad review still covers every risk domain", () => {
+  const coordination = analyzeTaskCoordination("全面审查整个项目的所有风险");
+
+  assert.deepEqual(coordination.riskDomains.map((domain) => domain.name), [
+    "Correctness",
+    "Security",
+    "Edge cases",
+    "Architecture",
+    "Performance",
+    "Tests",
+  ]);
+});
+
 test("coordination does not treat ambiguous continuation as edit without code context", () => {
   assert.equal(analyzeTaskCoordination("继续分析当前 harness 设计").requestType, "analysis");
   assert.equal(analyzeTaskCoordination("继续完善输出策略是否合理").requestType, "analysis");
@@ -769,6 +789,8 @@ test("complex prompt includes role presets and split triggers", () => {
   assert.match(prompt, /role=security/);
   assert.match(prompt, /role=coder/);
   assert.match(prompt, /role=tester/);
+  assert.doesNotMatch(prompt, /provide a concise visible coordination note/);
+  assert.match(prompt, /Keep coordination metadata internal/);
 });
 
 test("base prompt states CLI operating procedure", () => {

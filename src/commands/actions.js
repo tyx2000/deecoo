@@ -1,6 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { writeSettingsEnv } from "../config/settings.js";
+import { writeProviderModel, writeSettingsEnv } from "../config/settings.js";
 import { listRunAudits, readRunAudit } from "../observability/audit.js";
 import { buildTraceEvalResultLines, buildTraceEvalSuggestionLines } from "./evalTrace.js";
 import { listCodexSkills, loadCodexSkill } from "../skills/install.js";
@@ -198,7 +198,7 @@ export async function selectModel({ client, config, settingsPath }) {
     });
     if (!selected) return;
     config.model = selected.value;
-    await persistSetting({ settingsPath, env: { DEECOO_MODEL: config.model } });
+    await persistProviderModel({ settingsPath, provider: config.provider, model: config.model });
     console.log("Model: " + config.model);
   } catch (error) {
     spinner.stop();
@@ -322,5 +322,13 @@ async function persistSetting({ settingsPath, env }) {
     await writeSettingsEnv({ settingsPath, env });
   } catch (error) {
     console.error("Unable to persist setting: " + error.message);
+  }
+}
+
+async function persistProviderModel({ settingsPath, provider, model }) {
+  try {
+    await writeProviderModel({ settingsPath, provider, model });
+  } catch (error) {
+    console.error("Unable to persist model: " + error.message);
   }
 }

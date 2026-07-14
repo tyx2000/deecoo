@@ -4,11 +4,34 @@ import {
   defaultSettingsEnv,
   loadSettingsEnv,
   resetShellApprovals,
+  writeProviderSettings,
   writeSettingsEnv,
 } from "../config/settings.js";
+import { PROVIDER_NAMES, inferProviderFromModel, normalizeProviderName } from "../config/providers.js";
 
 export async function handleConfigCommand(args) {
   const action = args.configAction ?? "help";
+
+  if (args.provider || args.apiKey) {
+    if (!args.provider || !args.apiKey) {
+      throw new Error("Both -provider and -key are required. Example: deecoo config -provider deepseek -key sk-...");
+    }
+    const provider = normalizeProviderName(args.provider);
+    const modelProvider = inferProviderFromModel(args.model);
+    if (modelProvider && modelProvider !== provider) {
+      throw new Error(`Model "${args.model}" belongs to provider "${modelProvider}", not "${provider}".`);
+    }
+    const result = await writeProviderSettings({
+      settingsPath: args.settings,
+      provider,
+      apiKey: args.apiKey,
+      model: args.model,
+    });
+    console.log("Configured provider: " + provider);
+    console.log("Model: " + result.config.model);
+    console.log("Wrote " + result.path);
+    return;
+  }
 
   if (action === "path") {
     const settings = await loadSettingsEnv({ settingsPath: args.settings });
@@ -26,7 +49,8 @@ export async function handleConfigCommand(args) {
       },
     });
     console.log("Wrote " + result.path);
-    console.log("Set DEEPSEEK_API_KEY before running Deecoo if it was not already imported.");
+    console.log("Configure a provider key before running Deecoo:");
+    console.log("deecoo config -provider deepseek -key sk-...");
     return;
   }
 
@@ -44,7 +68,12 @@ export async function handleConfigCommand(args) {
 
   if (action === "show") {
     const settings = await loadSettingsEnv({ settingsPath: args.settings });
-    console.log(JSON.stringify(redactSecrets(settings.env), null, 2));
+    console.log(JSON.stringify({
+      activeProvider: settings.activeProvider,
+      providers: redactProviderSecrets(settings.providers),
+      env: redactSecrets(settings.env),
+      permissions: settings.permissions,
+    }, null, 2));
     return;
   }
 
@@ -66,6 +95,12 @@ function redactSecrets(env) {
   return redacted;
 }
 
+function redactProviderSecrets(providers) {
+  return Object.fromEntries(
+    Object.entries(providers ?? {}).map(([provider, config]) => [provider, { ...config, ...(config.apiKey ? { apiKey: "********" } : {}) }]),
+  );
+}
+
 function isSecretKey(key) {
   return (
     /(^|_)API_KEY$/i.test(key) ||
@@ -78,6 +113,7 @@ function isSecretKey(key) {
 function printConfigHelp() {
   console.log([
     "Usage:",
+    "  deecoo config -provider <" + PROVIDER_NAMES.join("|") + "> -key <api-key>",
     "  deecoo config path",
     "  deecoo config init",
     "  deecoo config import-env",
@@ -86,6 +122,6 @@ function printConfigHelp() {
     "",
     "Config defaults to " + appSettingsPath() + ".",
     "Use --settings <path> to override the settings file or directory.",
+    "Optional: add --model <model> when configuring a provider.",
   ].join("\n"));
 }
-
