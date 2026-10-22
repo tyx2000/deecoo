@@ -174,16 +174,20 @@ test("DSH-REF-001 array and scalar rendering keep their JSON value under trust t
 test("DSH-REF-003 structured output retains route identity and numeric request diagnostics", () => {
   const routeIdentity = { provider: "custom", model: "fixture", endpointHash: "digest", hash: "route" };
   const effectiveConfig = { requestedMaxTokens: 400, effectiveMaxTokens: 128, minOutputTokens: 1, maxOutputTokens: 128, contextWindow: 32768 };
-  const shown = redact(structuredRunResult({ task: "Analyze", result: { routeIdentity, capabilities: effectiveConfig, effectiveConfig,
+  const contextMetrics = { estimatedContextTokens: 20, reservedInputTokens: 100, availableContextTokens: 200 };
+  const shown = redact(structuredRunResult({ task: "Analyze", result: { routeIdentity, capabilities: effectiveConfig, effectiveConfig, contextMetrics,
     events: { effectiveConfig, estimatedInputTokens: 120, providerToken: "synthetic-secret" } } }));
   assert.deepEqual(shown.routeIdentity, routeIdentity); assert.deepEqual(shown.capabilities, effectiveConfig);
   assert.deepEqual(shown.effectiveConfig, effectiveConfig);
+  assert.deepEqual(shown.contextMetrics, contextMetrics);
   assert.deepEqual(shown.events.effectiveConfig, effectiveConfig); assert.equal(shown.events.estimatedInputTokens, 120);
   assert.equal(shown.events.providerToken, "[REDACTED]");
   const strings = redact({ maxTokens: "opaque-credential-value", requestedMaxTokens: "another-credential", minOutputTokens: Infinity,
     sources: { maxTokens: "route-limit", maxOutputTokens: "unknown-model", requestedMaxTokens: "opaque-credential-value" } });
   assert.equal(strings.maxTokens, "[REDACTED]"); assert.equal(strings.requestedMaxTokens, "[REDACTED]"); assert.equal(strings.minOutputTokens, "[REDACTED]");
   assert.equal(strings.sources.maxTokens, "route-limit"); assert.equal(strings.sources.maxOutputTokens, "unknown-model"); assert.equal(strings.sources.requestedMaxTokens, "[REDACTED]");
+  assert.deepEqual(redact({ estimatedContextTokens: "opaque-credential", reservedInputTokens: "opaque-credential", availableContextTokens: Infinity }),
+    { estimatedContextTokens: "[REDACTED]", reservedInputTokens: "[REDACTED]", availableContextTokens: "[REDACTED]" });
 });
 
 for (const privacyMode of ["ephemeral", "redacted"]) {

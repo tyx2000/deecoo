@@ -1,5 +1,5 @@
 import { analyzeTaskCoordination } from "./coordination.js";
-import { buildSystemPrompt } from "./prompt.js";
+import { buildAgentSystemMessage } from "./initialContext.js";
 import {
   buildAgentStateSummary,
   createAgentState,
@@ -22,7 +22,7 @@ import {
 } from "../harness/processController.js";
 import { advanceWorkflowState, createWorkflowState } from "../harness/workflow.js";
 import { createVerificationStateMachine } from "../verification/state.js";
-import { CONTENT_TRUST_INSTRUCTION, fenceUntrustedContent, markUntrustedToolResult } from "../harness/contentTrust.js";
+import { fenceUntrustedContent, markUntrustedToolResult } from "../harness/contentTrust.js";
 import { estimateCostUsd } from "../harness/cost.js";
 import { createMutex } from "../harness/mutex.js";
 import { createQuarantine, projectUntrustedContent } from "../harness/quarantine.js";
@@ -30,7 +30,7 @@ import { linkSignals } from "../harness/budget.js";
 import { compactToolResult } from "../tools/projection.js";
 export { compactToolResult } from "../tools/projection.js";
 import { appendEffects } from "../harness/effects.js";
-import { buildContextBudget, estimateTokens, measureContextMessages } from "../context/builder.js";
+import { buildBudgetedContext, buildContextBudget, estimateTokens, measureContextMessages } from "../context/builder.js";
 import { randomUUID } from "node:crypto";
 import { redact } from "../observability/audit.js";
 import { applyContextCompaction, contextFingerprint, createContextState, isBalancedContextBoundary, planContextCompaction, snapshotContextState, syncContextState } from "../context/compaction.js";
@@ -53,6 +53,7 @@ export async function runAgent({
   reasoningEffort,
   thinking,
   contextMessages = [],
+  contextItems,
   activeSkills = [],
   stream = true,
   coordination: providedCoordination,
@@ -107,23 +108,34 @@ export async function runAgent({
   let acceptance;
   let contextBudget = buildContextBudget({ contextWindow: contextWindow ?? client.capabilities?.contextWindow ?? 128000,
     outputReserve: Math.max(outputReserve ?? 0, maxTokens ?? outputReserve ?? client.capabilities?.outputReserve ?? 4096) });
-  const systemContent = trustToolOutput
-    ? buildSystemPrompt(cwd, requestType, activeSkills, coordination) + "\n\n" + CONTENT_TRUST_INSTRUCTION
-    : buildSystemPrompt(cwd, requestType, activeSkills, coordination);
+  const systemMessage = buildAgentSystemMessage({ cwd, requestType, activeSkills, coordination, trustToolOutput });
+  let initialContextMessages = contextMessages;
+  if (!resume && contextItems) {
+    try {
+      const planning = client.prepareRequest ? await client.prepareRequest({ model, messages: [], tools: tools.schemas,
+        ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
+        ...(thinking ? { thinking } : {}), ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}) }, { signal }) : undefined;
+      const window = contextWindow ?? planning?.capabilities?.contextWindow ?? contextBudget.contextWindow;
+      const reserve = Math.max(outputReserve ?? 0, planning?.request?.max_tokens ?? maxTokens ?? contextBudget.outputReserve);
+      contextBudget = buildContextBudget({ contextWindow: window, outputReserve: reserve });
+      initialContextMessages = buildBudgetedContext(contextItems, { contextWindow: window, outputReserve: reserve,
+        reservedMessages: [systemMessage, { role: "user", content: task }], reservedTools: planning?.request?.tools ?? tools.schemas ?? [] }).messages;
+    } catch (error) { linkedSignal.dispose(); throw error; }
+  }
   // Resuming a prior run rehydrates its message history and step/usage counters; a fresh run
   // starts from the system prompt, injected context, and the task.
   const messages = Array.isArray(resume?.messages) && resume.messages.length
     ? resume.messages.slice()
     : [
-        { role: "system", content: systemContent },
-        ...contextMessages,
+        systemMessage,
+        ...initialContextMessages,
         { role: "user", content: task },
       ];
   let contextState;
   try { contextState = createContextState(messages, { saved: resume?.contextState, legacy: !!resume && !resume.contextState }); }
   catch (error) { linkedSignal.dispose(); throw error; }
   const firstAssistant = messages.findIndex((message) => message.role === "assistant");
-  contextState.protectedPrefixCount ??= resume ? firstAssistant < 0 ? messages.length : Math.max(1, firstAssistant) : 1 + contextMessages.length + 1;
+  contextState.protectedPrefixCount ??= resume ? firstAssistant < 0 ? messages.length : Math.max(1, firstAssistant) : 1 + initialContextMessages.length + 1;
   const contextSnapshot = () => snapshotContextState(contextState, messages);
   const compactionEvent = (transaction) => onEvent?.({ type: "context-compacted", step, transaction,
     liveMessageIds: [...contextState.liveMessageIds] });

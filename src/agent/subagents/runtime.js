@@ -3,6 +3,7 @@ import { runAgent } from "../loop.js";
 import { normalizeWorkerMode } from "../../tools/definitions.js";
 import { linkSignals } from "../../harness/budget.js";
 import { createMutex } from "../../harness/mutex.js";
+import { contextItem } from "../../context/builder.js";
 
 const MAX_WORKER_PROMPT_CHARS = 8000;
 const MAX_WORKERS_PER_TASK = 8;
@@ -157,6 +158,8 @@ export function createSubagentRuntime({ client, createWorkerTools, workerTools, 
         reportTaskUsage: false,
         deadline: deadline.deadline,
         contextMessages: worker.messages,
+        ...(action === "started" ? { contextItems: worker.messages.map((message) => contextItem(message, 60,
+          message.role === "system" ? { required: true, layer: "instructions" } : {})) } : {}),
         activeSkills,
         signal: deadline.signal,
         verificationPlan,

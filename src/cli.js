@@ -341,6 +341,7 @@ function installTaskInterrupt(nonInteractive = false) {
     return { signal: controller.signal, get terminationSignal() { return terminationSignal; }, dispose: disposeSignals };
   }
 
+  const wasFlowing = process.stdin.readableFlowing;
   readline.emitKeypressEvents(process.stdin);
   const wasRaw = process.stdin.isRaw;
   process.stdin.setRawMode(true);
@@ -352,6 +353,9 @@ function installTaskInterrupt(nonInteractive = false) {
     process.stdout.write("\n" + formatToolLine("interrupted: Esc") + "\n");
   };
   process.stdin.on("keypress", onKeypress);
+  // emitKeypressEvents reuses its decoder and may leave a previously paused
+  // stream paused; explicitly acquire input for Esc handling on every task.
+  process.stdin.resume();
 
   return {
     signal: controller.signal,
@@ -360,6 +364,9 @@ function installTaskInterrupt(nonInteractive = false) {
       disposeSignals();
       process.stdin.off("keypress", onKeypress);
       process.stdin.setRawMode(wasRaw);
+      // The keypress listener resumes stdin even when no prompt was opened. A
+      // one-shot task must release that read handle so Node can exit naturally.
+      if (wasFlowing !== true) process.stdin.pause();
       if (reported) process.stdout.write("\n");
     },
   };

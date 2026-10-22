@@ -27,17 +27,25 @@ export function buildContextBudget({ contextWindow = 128000, outputReserve, safe
 export function buildBudgetedContext(items, options = {}) {
   const started = performance.now();
   const budget = buildContextBudget(options);
+  // System instructions, the original task and advertised tool schemas live
+  // outside the selectable context, but compete for the same input window.
+  const reservedInputTokens = measureContextMessages(options.reservedMessages ?? [])
+    + (options.reservedTools === undefined ? 0 : estimateTokens(options.reservedTools));
+  const availableContextTokens = budget.inputTokens - reservedInputTokens;
+  if (availableContextTokens < 0) throw Object.assign(new Error("Required request instructions, task and tools exceed the model input budget."),
+    { code: "CONTEXT_BUDGET_EXCEEDED", requiredTokens: reservedInputTokens, budget });
   const sorted = items.filter((item) => item?.message).map((item, index) => ({ ...item, index,
     message: normalizeMessage(item.message), layer: item.layer ?? inferLayer(item) }))
     .sort((a, b) => Number(b.required === true) - Number(a.required === true) || (b.priority ?? 0) - (a.priority ?? 0) || a.index - b.index);
   const selected = [];
   const deferred = [];
   const usedByLayer = {};
-  let used = 0;
+  let used = reservedInputTokens;
   for (const item of sorted) {
     const cost = estimateMessageTokens(item.message);
     const layerUsed = usedByLayer[item.layer] ?? 0;
-    const layerLimit = budget.layers[item.layer] ?? budget.inputTokens;
+    const layerLimit = budget.layers[item.layer] === undefined ? availableContextTokens
+      : Math.floor(budget.layers[item.layer] * availableContextTokens / budget.inputTokens);
     if (used + cost > budget.inputTokens) {
       if (item.required) throw Object.assign(new Error("Required context exceeds the model input budget."), { code: "CONTEXT_BUDGET_EXCEEDED", requiredTokens: used + cost, budget });
       deferred.push({ ...item, cost }); continue;
@@ -53,7 +61,8 @@ export function buildBudgetedContext(items, options = {}) {
   }
   selected.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || a.index - b.index);
   const messages = systemFirst(selected.map((item) => item.message));
-  return { messages, metrics: { ...budget, estimatedInputTokens: used, usedByLayer,
+  return { messages, metrics: { ...budget, estimatedInputTokens: used, estimatedContextTokens: used - reservedInputTokens,
+    reservedInputTokens, availableContextTokens, usedByLayer,
     selectedItems: selected.length, droppedItems: sorted.length - selected.length,
     sourceItems: sorted.length, preparationMs: performance.now() - started } };
 }

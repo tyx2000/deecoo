@@ -1,6 +1,7 @@
 import { buildTaskToolPolicy } from "../permissions/taskPolicy.js";
 import { checkpointIdentity, createCheckpointWriter, validateCheckpoint, prepareCheckpointResume } from "../harness/checkpoints.js";
 import { runAgent, serializeRunState } from "./loop.js";
+import { buildAgentSystemMessage } from "./initialContext.js";
 import { createSubagentRuntime } from "./subagents/runtime.js";
 import { analyzeTaskCoordination } from "./coordination.js";
 import { createRunTracer } from "../harness/tracer.js";
@@ -19,7 +20,7 @@ import { createToolOutputStore } from "../storage/toolOutputs.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createExecutionBackend } from "../execution/backend.js";
-import { buildBudgetedContext, buildContextMessages, contextItem } from "../context/builder.js";
+import { buildBudgetedContext, buildContextBudget, contextItem, estimateTokens, measureContextMessages } from "../context/builder.js";
 import { buildProjectIndex, buildProjectIndexMessages } from "../context/projectIndex.js";
 import { buildReviewScopeMessages } from "../context/reviewScope.js";
 import { buildWorkspaceSnapshotMessages, ensureProjectDescription } from "../context/workspaceSnapshot.js";
@@ -139,6 +140,10 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
   const effectiveCapabilities = preparation?.capabilities ?? client.capabilities;
   const contextOptions = { contextWindow: config.contextWindow ?? effectiveCapabilities?.contextWindow ?? 128000,
     outputReserve: Math.max(config.outputReserve ?? 0, effectiveMaxTokens ?? effectiveCapabilities?.outputReserve ?? 4096) };
+  const identity = await checkpointIdentity({ cwd, model: config.model, tools, taskSpec, config, client });
+  const resume = resumeCheckpoint ? prepareCheckpointResume(validateCheckpoint(resumeCheckpoint, identity)) : undefined;
+  identity.taskId = runtimeContext.taskId;
+  tools.restoreWorkspaceRevision?.(resume?.effects?.revision ?? 0);
   const contextMessages = session ? buildSessionContext(session) : [];
   const handoffMessages = await buildSkillHandoffMessages({ sessionStore, session, activeSkills });
   const projectIndex = await buildProjectIndex(cwd);
@@ -150,36 +155,30 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
   const longTermMemoryMessage = longTermMemoryContextMessage(longTermMemory);
   const memoryLayers = memoryLayerSummary({ session, projectMemory, longTermMemory });
   const verificationPlan = buildVerificationPlan({ taskSpec, projectIndex });
-  const preparedContext = buildBudgetedContext([
+  const reviewScopeMessages = await buildReviewScopeMessages({ cwd, task, activeSkills, requestType: coordination.requestType });
+  // A continuation dispatches its saved projection, not a newly assembled
+  // context. Only that actual surface is budget-checked by the agent loop.
+  const preparedContext = resume ? { messages: [], metrics: { ...buildContextBudget(contextOptions), contextSource: "checkpoint",
+    estimatedInputTokens: measureContextMessages(resume.messages) + estimateTokens(preparation?.request?.tools ?? tools.schemas ?? []) } } : buildBudgetedContext([
     contextItem(taskSpecMessage(taskSpec), 100, { layer: "task", required: true }),
     contextItem(verificationPlanMessage(verificationPlan), 90, { layer: "task", required: true }),
     contextItem(projectMemoryMessage, 80),
     contextItem(longTermMemoryMessage, 55),
     ...contextMessages.map((message) => contextItem(message, 50)),
     ...handoffMessages.map((message) => contextItem(message, 70)),
-    ...workspaceSnapshotMessages.map((message) => contextItem(message, 65)),
+    ...workspaceSnapshotMessages.map((message) => contextItem(message, 65, message.role === "system" ? { required: true, layer: "instructions" } : {})),
     ...projectIndexMessages.map((message) => contextItem(message, 60)),
-  ], contextOptions);
+  ], { ...contextOptions, reservedMessages: [buildAgentSystemMessage({ cwd, requestType: coordination.requestType, activeSkills, coordination }),
+    { role: "user", content: task }, ...reviewScopeMessages], reservedTools: preparation?.request?.tools ?? tools.schemas ?? [] });
   const baseContextMessages = preparedContext.messages;
-  const reviewScopeMessages = await buildReviewScopeMessages({
-    cwd,
-    task,
-    activeSkills,
-    requestType: coordination.requestType,
-  });
   // Workers get a lighter, codebase-orientation slice of context (workspace snapshot + project
   // index + review scope) rather than the full orchestration context (session history, memory
   // layers, task spec, verification plan), which only the coordinating agent needs.
-  const workerContextMessages = buildContextMessages([
-    ...workspaceSnapshotMessages.map((message) => contextItem(message, 65)),
-    ...projectIndexMessages.map((message) => contextItem(message, 60)),
-  ], contextOptions);
+  // Select this orientation only when a worker actually starts, against its
+  // own system prompt/task/tools. Unused current rules cannot reject a resume.
+  const workerContextMessages = [...workspaceSnapshotMessages, ...projectIndexMessages];
   // One rate limiter shared by the main agent and every worker, so parallel dispatch cannot
   // independently burst the provider; a 429 anywhere triggers a cooldown all callers respect.
-  const identity = await checkpointIdentity({ cwd, model: config.model, tools, taskSpec, config, client });
-  const resume = resumeCheckpoint ? prepareCheckpointResume(validateCheckpoint(resumeCheckpoint, identity)) : undefined;
-  identity.taskId = runtimeContext.taskId;
-  tools.restoreWorkspaceRevision?.(resume?.effects?.revision ?? 0);
   let checkpointWriter;
   const rateLimiter = createRateLimiter({ maxConcurrent: config.maxConcurrentRequests ?? 5 });
   const priceOverrides = { pricePromptPerM: config.pricePromptPerM, priceCompletionPerM: config.priceCompletionPerM };

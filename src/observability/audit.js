@@ -11,6 +11,7 @@ const TOKEN_METRIC_KEYS = new Set([
   "cachedtokens", "reasoningtokens", "cachereadinputtokens", "cachecreationinputtokens",
   "maxtokens", "maxcompletiontokens", "tokenbudget", "workertokenbudget", "tokenusage",
   "requestedmaxtokens", "effectivemaxtokens", "minoutputtokens", "maxoutputtokens", "estimatedinputtokens", "outputreserve", "budgettokens",
+  "estimatedcontexttokens", "reservedinputtokens", "availablecontexttokens",
 ]);
 const METRIC_SOURCE_LABELS = new Set(["request", "configured", "adapter-compatible-default", "route-limit", "unknown-model", "model-metadata", "adapter-compatible-minimum"]);
 const SECRET_PATTERNS = [
