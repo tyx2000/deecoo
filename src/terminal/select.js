@@ -1,6 +1,7 @@
 import readline from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
 import { ansi, paint, styleStart } from "./theme.js";
+import { adjacentGraphemeIndex, layoutPromptFrame, reflowCursorRow } from "./promptLayout.js";
 
 const MAX_MENU_ITEMS = 10;
 const promptHistory = [];
@@ -162,7 +163,7 @@ export async function readPromptLine(prompt, slashOptions, { history, triggers =
     let buffer = "";
     let cursorIndex = 0;
     let selected = 0;
-    let renderedLines = 0;
+    let renderedFrame;
     let selectionTouched = false;
     let historyIndex = activeHistory.length;
     let draftBuffer = "";
@@ -175,6 +176,7 @@ export async function readPromptLine(prompt, slashOptions, { history, triggers =
       signal?.removeEventListener("abort", onAbort);
       if (!keepLine) clearRendered();
       input.off("keypress", onKeypress);
+      output.off("resize", onResize);
       input.setRawMode(wasRaw);
       resolve(value);
     };
@@ -213,11 +215,12 @@ export async function readPromptLine(prompt, slashOptions, { history, triggers =
     const isBrowsingHistory = () => historyIndex !== activeHistory.length;
 
     const clearRendered = () => {
-      if (renderedLines === 0) return;
-      const inputLineIndex = promptInputLines(prompt, "").length - 1;
-      if (inputLineIndex > 0) output.write(`\x1B[${inputLineIndex}A`);
+      if (!renderedFrame) return;
+      const availableRows = Number.isSafeInteger(output.rows) && output.rows > 0 ? output.rows : Infinity;
+      const cursorRow = Math.min(reflowCursorRow(renderedFrame, output.columns), availableRows - 1);
+      if (cursorRow > 0) output.write(`\x1B[${cursorRow}A`);
       output.write("\r\x1B[J");
-      renderedLines = 0;
+      renderedFrame = undefined;
     };
 
     const render = () => {
@@ -225,28 +228,37 @@ export async function readPromptLine(prompt, slashOptions, { history, triggers =
       const visible = menu.visible;
       if (selected >= visible.length) selected = Math.max(0, visible.length - 1);
       const showMenu = menu.type !== "none" && visible.length > 0;
-      const baseLines = promptInputLines(prompt, buffer);
-      const inputLineIndex = baseLines.length - 1;
-      const promptLastLine = String(prompt ?? "").split("\n").at(-1) ?? "";
-      const lines = [...baseLines];
+      const menuLines = [];
+      let menuFocus;
 
       if (showMenu) {
         const windowed = menuWindow(visible, selected);
         for (let i = 0; i < windowed.items.length; i += 1) {
           const optionIndex = windowed.start + i;
-          lines.push(...renderMenuOptionLines(windowed.items[i], menu.query, { selected: optionIndex === selected }));
+          const optionLines = renderMenuOptionLines(windowed.items[i], menu.query, { selected: optionIndex === selected });
+          if (optionIndex === selected) menuFocus = { start: menuLines.length, end: menuLines.length + optionLines.length };
+          menuLines.push(...optionLines);
         }
         if (windowed.hasOverflow) {
-          lines.push(`  ${paint("muted", `${selected + 1}/${visible.length}`)}`);
+          menuLines.push(`  ${paint("muted", `${selected + 1}/${visible.length}`)}`);
         }
       }
 
       clearRendered();
-      output.write(lines.join("\n"));
-      renderedLines = lines.length;
-      const linesBelowInput = renderedLines - inputLineIndex - 1;
-      if (linesBelowInput > 0) output.write(`\x1B[${linesBelowInput}A`);
-      moveCursorToColumn(visibleWidth(promptLastLine) + visibleWidth(sliceByCodePoint(buffer, 0, cursorIndex)));
+      renderedFrame = layoutPromptFrame({ prompt, buffer, cursorIndex, columns: output.columns, rows: output.rows, menuLines, menuFocus });
+      output.write(renderedFrame.lines.join("\r\n") + ansi.reset);
+      const linesBelowCursor = renderedFrame.lines.length - renderedFrame.cursor.row - 1;
+      if (linesBelowCursor > 0) output.write(`\x1B[${linesBelowCursor}A`);
+      moveCursorToColumn(renderedFrame.cursor.column);
+    };
+
+    const onResize = () => { if (!finished && renderedFrame) render(); };
+
+    const submitBuffer = () => {
+      clearRendered();
+      output.write(`${prompt}${buffer}`.replace(/\r?\n/g, "\r\n") + "\r\n");
+      rememberPrompt(buffer);
+      cleanup(buffer, { keepLine: true });
     };
 
     const applyMenuSelection = async ({ finalize = false } = {}) => {
@@ -285,8 +297,8 @@ export async function readPromptLine(prompt, slashOptions, { history, triggers =
 
     const onKeypress = async (str, key) => {
       if (key.ctrl && key.name === "c") {
-        output.write("\n");
         cleanup("exit");
+        output.write("\r\n");
         return;
       }
       if (key.name === "up" && activeMenu().type !== "none") {
@@ -331,11 +343,7 @@ export async function readPromptLine(prompt, slashOptions, { history, triggers =
         const applied = await applyMenuSelection();
         if (applied) {
           if (applied.submit) {
-            clearRendered();
-            output.write(`${prompt}${buffer}\n`);
-            renderedLines = 0;
-            rememberPrompt(buffer);
-            cleanup(buffer, { keepLine: true });
+            submitBuffer();
             return;
           }
           selected = 0;
@@ -348,11 +356,7 @@ export async function readPromptLine(prompt, slashOptions, { history, triggers =
         const applied = await applyMenuSelection({ finalize: true });
         if (applied) {
           if (applied.submit) {
-            clearRendered();
-            output.write(`${prompt}${buffer}\n`);
-            renderedLines = 0;
-            rememberPrompt(buffer);
-            cleanup(buffer, { keepLine: true });
+            submitBuffer();
             return;
           }
           selected = 0;
@@ -362,12 +366,12 @@ export async function readPromptLine(prompt, slashOptions, { history, triggers =
         return;
       }
       if (key.name === "left") {
-        cursorIndex = Math.max(0, cursorIndex - 1);
+        cursorIndex = adjacentGraphemeIndex(buffer, cursorIndex, -1);
         render();
         return;
       }
       if (key.name === "right") {
-        cursorIndex = Math.min(codePointLength(buffer), cursorIndex + 1);
+        cursorIndex = adjacentGraphemeIndex(buffer, cursorIndex, 1);
         render();
         return;
       }
@@ -391,11 +395,7 @@ export async function readPromptLine(prompt, slashOptions, { history, triggers =
           const applied = await applyMenuSelection();
           if (applied) {
             if (applied.submit) {
-              clearRendered();
-              output.write(`${prompt}${buffer}\n`);
-              renderedLines = 0;
-              rememberPrompt(buffer);
-              cleanup(buffer, { keepLine: true });
+              submitBuffer();
               return;
             }
             selected = 0;
@@ -404,17 +404,14 @@ export async function readPromptLine(prompt, slashOptions, { history, triggers =
           }
           return;
         }
-        clearRendered();
-        output.write(`${prompt}${buffer}\n`);
-        renderedLines = 0;
-        rememberPrompt(buffer);
-        cleanup(buffer, { keepLine: true });
+        submitBuffer();
         return;
       }
       if (key.name === "backspace") {
         if (cursorIndex === 0) return;
-        buffer = removeCodePointBefore(buffer, cursorIndex);
-        cursorIndex -= 1;
+        const previous = adjacentGraphemeIndex(buffer, cursorIndex, -1);
+        buffer = replaceCodePointRange(buffer, previous, cursorIndex, "");
+        cursorIndex = previous;
         selected = 0;
         selectionTouched = false;
         historyIndex = activeHistory.length;
@@ -440,7 +437,7 @@ export async function readPromptLine(prompt, slashOptions, { history, triggers =
       }
       if (key.name === "delete") {
         if (cursorIndex >= codePointLength(buffer)) return;
-        buffer = removeCodePointAt(buffer, cursorIndex);
+        buffer = replaceCodePointRange(buffer, cursorIndex, adjacentGraphemeIndex(buffer, cursorIndex, 1), "");
         selected = 0;
         selectionTouched = false;
         historyIndex = activeHistory.length;
@@ -460,6 +457,7 @@ export async function readPromptLine(prompt, slashOptions, { history, triggers =
     };
 
     input.on("keypress", onKeypress);
+    output.on("resize", onResize);
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted) { onAbort(); return; }
     render();
@@ -670,25 +668,9 @@ function codePointLength(value) {
   return [...String(value ?? "")].length;
 }
 
-function sliceByCodePoint(value, start, end) {
-  return [...String(value ?? "")].slice(start, end).join("");
-}
-
 function insertAtCodePoint(value, index, insertion) {
   const chars = [...String(value ?? "")];
   chars.splice(index, 0, ...String(insertion ?? ""));
-  return chars.join("");
-}
-
-function removeCodePointBefore(value, index) {
-  const chars = [...String(value ?? "")];
-  chars.splice(index - 1, 1);
-  return chars.join("");
-}
-
-function removeCodePointAt(value, index) {
-  const chars = [...String(value ?? "")];
-  chars.splice(index, 1);
   return chars.join("");
 }
 
@@ -715,13 +697,6 @@ function findActiveTriggerToken(value, cursorIndex, triggers) {
     };
   }
   return undefined;
-}
-
-function promptInputLines(prompt, buffer) {
-  const lines = String(prompt ?? "").split("\n");
-  const last = lines.length - 1;
-  lines[last] = `${lines[last]}${buffer}`;
-  return lines;
 }
 
 function stripAnsi(value) {
