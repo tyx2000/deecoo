@@ -104,6 +104,35 @@ export function layoutPromptFrame({ prompt, buffer, cursorIndex, columns, menuLi
     viewportStart, columns: base.columns };
 }
 
+const verticalMove = (delta) => delta < 0 ? `\x1B[${-delta}A` : delta > 0 ? `\x1B[${delta}B` : "";
+
+// Turns the displayed `previous` frame into `next`, starting from the caret of
+// `previous` (or from the frame origin without one). Leading rows that did not
+// change, such as the status header, are never rewritten, and changed rows are
+// overwritten in place rather than cleared first, so typing does not flicker.
+export function framePatch(previous, next) {
+  const reuse = previous?.columns === next.columns;
+  const oldLength = reuse ? previous.lines.length : 0;
+  let first = 0;
+  while (first < Math.min(oldLength, next.lines.length) && previous.lines[first] === next.lines[first]) first++;
+  let row = reuse ? previous.cursor.row : 0, out = "";
+  const moveTo = (target) => { out += verticalMove(target - row) + "\r"; row = target; };
+  if (first < next.lines.length) {
+    // A row beyond the old frame is reached by a newline from the row above it.
+    if (first < oldLength) moveTo(first);
+    else if (first > 0) { moveTo(first - 1); out += "\n"; }
+    // Skipped rows still determine the SGR state that the first rewritten row starts in.
+    const styles = next.lines.slice(0, first).join("").match(/\x1B\[[0-9;:]*m/g)?.join("") ?? "";
+    out += styles + next.lines.slice(first).map((line) => "\x1B[K" + line).join("\r\n") + "\x1B[0m";
+    row = next.lines.length - 1;
+  }
+  if (oldLength > next.lines.length) {
+    if (first < next.lines.length) { out += "\r\n"; row++; } else moveTo(next.lines.length);
+    out += "\x1B[J";
+  }
+  return out + verticalMove(next.cursor.row - row) + "\r" + (next.cursor.column > 0 ? `\x1B[${next.cursor.column}C` : "");
+}
+
 function prefixAtColumn(value, column) {
   let used = 0, prefix = "";
   for (const token of tokens(value)) {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { adjacentGraphemeIndex, graphemeWidth, layoutPromptFrame, layoutTerminalText, reflowCursorRow } from "../src/terminal/promptLayout.js";
+import { adjacentGraphemeIndex, framePatch, graphemeWidth, layoutPromptFrame, layoutTerminalText, reflowCursorRow } from "../src/terminal/promptLayout.js";
 
 test("prompt layout normalizes a full physical row and positions interior edits by row and column", () => {
   const frame = layoutPromptFrame({ prompt: "header\n> ", buffer: "abcdefgh", cursorIndex: 8, columns: 10 });
@@ -68,4 +68,19 @@ test("editing boundaries keep surrogate pairs, accents and joined emoji intact",
   assert.equal(adjacentGraphemeIndex(text, 4, 1), 6);
   assert.equal(adjacentGraphemeIndex(text, 0, -1), 0);
   assert.equal(adjacentGraphemeIndex(text, 7, 1), 7);
+});
+
+test("frame patches rewrite only changed rows and clear rows a shorter frame no longer uses", () => {
+  const before = layoutPromptFrame({ prompt: "header\n> ", buffer: "abcdefghij", columns: 10 });
+  const typed = layoutPromptFrame({ prompt: "header\n> ", buffer: "abcdefghijk", columns: 10 });
+  const patch = framePatch(before, typed);
+  assert.ok(!patch.includes("header") && !patch.includes("abcdefgh") && !patch.includes("\x1b[J"), JSON.stringify(patch));
+  assert.equal(patch, "\r\x1b[Kijk\x1b[0m\r\x1b[3C");
+  const shorter = layoutPromptFrame({ prompt: "header\n> ", buffer: "abcdefg", columns: 10 });
+  assert.equal(framePatch(before, shorter), "\x1b[1A\r\x1b[K> abcdefg\x1b[0m\r\n\x1b[J\x1b[1A\r\x1b[9C");
+  assert.equal(framePatch(typed, typed), "\r\x1b[3C", "an unchanged frame only places the caret");
+  assert.ok(framePatch(undefined, typed).startsWith("\x1b[Kheader"), "without a previous frame everything is drawn");
+  const styled = layoutPromptFrame({ prompt: "\x1b[36mhead\x1b[0m\n> ", buffer: "a", columns: 10 });
+  const styledNext = layoutPromptFrame({ prompt: "\x1b[36mhead\x1b[0m\n> ", buffer: "ab", columns: 10 });
+  assert.ok(framePatch(styled, styledNext).startsWith("\r\x1b[36m\x1b[0m\x1b[K> ab"), "skipped rows replay their styles");
 });

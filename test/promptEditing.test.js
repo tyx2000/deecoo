@@ -73,7 +73,7 @@ const controller = new AbortController();
 process.on('message', async (message) => {
   if (message.type === 'start') {
     process.stdout.columns = message.columns; process.stdout.rows = message.rows;
-    readPromptLine(message.prompt, message.slashOptions, { history: [], signal: controller.signal }).then((value) => process.send({ type: 'complete', value }));
+    readPromptLine(message.prompt, message.slashOptions, { history: message.history ?? [], signal: controller.signal }).then((value) => process.send({ type: 'complete', value }));
   } else if (message.type === 'keypress') process.stdin.emit('keypress', message.str, message.key);
   else if (message.type === 'abort') controller.abort();
   await setImmediate();
@@ -81,13 +81,13 @@ process.on('message', async (message) => {
 });
 `);
   const child = fork(script, [], { env: { PATH: process.env.PATH }, stdio: ["ignore", "ignore", "pipe", "ipc"] });
-  const screen = new Screen(columns, rows); const waiters = new Map();
+  const screen = new Screen(columns, rows); const waiters = new Map(); const writes = [];
   let sequence = 0, stderr = "", fatal;
   child.stderr.setEncoding("utf8"); child.stderr.on("data", (text) => { stderr += text; });
   let complete;
   const pending = new Promise((resolve) => { complete = resolve; });
   child.on("message", (message) => {
-    if (message.type === "output") { try { screen.write(message.text); } catch (error) { fatal = error; } }
+    if (message.type === "output") { writes.push(message.text); try { screen.write(message.text); } catch (error) { fatal = error; } }
     if (message.type === "complete") complete(message.value);
     if (message.type === "ack") waiters.get(message.id)?.();
   });
@@ -105,7 +105,9 @@ process.on('message', async (message) => {
   try {
     await send({ type: "start", columns, rows, slashOptions, prompt });
     const press = (str, key = {}) => send({ type: "keypress", str, key });
-    await action({ screen, press, pending });
+    const start = (history) => send({ type: "start", columns, rows, slashOptions, prompt, history });
+    const takeWrites = () => writes.splice(0);
+    await action({ screen, press, pending, start, takeWrites });
   } finally {
     child.kill("SIGTERM"); await closed;
     await rm(directory, { recursive: true, force: true });
@@ -222,3 +224,43 @@ test("INPUT-001 a narrow completion menu keeps the selected command visible", as
 }, { columns: 20, rows: 10, slashOptions: Array.from({ length: 12 }, (_, index) => ({
   label: `CMD_${String(index).padStart(2, "0")} describes a longer command with details that wrap`, value: `/c${String(index).padStart(2, "0")}`,
 })) }));
+
+test("INPUT-002 Up and Down on an empty prompt recall inputs a session never recorded", async () => promptFixture(async ({ screen, press, pending, start }) => {
+  await press("review the harness");
+  await press("\r", { name: "return" });
+  assert.equal(await pending, "review the harness");
+  // The task failed before a turn was recorded, so the session passes no history.
+  await start([]);
+  const inputRow = () => screen.lines()[screen.cursor().row];
+  await press("", { name: "up" });
+  assert.equal(inputRow(), "> review the harness");
+  await press("", { name: "down" });
+  assert.equal(inputRow(), ">");
+  await start(["older recorded turn", "review the harness"]);
+  await press("", { name: "up" });
+  assert.equal(inputRow(), "> review the harness");
+  await press("", { name: "up" });
+  assert.equal(inputRow(), "> older recorded turn", "a repeated prompt is recalled once, at its latest position");
+}, { columns: 40 }));
+
+test("INPUT-003 each keystroke is one synchronized write that leaves the header untouched", async () => promptFixture(async ({ screen, press, takeWrites }) => {
+  takeWrites();
+  for (const key of ["a", "b", "c"]) {
+    await press(key);
+    const writes = takeWrites();
+    assert.equal(writes.length, 1);
+    assert.ok(writes[0].startsWith("\x1b[?2026h") && writes[0].endsWith("\x1b[?2026l"));
+    assert.ok(!writes[0].includes("deecoo") && !writes[0].includes("\x1b[J"), JSON.stringify(writes[0]));
+  }
+  await press("defghijk");
+  assert.deepEqual(screen.lines().slice(0, 3), ["deecoo", "> abcdefgh", "ijk"]);
+  takeWrites();
+  await press("\x7f\x7f\x7f", { name: "backspace" });
+  await press("\x7f", { name: "backspace" }); await press("\x7f", { name: "backspace" });
+  assert.ok(takeWrites().every((text) => !text.includes("deecoo")));
+  assert.deepEqual(screen.lines().slice(0, 3), ["deecoo", "> abcdefgh", ""]);
+  assert.deepEqual(screen.cursor(), { row: 2, column: 0 });
+  await press("\x7f", { name: "backspace" });
+  assert.deepEqual(screen.lines().slice(0, 3), ["deecoo", "> abcdefg", ""], "the emptied wrapped row is cleared");
+  assert.deepEqual(screen.cursor(), { row: 1, column: 9 });
+}));

@@ -1,7 +1,7 @@
 import readline from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
 import { ansi, paint, styleStart } from "./theme.js";
-import { adjacentGraphemeIndex, layoutPromptFrame, reflowCursorRow } from "./promptLayout.js";
+import { adjacentGraphemeIndex, framePatch, layoutPromptFrame, reflowCursorRow } from "./promptLayout.js";
 
 const MAX_MENU_ITEMS = 10;
 const promptHistory = [];
@@ -159,7 +159,9 @@ export async function readPromptLine(prompt, slashOptions, { history, triggers =
   input.setRawMode(true);
 
   return await new Promise((resolve) => {
-    const activeHistory = Array.isArray(history) ? normalizedHistory(history) : promptHistory;
+    // Session turns are recorded only for tasks that ran, so prompts entered in
+    // this process (failed tasks, slash commands) are recalled alongside them.
+    const activeHistory = normalizedHistory([...(Array.isArray(history) ? history : []), ...promptHistory]);
     let buffer = "";
     let cursorIndex = 0;
     let selected = 0;
@@ -244,12 +246,12 @@ export async function readPromptLine(prompt, slashOptions, { history, triggers =
         }
       }
 
-      clearRendered();
-      renderedFrame = layoutPromptFrame({ prompt, buffer, cursorIndex, columns: output.columns, rows: output.rows, menuLines, menuFocus });
-      output.write(renderedFrame.lines.join("\r\n") + ansi.reset);
-      const linesBelowCursor = renderedFrame.lines.length - renderedFrame.cursor.row - 1;
-      if (linesBelowCursor > 0) output.write(`\x1B[${linesBelowCursor}A`);
-      moveCursorToColumn(renderedFrame.cursor.column);
+      const frame = layoutPromptFrame({ prompt, buffer, cursorIndex, columns: output.columns, rows: output.rows, menuLines, menuFocus });
+      // A resize reflows the old rows, so only then is the whole frame cleared and redrawn.
+      if (renderedFrame && renderedFrame.columns !== frame.columns) clearRendered();
+      // One write per frame, as a synchronized update with the caret hidden while it moves.
+      output.write("\x1B[?2026h\x1B[?25l" + framePatch(renderedFrame, frame) + "\x1B[?25h\x1B[?2026l");
+      renderedFrame = frame;
     };
 
     const onResize = () => { if (!finished && renderedFrame) render(); };
@@ -472,14 +474,15 @@ function rememberPrompt(value) {
   if (promptHistory.length > 200) promptHistory.shift();
 }
 
+// A repeated prompt keeps its most recent position, so Up recalls the latest entry first.
 function normalizedHistory(values) {
   const seen = new Set();
   const items = [];
-  for (const value of values ?? []) {
+  for (const value of [...(values ?? [])].reverse()) {
     const text = String(value ?? "").trim();
     if (!text || seen.has(text)) continue;
     seen.add(text);
-    items.push(text);
+    items.unshift(text);
   }
   return items.slice(-200);
 }
@@ -657,11 +660,6 @@ function isWideCodePoint(codePoint) {
       (codePoint >= 0x1f300 && codePoint <= 0x1faff) ||
       (codePoint >= 0x20000 && codePoint <= 0x3fffd))
   );
-}
-
-function moveCursorToColumn(column) {
-  output.write("\r");
-  if (column > 0) output.write(`\x1B[${column}C`);
 }
 
 function codePointLength(value) {
