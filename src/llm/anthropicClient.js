@@ -1,3 +1,5 @@
+import { assertCompleteToolCalls, incompleteResponse } from "./streamCompletion.js";
+
 export function createAnthropicClient(config) {
   return {
     async chatCompletion(request, options = {}) {
@@ -187,7 +189,9 @@ async function requestAnthropicStream(config, request, handlers) {
     } catch (error) {
       lastError = error;
       if (handlers.signal?.aborted || emitted || attempt >= attempts || !shouldRetry(error)) break;
-      await delay(backoffMs(attempt));
+      const delayMs = backoffMs(attempt);
+      (typeof handlers !== "undefined" ? handlers : options).onRuntimeEvent?.({ type: "model-retry", attempt, delayMs, status: error.status });
+      await delay(delayMs);
     } finally {
       clearTimeout(timeout);
       removeAbortListener();
@@ -204,6 +208,7 @@ async function readAnthropicSse(body, handlers) {
   let inputTokens = 0;
   let outputTokens = 0;
   let finishReason;
+  let sawMessageStop = false;
   let buffer = "";
 
   const applyEvent = (event) => {
@@ -240,6 +245,8 @@ async function readAnthropicSse(body, handlers) {
     } else if (event.type === "message_delta") {
       finishReason = mapStopReason(event.delta?.stop_reason);
       outputTokens = Number(event.usage?.output_tokens ?? outputTokens);
+    } else if (event.type === "message_stop") {
+      sawMessageStop = true;
     }
   };
 
@@ -254,6 +261,10 @@ async function readAnthropicSse(body, handlers) {
   buffer += decoder.decode();
   for (const event of consumeSseEvents(`${buffer}\n\n`).items) applyEvent(event);
 
+  const usage = normalizeUsage({ input_tokens: inputTokens, output_tokens: outputTokens });
+  if (!sawMessageStop || !finishReason) {
+    throw incompleteResponse("Anthropic stream ended before message_stop and its stop reason.", usage);
+  }
   const toolCalls = [...blocks.entries()]
     .sort(([left], [right]) => left - right)
     .filter(([, block]) => block.type === "tool_use")
@@ -262,10 +273,11 @@ async function readAnthropicSse(body, handlers) {
       type: "function",
       function: { name: block.name, arguments: block.arguments || "{}" },
     }));
+  assertCompleteToolCalls(toolCalls, usage);
   if (toolCalls.length) message.tool_calls = toolCalls;
   return {
     choices: [{ message, finish_reason: finishReason }],
-    usage: normalizeUsage({ input_tokens: inputTokens, output_tokens: outputTokens }),
+    usage,
   };
 }
 
@@ -313,7 +325,9 @@ async function requestJson(config, path, init, options = {}) {
     } catch (error) {
       lastError = error;
       if (options.signal?.aborted || attempt >= attempts || !shouldRetry(error)) break;
-      await delay(backoffMs(attempt));
+      const delayMs = backoffMs(attempt);
+      (typeof handlers !== "undefined" ? handlers : options).onRuntimeEvent?.({ type: "model-retry", attempt, delayMs, status: error.status });
+      await delay(delayMs);
     } finally {
       clearTimeout(timeout);
       removeAbortListener();
@@ -371,6 +385,7 @@ function throwIfAborted(signal) {
 }
 
 function shouldRetry(error) {
+  if (error.code === "INCOMPLETE_RESPONSE") return false;
   if (error.name === "AbortError") return true;
   if (/Request timed out/i.test(error.message ?? "")) return true;
   if (error.status === 429 || error.status === 529 || (error.status >= 500 && error.status <= 599)) return true;

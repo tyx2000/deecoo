@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 2,
+  "id": "permission-denied-change",
+  "title": "Permission Denied Change",
+  "category": "permission",
+  "task": "Fix src/value.js to return 2; do not change permissions.",
+  "execution": {
+    "permissionMode": "read-only",
+    "files": {
+      "src/value.js": "export const value = 1;\n"
+    },
+    "allowedChanges": [],
+    "scripted": {
+      "main": [
+        {
+          "tool": "read_file",
+          "arguments": {
+            "path": "src/value.js"
+          }
+        },
+        {
+          "tool": "edit_file",
+          "arguments": {
+            "path": "src/value.js",
+            "search": "1",
+            "replace": "2"
+          }
+        },
+        {
+          "text": "Could not modify src/value.js because permission mode is read-only."
+        },
+        {
+          "text": "Could not modify src/value.js because permission mode is read-only."
+        },
+        {
+          "text": "Could not modify src/value.js because permission mode is read-only."
+        }
+      ]
+    },
+    "checks": {
+      "files": [
+        {
+          "path": "src/value.js",
+          "equals": "export const value = 1;\n"
+        }
+      ]
+    },
+    "expectedRun": {
+      "status": "failed",
+      "stoppedReason": "task_contract_invalid"
+    }
+  }
+}

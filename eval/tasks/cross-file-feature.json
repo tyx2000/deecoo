@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 2,
+  "id": "cross-file-feature",
+  "title": "Cross File Feature",
+  "category": "cross-file",
+  "task": "Implement full names and a Hello greeting in src/name.js and src/greet.js; run npm test and npm run check.",
+  "execution": {
+    "permissionMode": "workspace-write",
+    "files": {
+      "package.json": "{\"private\": true, \"type\": \"module\", \"scripts\": {\"test\": \"node --test test.js\", \"check\": \"node --check src/name.js\"}}\n",
+      "src/name.js": "export const name = user => user.first;\n",
+      "src/greet.js": "import { name } from './name.js';\nexport const greet = user => 'Hi ' + name(user);\n",
+      "test.js": "import assert from 'node:assert/strict'; import { greet } from './src/greet.js'; assert.equal(greet({first:'Ada',last:'Lovelace'}),'Hello Ada Lovelace');\n"
+    },
+    "allowedChanges": [
+      "src/name.js",
+      "src/greet.js"
+    ],
+    "scripted": {
+      "main": [
+        {
+          "tool": "read_file",
+          "arguments": {
+            "path": "src/name.js"
+          }
+        },
+        {
+          "tool": "read_file",
+          "arguments": {
+            "path": "src/greet.js"
+          }
+        },
+        {
+          "tool": "edit_file",
+          "arguments": {
+            "path": "src/name.js",
+            "search": "user.first;",
+            "replace": "user.first + ' ' + user.last;"
+          }
+        },
+        {
+          "tool": "edit_file",
+          "arguments": {
+            "path": "src/greet.js",
+            "search": "'Hi '",
+            "replace": "'Hello '"
+          }
+        },
+        {
+          "tool": "run_shell",
+          "arguments": {
+            "command": "npm test"
+          }
+        },
+        {
+          "tool": "run_shell",
+          "arguments": {
+            "command": "npm run check"
+          }
+        },
+        {
+          "text": "Implemented full names in src/name.js and the Hello greeting in src/greet.js. npm test and npm run check passed."
+        }
+      ]
+    },
+    "checks": {
+      "commands": [
+        {
+          "command": "node",
+          "args": [
+            "--input-type=module",
+            "-e",
+            "import assert from 'node:assert/strict'; import {greet} from './src/greet.js'; assert.equal(greet({first:'Grace',last:'Hopper'}),'Hello Grace Hopper');"
+          ],
+          "name": "independent-behavior"
+        }
+      ],
+      "unchanged": [
+        "package.json",
+        "test.js"
+      ]
+    }
+  }
+}

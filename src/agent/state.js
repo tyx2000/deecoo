@@ -70,13 +70,16 @@ export function recordToolStep(state, { step, name, args, result, startedAt, end
   return state;
 }
 
-export function recordContextCompaction(state, { beforeMessages, afterMessages, beforeChars, afterChars, step }) {
+export function recordContextCompaction(state, { beforeMessages, afterMessages, beforeChars, afterChars, step, transaction }) {
   state.contextCompactions.push({
     step,
     beforeMessages,
     afterMessages,
     beforeChars,
     afterChars,
+    ...(transaction ? { compactionId: transaction.compactionId, policyVersion: transaction.policyVersion,
+      sourceMessageIds: [...transaction.sourceMessageIds], sourceHash: transaction.sourceHash,
+      beforeEstimate: transaction.beforeEstimate, afterEstimate: transaction.afterEstimate } : {}),
     at: new Date().toISOString(),
   });
   state.contextCompactions = state.contextCompactions.slice(-20);
@@ -123,9 +126,28 @@ export function buildAgentStateSummary(state) {
 }
 
 function recordToolEffects(state, { step, name, args, result, target, ok }) {
-  if (name === "read_file" && args?.path) pushUnique(state.filesRead, args.path);
-  if (name === "run_shell" && args?.command) pushUnique(state.commandsRun, args.command);
-  for (const path of editedPaths(name, args, result)) pushUnique(state.filesEdited, path);
+  if (Array.isArray(result?.effects?.events)) {
+    state.seenEffectIds ??= [];
+    for (const effect of result.effects.events) {
+      if (!effect.id || state.seenEffectIds.includes(effect.id)) continue;
+      state.seenEffectIds.push(effect.id);
+      state.workspaceRevision = Math.max(state.workspaceRevision ?? 0, effect.revision ?? 0);
+      state.uncertainFiles ??= [];
+      if (effect.type === "workspace-uncertain") for (const path of effect.paths ?? []) pushUnique(state.uncertainFiles, path);
+      if (effect.type === "file-read" || effect.type === "file-change") {
+        const resolved = effect.type === "file-read" ? [effect.path] : effect.paths ?? [];
+        state.uncertainFiles = state.uncertainFiles.filter((path) => !resolved.includes(path));
+      }
+      if (effect.type === "file-change") for (const path of effect.paths ?? []) pushUnique(state.filesEdited, path);
+      if (effect.type === "file-read" && effect.path) pushUnique(state.filesRead, effect.path);
+      if (effect.type === "command" && effect.command) pushUnique(state.commandsRun, effect.command);
+    }
+  }
+  if (!Array.isArray(result?.effects?.events)) {
+    if (ok && name === "read_file" && args?.path) pushUnique(state.filesRead, args.path);
+    if (name === "run_shell" && args?.command) pushUnique(state.commandsRun, args.command);
+  }
+  if (ok) for (const path of editedPaths(name, args, result)) pushUnique(state.filesEdited, path);
 
   const summary = toolObservationSummary({ name, target, ok, result });
   if (summary) {

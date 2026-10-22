@@ -1,3 +1,4 @@
+import { normalizeRequiredChecks } from "../harness/acceptance.js";
 export function buildVerificationPlan({ taskSpec, projectIndex }) {
   const scripts = projectIndex?.scripts ?? {};
   const packageManager = projectIndex?.packageManager || "npm";
@@ -15,12 +16,21 @@ export function buildVerificationPlan({ taskSpec, projectIndex }) {
     requestType === "command" ||
     /test|check|verify|验证|测试/.test(taskSpec?.goal ?? "");
 
+  let requiredChecks = taskSpec?.requiredChecks ?? taskSpec?.acceptance?.requiredChecks ?? [];
+  if (!requiredChecks.length && taskSpec?.acceptance?.requiredChecksSource !== "explicit") {
+    const goal = taskSpec?.goal ?? "";
+    const asksTests = /(?:run|execute|运行|执行)[^.;。\n]{0,24}(?:tests?|测试)/i.test(goal) && !/(?:do not|don't|不要|无需|不必)\s*(?:run|execute|运行|执行)?[^.;。\n]{0,12}(?:tests?|测试)/i.test(goal);
+    const primary = commands.find((item) => item.kind === "unit-test") ?? commands.find((item) => ["check", "typecheck", "lint"].includes(item.kind));
+    if (asksTests) requiredChecks = [{ command: testCommand(packageManager), target: "project:tests", purpose: "Execute the requested project tests", source: "project-inferred" }];
+    else if (taskSpec?.requiresCodeChange && primary) requiredChecks = [{ ...primary, target: "project:" + primary.kind, purpose: "Verify the scoped implementation", source: "project-inferred" }];
+  }
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    requiredChecks: normalizeRequiredChecks(requiredChecks),
     required,
-    status: commands.length ? "planned" : "no-known-command",
+    status: commands.length || requiredChecks.length ? "planned" : "no-known-command",
     commands,
-    fallback: commands.length ? "" : "Inspect project docs or package scripts before claiming verification was run.",
+    fallback: commands.length || requiredChecks.length ? "" : "Inspect project docs or package scripts before claiming verification was run.",
   };
 }
 
@@ -39,7 +49,7 @@ export function verificationPlanMessage(plan) {
     content: [
       "Verification plan:",
       JSON.stringify(plan, null, 2),
-      "Use this to choose affordable validation commands. If you skip a planned command, explain why.",
+      "Every requiredChecks item needs fresh successful executor evidence on an allowed execution path. commands are discovery candidates; explain skipped candidates. Missing or failed required checks mean a partial or blocked outcome, never a completed task.",
     ].join("\n"),
   };
 }

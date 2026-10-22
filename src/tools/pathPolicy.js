@@ -1,5 +1,7 @@
 import { lstat, realpath } from "node:fs/promises";
-import { basename, dirname, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { isSensitivePath } from "../permissions/sensitivePaths.js";
+export { isSensitivePath, SENSITIVE_BASENAMES, SENSITIVE_GLOBS } from "../permissions/sensitivePaths.js";
 
 export const DEFAULT_EXCLUDES = new Set([
   ".git",
@@ -10,14 +12,9 @@ export const DEFAULT_EXCLUDES = new Set([
   ".next",
 ]);
 
-export const SENSITIVE_BASENAMES = new Set([
-  ".env",
-  ".env.local",
-  ".env.production",
-  ".env.development",
-  "id_rsa",
-  "id_ed25519",
-]);
+export function isExcludedWorkspacePath(path) {
+  return String(path ?? "").replaceAll("\\", "/").split("/").some((part) => DEFAULT_EXCLUDES.has(part));
+}
 
 export function isPathNotFoundError(error) {
   return error?.code === "ENOENT";
@@ -40,7 +37,7 @@ export function pathNotFoundResult(workspace, fullPath, requestedPath, kind) {
 export function assertSafePath(workspace, path) {
   const full = resolve(workspace, path);
   const rel = relative(workspace, full);
-  if (rel.startsWith("..") || rel === ".." || rel.startsWith("/") || rel.includes("\0")) {
+  if (rel === ".." || rel.startsWith("../") || isAbsolute(rel) || rel.includes("\0")) {
     throw new Error(`Access outside workspace is denied: ${path}`);
   }
   assertNotSensitive(full);
@@ -83,14 +80,15 @@ export async function assertWorkspaceWriteParent(workspace, getRealWorkspace, pa
 
 export function assertInsideWorkspace(realWorkspace, realTarget) {
   const rel = relative(realWorkspace, realTarget);
-  if (rel.startsWith("..") || rel === ".." || rel.startsWith("/") || rel.includes("\0")) {
+  if (rel === ".." || rel.startsWith("../") || isAbsolute(rel) || rel.includes("\0")) {
     throw new Error(`Access outside workspace is denied: ${realTarget}`);
   }
 }
 
 export function assertNotSensitive(path) {
   const name = basename(path);
-  if (SENSITIVE_BASENAMES.has(name) || path.includes("/.git/") || path.includes("/node_modules/")) {
+  const hardExcluded = String(path).replaceAll("\\", "/").split("/").some((part) => part === ".git" || part === "node_modules");
+  if (isSensitivePath(path) || hardExcluded) {
     throw new Error(`Access to sensitive or excluded path is denied: ${name}`);
   }
 }

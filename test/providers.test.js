@@ -81,7 +81,8 @@ test("provider settings migrate legacy DeepSeek env data without losing permissi
   assert.equal(raw.env.DEECOO_MODEL, undefined);
   assert.equal(raw.providers.deepseek.apiKey, "legacy-deepseek");
   assert.equal(raw.providers.openai.apiKey, "openai-key");
-  assert.deepEqual(after.permissions.shell.approvedCommands, ["chmod 755 ."]);
+  assert.deepEqual(after.permissions.shell.approvedCommands, []);
+  assert.deepEqual(after.permissions.shell.legacy.approvedCommands, ["chmod 755 ."]);
   assert.equal((await stat(path)).mode & 0o777, 0o600);
 });
 

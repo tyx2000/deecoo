@@ -5,7 +5,8 @@ import { ansi, paint, styleStart } from "./theme.js";
 const MAX_MENU_ITEMS = 10;
 const promptHistory = [];
 
-export async function selectOption({ title, options, selectedIndex = 0, filterable = true }) {
+export async function selectOption({ title, options, selectedIndex = 0, filterable = true, signal }) {
+  if (signal?.aborted) return undefined;
   if (!input.isTTY || !output.isTTY) {
     return options[selectedIndex] ?? options[0];
   }
@@ -73,7 +74,12 @@ export async function selectOption({ title, options, selectedIndex = 0, filterab
         (preview ? previewLineCount(preview) + 1 : 0);
     };
 
+    const onAbort = () => cleanup(undefined);
+    let finished = false;
     const cleanup = (value) => {
+      if (finished) return;
+      finished = true;
+      signal?.removeEventListener("abort", onAbort);
       input.off("keypress", onKeypress);
       input.setRawMode(wasRaw);
       output.write("\x1B[?25h");
@@ -129,16 +135,19 @@ export async function selectOption({ title, options, selectedIndex = 0, filterab
     };
 
     input.on("keypress", onKeypress);
-    render();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    else render();
   });
 }
 
-export async function readPromptLine(prompt, slashOptions, { history, triggers = [] } = {}) {
+export async function readPromptLine(prompt, slashOptions, { history, triggers = [], signal } = {}) {
+  if (signal?.aborted) return "";
   if (!input.isTTY || !output.isTTY) {
     const { createInterface } = await import("node:readline/promises");
     const rl = createInterface({ input, output });
     try {
-      return await rl.question(prompt);
+      return await rl.question(prompt, { signal });
     } finally {
       rl.close();
     }
@@ -158,7 +167,12 @@ export async function readPromptLine(prompt, slashOptions, { history, triggers =
     let historyIndex = activeHistory.length;
     let draftBuffer = "";
 
+    const onAbort = () => cleanup("");
+    let finished = false;
     const cleanup = (value, { keepLine = false } = {}) => {
+      if (finished) return;
+      finished = true;
+      signal?.removeEventListener("abort", onAbort);
       if (!keepLine) clearRendered();
       input.off("keypress", onKeypress);
       input.setRawMode(wasRaw);
@@ -446,6 +460,8 @@ export async function readPromptLine(prompt, slashOptions, { history, triggers =
     };
 
     input.on("keypress", onKeypress);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) { onAbort(); return; }
     render();
   });
 }

@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "id": "add-patch",
+  "title": "Repair addition through apply_patch",
+  "category": "harness-regression",
+  "task": "Fix src/add.js so add(a, b) returns the sum for positive and negative numbers. Change only src/add.js, keep tests and protected.txt unchanged, and run npm test.",
+  "execution": {
+    "permissionMode": "workspace-write",
+    "files": {
+      "package.json": "{\n  \"name\": \"eval-add\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {\n    \"test\": \"node --test test/add.test.js\"\n  }\n}\n",
+      "src/add.js": "export function add(a, b) {\n  return a - b;\n}\n",
+      "test/add.test.js": "import assert from 'node:assert/strict';\nimport { test } from 'node:test';\nimport { add } from '../src/add.js';\ntest('adds positive numbers', () => assert.equal(add(2, 3), 5));\n",
+      "protected.txt": "Keep this sentinel unchanged.\n"
+    },
+    "allowedChanges": [
+      "src/add.js"
+    ],
+    "scripted": {
+      "main": [
+        {
+          "tool": "read_file",
+          "arguments": {
+            "path": "src/add.js"
+          }
+        },
+        {
+          "tool": "apply_patch",
+          "arguments": {
+            "path": "src/add.js",
+            "hunks": [
+              {
+                "oldStart": 2,
+                "oldLines": [
+                  "  return a - b;"
+                ],
+                "newLines": [
+                  "  return a + b;"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "tool": "run_shell",
+          "arguments": {
+            "command": "npm test",
+            "timeoutMs": 10000
+          }
+        },
+        {
+          "text": "Fixed src/add.js to return the sum. npm test passed."
+        }
+      ]
+    },
+    "checks": {
+      "files": [
+        {
+          "path": "src/add.js",
+          "exists": true
+        }
+      ],
+      "unchanged": [
+        "package.json",
+        "test/",
+        "protected.txt"
+      ],
+      "commands": [
+        {
+          "name": "addition-behavior",
+          "command": "node",
+          "args": [
+            "--input-type=module",
+            "-e",
+            "import assert from 'node:assert/strict'; import { add } from './src/add.js'; for (const [a,b] of [[2,3],[-2,3],[-4,-5],[0,0]]) assert.equal(add(a,b),a+b);"
+          ]
+        }
+      ]
+    }
+  }
+}

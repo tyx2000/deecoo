@@ -36,13 +36,18 @@ export function reviewSchemaInstructions() {
   ].join("\n");
 }
 
-export function createReviewFinalValidator({ maxRepairAttempts = 2 } = {}) {
-  return ({ finalText, attempt }) => {
+export function createReviewFinalValidator({ maxRepairAttempts = 2, task: requestedTask } = {}) {
+  return ({ finalText, attempt, task, effects }) => {
     const validation = validateReviewReportText(finalText);
+    const coverage = reviewCoverage({ task: requestedTask ?? task, effects });
+    if (validation.ok && coverage.errors.length) {
+      validation.ok = false;
+      validation.errors.push(...coverage.errors);
+    }
     if (validation.ok) {
       return {
         ok: true,
-        report: validation.report,
+        report: { ...validation.report, coverage },
         errors: [],
       };
     }
@@ -54,6 +59,20 @@ export function createReviewFinalValidator({ maxRepairAttempts = 2 } = {}) {
       repairPrompt: reviewRepairPrompt(validation.errors, attempt + 1),
     };
   };
+}
+
+export function reviewCoverage({ task, effects } = {}) {
+  const events = effects?.events ?? [];
+  const files = [...new Set(events.flatMap((event) => event.type === "file-read" ? [event.path] : event.type === "diff-read" ? event.paths ?? [event.path] : []).filter(Boolean))];
+  const inlineSource = /```(?!json\b)[^\n]*\n[\s\S]*?\S[\s\S]*?```/i.test(String(task ?? ""));
+  const requestedFiles = [...String(task ?? "").matchAll(/(?:^|\s)@([A-Za-z0-9_./-]+\.[A-Za-z0-9_./-]+)/g)].map((match) => match[1]);
+  const missingFiles = requestedFiles.filter((path) => !files.includes(path));
+  const errors = [];
+  if (!files.length && !inlineSource) errors.push("Review has no runtime source evidence. Read relevant source files or a non-empty diff before concluding, including when findings are empty.");
+  if (missingFiles.length) errors.push("Requested review files have not been inspected: " + missingFiles.join(", "));
+  const partialFiles = [...new Set(events.filter((event) => event.type === "file-read" && event.truncated).map((event) => event.path))];
+  return { files, inlineSource, requestedFiles, missingFiles, partialFiles, revision: effects?.revision,
+    status: errors.length || partialFiles.length ? "partial" : "inspected", errors };
 }
 
 export function validateReviewReportText(text) {
@@ -131,6 +150,10 @@ export function formatReviewReportMarkdown(report) {
     "- mode: " + fallback(review.mode),
     "- findings: " + String(findings.length),
   ];
+  if (report?.coverage) {
+    lines.push("- source coverage: " + report.coverage.status + " (" + (report.coverage.files?.length ?? 0) + " file(s); project-wide completeness is not inferred)");
+    if (report.coverage.partialFiles?.length) lines.push("- partial file reads: " + report.coverage.partialFiles.join(", "));
+  }
   const counts = report?.aggregation?.severityCounts ?? severityCounts(findings);
   const nonzeroCounts = Object.entries(counts).filter(([, count]) => count > 0);
   if (nonzeroCounts.length) {

@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 2,
+  "id": "pre-existing-failure",
+  "title": "Pre Existing Failure",
+  "category": "existing-failure",
+  "task": "Fix src/value.js to return 2 and run npm test.",
+  "execution": {
+    "permissionMode": "workspace-write",
+    "files": {
+      "package.json": "{\"scripts\":{\"test\":\"node test.cjs\"}}\n",
+      "src/value.js": "export const value = 1;\n",
+      "test.cjs": "throw new Error('EXISTING_BASELINE_FAILURE');\n"
+    },
+    "allowedChanges": [
+      "src/value.js"
+    ],
+    "scripted": {
+      "main": [
+        {
+          "tool": "run_shell",
+          "arguments": {
+            "command": "npm test"
+          }
+        },
+        {
+          "tool": "read_file",
+          "arguments": {
+            "path": "src/value.js"
+          }
+        },
+        {
+          "tool": "edit_file",
+          "arguments": {
+            "path": "src/value.js",
+            "search": "1",
+            "replace": "2"
+          }
+        },
+        {
+          "tool": "run_shell",
+          "arguments": {
+            "command": "npm test"
+          }
+        },
+        {
+          "text": "Modified src/value.js. npm test still fails with the existing baseline error."
+        },
+        {
+          "text": "Modified src/value.js. npm test still fails with the existing baseline error."
+        },
+        {
+          "text": "Modified src/value.js. npm test still fails with the existing baseline error."
+        }
+      ]
+    },
+    "checks": {
+      "files": [
+        {
+          "path": "src/value.js",
+          "equals": "export const value = 2;\n"
+        }
+      ],
+      "unchanged": [
+        "test.cjs",
+        "package.json"
+      ]
+    },
+    "expectedRun": {
+      "status": "failed",
+      "stoppedReason": "task_contract_invalid",
+      "verificationStatus": "failed",
+      "completionType": "blocked"
+    }
+  }
+}

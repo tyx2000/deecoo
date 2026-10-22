@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { rankEvalCases } from "./matching.js";
 import { scoreEvalCase, summarizeEvalResults } from "./scoring.js";
+import { executeEvalSuite } from "./execution.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -25,18 +26,23 @@ async function main(argv) {
   }
 
   const selectedCases = args.autoCase ? selectAutoCases(cases, suggestions, args.minMatchScore) : cases;
-  const results = [];
-
-  for (const caseDefinition of selectedCases) {
-    const run = runRecord ?? await loadFixtureRun(args.fixturesDir, caseDefinition.id);
-    results.push(scoreEvalCase(caseDefinition, run));
+  let results = [];
+  let summary;
+  if (args.mode === "e2e") {
+    ({ results, summary } = await executeEvalSuite(selectedCases, { trials: args.trials, keepWorkspaces: args.keepWorkspaces }));
+  } else {
+    for (const caseDefinition of selectedCases) {
+      const run = runRecord ?? await loadFixtureRun(args.fixturesDir, caseDefinition.id);
+      results.push(scoreEvalCase(caseDefinition, run));
+    }
+    summary = summarizeEvalResults(results);
   }
 
-  const summary = summarizeEvalResults(results);
   const report = {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    evaluationKind: args.mode === "e2e" ? "harness-e2e" : "trace-grader",
     createdAt: new Date().toISOString(),
-    source: args.runPath ? "run" : "fixture",
+    source: args.mode === "e2e" ? "execution" : args.runPath ? "run" : "fixture",
     runPath: args.runPath || undefined,
     matchedCases: args.autoCase ? suggestions.slice(0, 1) : undefined,
     summary,
@@ -50,14 +56,14 @@ async function main(argv) {
     console.log(formatTextReport(report, written));
   }
 
-  if (summary.failed > 0 && args.failOnFailed) {
+  if (summary.failed > 0 && (args.mode === "e2e" || args.failOnFailed)) {
     process.exitCode = 1;
   }
 }
 
 function parseArgs(argv) {
   const args = {
-    casesDir: resolve(ROOT, "eval", "cases"),
+    casesDir: undefined,
     fixturesDir: resolve(ROOT, "eval", "fixtures"),
     reportDir: resolve(ROOT, "eval", "reports"),
     caseId: "",
@@ -69,11 +75,18 @@ function parseArgs(argv) {
     json: false,
     writeReport: true,
     failOnFailed: false,
+    mode: "trace",
+    trials: 1,
+    keepWorkspaces: false,
   };
 
   for (let index = 2; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--case") args.caseId = argv[++index] ?? "";
+    else if (arg === "--execute") args.mode = "e2e";
+    else if (arg === "--mode") args.mode = argv[++index];
+    else if (arg === "--trials") args.trials = Number(argv[++index]);
+    else if (arg === "--keep-workspaces") args.keepWorkspaces = true;
     else if (arg === "--run") args.runPath = resolve(argv[++index] ?? "");
     else if (arg === "--suggest") args.suggest = true;
     else if (arg === "--auto-case") args.autoCase = true;
@@ -93,6 +106,11 @@ function parseArgs(argv) {
     }
   }
 
+  if (!["trace", "e2e"].includes(args.mode)) throw new Error("--mode must be trace or e2e");
+  if (!Number.isInteger(args.trials) || args.trials < 1 || args.trials > 100) throw new Error("--trials must be an integer between 1 and 100");
+  if (args.mode === "trace" && (args.trials !== 1 || args.keepWorkspaces)) throw new Error("--trials and --keep-workspaces require --execute");
+  if (args.mode === "e2e" && (args.runPath || args.suggest || args.autoCase)) throw new Error("--execute cannot be combined with --run, --suggest or --auto-case");
+  args.casesDir ??= resolve(ROOT, "eval", args.mode === "e2e" ? "tasks" : "cases");
   if (args.runPath && !args.caseId && !args.suggest && !args.autoCase) {
     throw new Error("--run requires --case, --suggest, or --auto-case.");
   }
@@ -150,7 +168,8 @@ async function writeReports(reportDir, report) {
 
 function formatTextReport(report, written) {
   const lines = [
-    `Eval: ${report.summary.passed}/${report.summary.total} passed, average ${report.summary.averageScore}`,
+    `${report.evaluationKind === "harness-e2e" ? "Harness E2E" : "Trace grader (not E2E)"}: ${report.summary.passed}/${report.summary.total} passed, average ${report.summary.averageScore}`,
+    ...(report.summary.trials ? [`Trials: ${report.summary.passedTrials}/${report.summary.trials}; tokens ${report.summary.totalTokens}; latency p50 ${report.summary.p50Ms}ms / p95 ${report.summary.p95Ms}ms`] : []),
     ...(report.matchedCases?.length ? [`Auto case: ${report.matchedCases[0].caseId} (${report.matchedCases[0].score})`, ""] : [""]),
     "",
     ...report.results.map((result) => {
@@ -181,6 +200,7 @@ function formatMarkdownReport(report) {
     "",
     "- createdAt: " + report.createdAt,
     "- source: " + report.source,
+    "- evaluationKind: " + report.evaluationKind,
     ...(report.runPath ? ["- runPath: " + report.runPath] : []),
     ...(report.matchedCases?.length ? ["- autoCase: " + report.matchedCases[0].caseId + " (" + report.matchedCases[0].score + ")"] : []),
     "- passed: " + report.summary.passed + "/" + report.summary.total,
@@ -216,6 +236,10 @@ function printHelp() {
     "  npm run eval -- [options]",
     "",
     "Options:",
+    "  --execute           Execute trusted cases in fresh temporary projects (default: eval/tasks)",
+    "  --mode <trace|e2e>   Default trace grades existing records; it is not E2E execution",
+    "  --trials <n>        Repeat each E2E case with fixed configuration (1-100)",
+    "  --keep-workspaces   Keep E2E projects and include their paths in the report",
     "  --case <id>          Run a single eval case",
     "  --run <path>         Score a real audit/run JSON against --case",
     "  --suggest            Suggest matching eval cases for --run",
@@ -223,7 +247,7 @@ function printHelp() {
     "  --min-match-score <n> Minimum match score for --auto-case. Default: 40",
     "  --json               Print JSON report",
     "  --no-report          Do not write eval/reports artifacts",
-    "  --fail-on-failed     Exit non-zero when any case fails",
+    "  --fail-on-failed     Exit non-zero on trace failures (E2E failures always do)",
     "  --cases-dir <path>   Override case directory",
     "  --fixtures-dir <path> Override fixture run directory",
     "  --report-dir <path>  Override report directory",

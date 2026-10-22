@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 2,
+  "id": "wrong-requested-command",
+  "title": "Wrong Requested Command",
+  "category": "acceptance",
+  "task": "Run npm test.",
+  "execution": {
+    "permissionMode": "workspace-write",
+    "files": {
+      "package.json": "{\"scripts\":{\"test\":\"node --version\"}}\n"
+    },
+    "allowedChanges": [],
+    "scripted": {
+      "main": [
+        {
+          "tool": "run_shell",
+          "arguments": {
+            "command": "pwd"
+          }
+        },
+        {
+          "text": "The working directory printed successfully."
+        },
+        {
+          "text": "The working directory printed successfully."
+        },
+        {
+          "text": "The working directory printed successfully."
+        }
+      ]
+    },
+    "checks": {
+      "files": [
+        {
+          "path": "package.json",
+          "contains": "test"
+        }
+      ]
+    },
+    "expectedRun": {
+      "status": "failed",
+      "stoppedReason": "task_contract_invalid",
+      "validationError": "required check"
+    }
+  }
+}

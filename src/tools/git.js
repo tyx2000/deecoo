@@ -1,12 +1,10 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
+import { relative } from "node:path";
+import { execReadOnlyGit } from "../permissions/gitPolicy.js";
+import { assertSafePath, isExcludedWorkspacePath, isSensitivePath } from "./pathPolicy.js";
 
 export async function gitStatus(workspace, signal) {
   try {
-    const { stdout } = await execFileAsync("git", ["status", "--short", "--branch"], {
-      cwd: workspace,
+    const { stdout } = await execReadOnlyGit(workspace, ["status", "--short", "--branch", "--", "."], {
       maxBuffer: 1024 * 1024,
       signal,
     });
@@ -20,14 +18,18 @@ export async function gitStatus(workspace, signal) {
   }
 }
 
-export async function gitDiff(workspace, args, signal) {
-  const command = args.staged ? ["diff", "--staged"] : ["diff"];
+export async function gitDiff(workspace, args = {}, signal) {
   try {
-    const { stdout } = await execFileAsync("git", command, {
-      cwd: workspace,
-      maxBuffer: 4 * 1024 * 1024,
-      signal,
-    });
+    const explicitPath = args.path === undefined ? undefined : relative(workspace, assertSafePath(workspace, String(args.path))) || ".";
+    const command = ["diff", "--relative", "--no-renames", ...(args.staged ? ["--staged"] : [])];
+    const { stdout: names } = await execReadOnlyGit(workspace, [...command, "--name-only", "-z", "--", ...(explicitPath ? [explicitPath] : [])], { signal });
+    const safePaths = names.split("\0").filter((path) => path && !isSensitivePath(path) && !isExcludedWorkspacePath(path));
+    let stdout = "";
+    for (let index = 0; index < safePaths.length; index += 32) {
+      const result = await execReadOnlyGit(workspace, [...command, "--", ...safePaths.slice(index, index + 32)], { signal });
+      stdout += result.stdout;
+      if (Buffer.byteLength(stdout, "utf8") > 4 * 1024 * 1024) throw new Error("Git diff exceeded the 4 MiB output limit. Narrow the requested path.");
+    }
     return {
       ok: true,
       diff: stdout,

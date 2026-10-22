@@ -2,8 +2,11 @@
 // live, typed event stream and rolling metrics that a CLI, dashboard, or the audit can read
 // while a run is in flight. It is a pure sink — no I/O — so it is cheap and testable.
 
-export function createRunTracer({ max = 2000 } = {}) {
+export function createRunTracer({ max = 2000, maxBytes = 2 * 1024 * 1024 } = {}) {
+  if (!Number.isSafeInteger(max) || max < 0 || !Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new TypeError("Trace retention limits must be nonnegative integers.");
   const events = [];
+  const sizes = [];
+  let retainedBytes = 0;
   const metrics = {
     steps: 0,
     modelCalls: 0,
@@ -15,6 +18,11 @@ export function createRunTracer({ max = 2000 } = {}) {
     promptTokens: 0,
     completionTokens: 0,
     totalTokens: 0,
+    modelRetries: 0,
+    rateLimited: 0,
+    queueWaitMs: 0,
+    firstTokenSamples: 0,
+    firstTokenLatencyMs: 0,
   };
   // Metrics are cumulative and always exact; only the retained event ring is bounded, and we
   // count evicted events so the trace is never silently lossy.
@@ -27,9 +35,11 @@ export function createRunTracer({ max = 2000 } = {}) {
     const stamped = { at: Date.now(), ...event };
     startedAt ??= stamped.at;
     endedAt = stamped.at;
-    events.push(stamped);
-    if (events.length > max) dropped += events.splice(0, events.length - max).length;
     applyMetrics(metrics, stamped);
+    const bytes = Buffer.byteLength(JSON.stringify(stamped));
+    if (!max || bytes > maxBytes) { dropped++; return; }
+    events.push(stamped); sizes.push(bytes); retainedBytes += bytes;
+    while (events.length > max || retainedBytes > maxBytes) { events.shift(); retainedBytes -= sizes.shift(); dropped++; }
   };
 
   return {
@@ -40,6 +50,7 @@ export function createRunTracer({ max = 2000 } = {}) {
         ...metrics,
         events: events.length,
         droppedEvents: dropped,
+        retainedBytes,
         elapsedMs: startedAt !== undefined ? Math.max(0, (endedAt ?? startedAt) - startedAt) : 0,
       };
     },
@@ -48,6 +59,17 @@ export function createRunTracer({ max = 2000 } = {}) {
 
 function applyMetrics(metrics, event) {
   switch (event.type) {
+    case "model-retry":
+      metrics.modelRetries += 1;
+      if (event.status === 429) metrics.rateLimited += 1;
+      break;
+    case "model-admitted":
+      metrics.queueWaitMs += event.queuedMs ?? 0;
+      break;
+    case "first-token":
+      metrics.firstTokenSamples += 1;
+      metrics.firstTokenLatencyMs += event.latencyMs ?? 0;
+      break;
     case "step":
       metrics.steps = Math.max(metrics.steps, Number(event.step ?? 0));
       break;

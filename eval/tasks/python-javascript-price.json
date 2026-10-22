@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 2,
+  "id": "python-javascript-price",
+  "title": "Python Javascript Price",
+  "category": "multi-language",
+  "task": "Fix src/price.py so the JavaScript price function multiplies quantity and unit price. Run npm test.",
+  "execution": {
+    "permissionMode": "workspace-write",
+    "files": {
+      "package.json": "{\"private\": true, \"type\": \"module\", \"scripts\": {\"test\": \"node test.js\"}}\n",
+      "src/price.py": "import sys\nprint(int(sys.argv[1]) + int(sys.argv[2]))\n",
+      "src/price.js": "import {execFileSync} from 'node:child_process'; export const price=(n,p)=>Number(execFileSync('python3',['src/price.py',String(n),String(p)],{encoding:'utf8'}));\n",
+      "test.js": "import assert from 'node:assert/strict';import {price} from './src/price.js';assert.equal(price(3,4),12);\n"
+    },
+    "allowedChanges": [
+      "src/price.py"
+    ],
+    "scripted": {
+      "main": [
+        {
+          "tool": "read_file",
+          "arguments": {
+            "path": "src/price.py"
+          }
+        },
+        {
+          "tool": "read_file",
+          "arguments": {
+            "path": "src/price.js"
+          }
+        },
+        {
+          "tool": "edit_file",
+          "arguments": {
+            "path": "src/price.py",
+            "search": "int(sys.argv[1]) + int(sys.argv[2])",
+            "replace": "int(sys.argv[1]) * int(sys.argv[2])"
+          }
+        },
+        {
+          "tool": "run_shell",
+          "arguments": {
+            "command": "npm test"
+          }
+        },
+        {
+          "text": "Fixed src/price.py multiplication through the JavaScript wrapper. npm test passed."
+        }
+      ]
+    },
+    "checks": {
+      "commands": [
+        {
+          "command": "node",
+          "args": [
+            "--input-type=module",
+            "-e",
+            "import assert from 'node:assert/strict';import {price} from './src/price.js';for(const [n,p] of [[2,7],[0,9],[-3,4]])assert.equal(price(n,p),n*p);"
+          ],
+          "name": "independent-behavior"
+        }
+      ],
+      "unchanged": [
+        "src/price.js",
+        "test.js",
+        "package.json"
+      ]
+    }
+  }
+}

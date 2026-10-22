@@ -36,9 +36,11 @@ export function createRateLimiter({ maxConcurrent = 4, minIntervalMs = 0, cooldo
   };
 
   return {
-    async run(fn) {
+    async run(fn, { onAdmitted } = {}) {
+      const queuedAt = Date.now();
       await acquire();
       try {
+        onAdmitted?.({ queuedMs: Date.now() - queuedAt });
         return await fn();
       } catch (error) {
         if (isRateLimit(error)) noteRateLimit();
@@ -59,15 +61,15 @@ export function createRateLimiter({ maxConcurrent = 4, minIntervalMs = 0, cooldo
 // Wrap a model client so its request methods pass through the shared limiter.
 export function rateLimitClient(client, limiter) {
   if (!limiter) return client;
-  return {
+  const wrapped = {
     ...client,
     async chatCompletion(request, options) {
-      return limiter.run(() => client.chatCompletion(request, options));
-    },
-    async chatCompletionStream(request, handlers) {
-      return limiter.run(() => client.chatCompletionStream(request, handlers));
+      return limiter.run(() => client.chatCompletion(request, options), { onAdmitted: (event) => options?.onRuntimeEvent?.({ type: "model-admitted", ...event }) });
     },
   };
+  if (typeof client.chatCompletionStream === "function") wrapped.chatCompletionStream = (request, handlers) =>
+    limiter.run(() => client.chatCompletionStream(request, handlers), { onAdmitted: (event) => handlers?.onRuntimeEvent?.({ type: "model-admitted", ...event }) });
+  return wrapped;
 }
 
 function isRateLimit(error) {

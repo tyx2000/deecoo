@@ -1,8 +1,9 @@
-import { exec } from "node:child_process";
-import { promisify } from "node:util";
-import { classifyShellCommand, normalizeShellCommand, sanitizeShellEnv } from "../permissions/shellPolicy.js";
+import { classifyShellCommand, normalizeShellCommand } from "../permissions/shellPolicy.js";
+import { createExecutionBackend } from "../execution/backend.js";
+import { realpath } from "node:fs/promises";
+import { relative } from "node:path";
+import { assertExistingWorkspacePath, assertSafePath, isExcludedWorkspacePath } from "./pathPolicy.js";
 
-const execAsync = promisify(exec);
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_OUTPUT_BYTES = 20 * 1024;
 
@@ -19,6 +20,9 @@ const ALWAYS_DECISION_HANDLERS = {
 
 export async function runShell(workspace, args, prompter, allowShellWithoutPrompt, permissionState, signal) {
   if (!args.command) return { ok: false, error: "command is required" };
+  let executionCwd;
+  try { executionCwd = await validateExecutionCwd(workspace, args.cwd); }
+  catch (error) { return { ok: false, code: "SHELL_CWD_BLOCKED", error: error.message }; }
   const command = String(args.command);
   const approvedCommandKey = normalizeShellCommand(command);
   const policy = classifyShellCommand(command, { egressAllowlist: permissionState.egressAllowlist });
@@ -38,27 +42,34 @@ export async function runShell(workspace, args, prompter, allowShellWithoutPromp
   const decision =
     commandIsSafe || hasStandingApproval
       ? "approve"
-      : await prompter(shellPrompt(command, policy), { kind: "shell-command-approval", policy, command });
+      : await prompter(shellPrompt(command, policy) + (args.cwd ? `\nWorking directory: ${executionCwd}` : ""), { kind: "shell-command-approval", policy, command, cwd: executionCwd });
+  throwIfAborted(signal);
   await ALWAYS_DECISION_HANDLERS[decision]?.(permissionState, approvedCommandKey);
+  throwIfAborted(signal);
   const allowed = decision !== "deny" && decision !== false;
   if (!allowed) return { ok: false, error: "User denied shell command." };
 
   try {
-    const { stdout, stderr } = await execAsync(command, {
-      cwd: workspace,
-      timeout: Number(args.timeoutMs ?? DEFAULT_TIMEOUT_MS),
-      maxBuffer: 4 * 1024 * 1024,
-      env: sanitizeShellEnv(process.env),
-      signal,
-    });
-    const stdoutResult = truncateOutput(stdout);
-    const stderrResult = truncateOutput(stderr);
+    executionCwd = await validateExecutionCwd(workspace, args.cwd);
+    const backend = permissionState.executionBackend ?? createExecutionBackend({ cwd: workspace });
+    const environment = permissionState.executionEnv ? { env: permissionState.executionEnv, replaceEnv: true } : {};
+    if (args.background === true) {
+      const job = await backend.startJob({ command, cwd: executionCwd, timeoutMs: args.timeoutMs, signal, ...environment });
+      const ok = ["starting", "running"].includes(job.status) || (job.status === "exited" && job.exitCode === 0 && job.treeCleanup?.confirmed);
+      return { ...job, ok: Boolean(ok), shellPolicy: policy, activity: { kind: "command", label: "Started job", target: command, detail: job.jobId } };
+    }
+    const result = await backend.run({ command, cwd: executionCwd, timeoutMs: Number(args.timeoutMs ?? DEFAULT_TIMEOUT_MS), signal, ...environment });
+    const stdoutResult = truncateOutput(result.stdout);
+    const stderrResult = truncateOutput(result.stderr);
+    if (result.stdoutTruncated && !stdoutResult.truncated) { stdoutResult.truncated = true; stdoutResult.text += "\n... output truncated to 20KB"; }
+    if (result.stderrTruncated && !stderrResult.truncated) { stderrResult.truncated = true; stderrResult.text += "\n... output truncated to 20KB"; }
     return {
-      ok: true,
+      ...result,
       stdout: stdoutResult.text,
       stderr: stderrResult.text,
       stdoutTruncated: stdoutResult.truncated,
       stderrTruncated: stderrResult.truncated,
+      ...(result.ok ? {} : { failureSummary: summarizeFailureOutput({ stdout: stdoutResult.text, stderr: stderrResult.text, error: result.error }) }),
       shellPolicy: policy,
       activity: { kind: "command", label: "Ran command", target: command, detail: policy.level === "warn" ? policy.reasons.join(", ") : "" },
     };
@@ -77,10 +88,30 @@ export async function runShell(workspace, args, prompter, allowShellWithoutPromp
       stdoutTruncated: stdoutResult.truncated,
       stderrTruncated: stderrResult.truncated,
       error: error.message,
+      ...(error.code ? { code: error.code } : {}),
       failureSummary,
       shellPolicy: policy,
     };
   }
+}
+
+async function validateExecutionCwd(workspace, requested = ".") {
+  const path = assertSafePath(workspace, requested);
+  if (isExcludedWorkspacePath(relative(workspace, path))) throw new Error("Execution cwd is an excluded workspace path");
+  const realWorkspace = await realpath(workspace);
+  const info = await assertExistingWorkspacePath(workspace, async () => realWorkspace, path === workspace ? realWorkspace : path);
+  if (!info.isDirectory()) throw new Error("Execution cwd must be a directory");
+  const realTarget = await realpath(path);
+  if (isExcludedWorkspacePath(relative(realWorkspace, realTarget))) throw new Error("Execution cwd resolves to an excluded workspace path");
+  return realTarget;
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  const error = new Error(signal.reason?.message ?? "Task interrupted.");
+  error.name = "AbortError";
+  error.code = "ABORT_ERR";
+  throw error;
 }
 
 function shellPrompt(command, policy) {

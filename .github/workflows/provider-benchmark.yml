@@ -1,0 +1,64 @@
+name: Explicit provider benchmark
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Exact OpenAI model ID
+        required: true
+        type: string
+      case_id:
+        description: Trusted task outcome case
+        required: true
+        default: cross-file-feature
+        type: string
+      cost_budget_usd:
+        description: Maximum admitted estimated spend in USD
+        required: true
+        default: '1'
+        type: string
+      price_prompt_per_m:
+        description: Conservative USD per million input tokens
+        required: true
+        type: string
+      price_completion_per_m:
+        description: Conservative USD per million output tokens
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    environment: provider-benchmark
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install OS sandbox backend
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Run explicitly budgeted provider
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          BENCHMARK_MODEL: ${{ inputs.model }}
+          BENCHMARK_CASE: ${{ inputs.case_id }}
+          BENCHMARK_COST: ${{ inputs.cost_budget_usd }}
+          BENCHMARK_INPUT_PRICE: ${{ inputs.price_prompt_per_m }}
+          BENCHMARK_OUTPUT_PRICE: ${{ inputs.price_completion_per_m }}
+        run: >-
+          node eval/benchmark.js --allow-paid --provider openai
+          --base-url https://api.openai.com/v1 --model "$BENCHMARK_MODEL"
+          --case "$BENCHMARK_CASE" --max-calls 30 --token-budget 500000
+          --cost-budget-usd "$BENCHMARK_COST" --max-tokens 2048 --timeout-ms 120000
+          --price-prompt-per-m "$BENCHMARK_INPUT_PRICE"
+          --price-completion-per-m "$BENCHMARK_OUTPUT_PRICE"
+          --output provider-benchmark.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: provider-benchmark
+          path: provider-benchmark.json
+          if-no-files-found: ignore

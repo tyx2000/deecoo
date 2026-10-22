@@ -64,6 +64,7 @@ export function createProcessController(options = {}) {
 // working set instead of re-reading everything it had already inspected.
 export function serializeProcessController(controller) {
   return {
+    workspaceRevision: controller.workspaceRevision,
     history: controller.history.slice(-controller.config.maxHistory),
     observations: [...controller.observations.entries()],
     workingSet: {
@@ -81,6 +82,7 @@ export function serializeProcessController(controller) {
 
 function restoreProcessController(controller, snapshot) {
   if (!snapshot || typeof snapshot !== "object") return;
+  controller.workspaceRevision = snapshot.workspaceRevision;
   if (Array.isArray(snapshot.history)) controller.history = structuredClone(snapshot.history);
   if (Array.isArray(snapshot.observations)) controller.observations = new Map(structuredClone(snapshot.observations));
   if (snapshot.workingSet) {
@@ -93,6 +95,20 @@ function restoreProcessController(controller, snapshot) {
   if (Number.isFinite(snapshot.lastMutationStep)) controller.lastMutationStep = snapshot.lastMutationStep;
   if (Number.isFinite(snapshot.lastProgressStep)) controller.lastProgressStep = snapshot.lastProgressStep;
   if (Array.isArray(snapshot.laneMutation)) controller.laneMutation = new Map(snapshot.laneMutation);
+}
+
+// Runtime revisions are shared across workers; step numbers are local to each
+// loop and cannot establish freshness after a delegated write.
+export function synchronizeWorkspaceRevision(controller, revision) {
+  if (!Number.isFinite(revision)) return;
+  if (controller.workspaceRevision !== undefined && controller.workspaceRevision !== revision) {
+    controller.observations.clear();
+    controller.workingSet.files.clear();
+    controller.workingSet.searches = [];
+    controller.workingSet.lists = [];
+    controller.workingSet.git = {};
+  }
+  controller.workspaceRevision = revision;
 }
 
 function laneMutationStep(controller, lane) {

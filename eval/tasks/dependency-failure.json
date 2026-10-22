@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 2,
+  "id": "dependency-failure",
+  "title": "Dependency Failure",
+  "category": "dependency",
+  "task": "Run npm test and report its actual result.",
+  "execution": {
+    "permissionMode": "workspace-write",
+    "files": {
+      "package.json": "{\"scripts\":{\"test\":\"node test.cjs\"}}\n",
+      "test.cjs": "require('deecoo_eval_missing_dependency_20261022');\n"
+    },
+    "allowedChanges": [],
+    "scripted": {
+      "main": [
+        {
+          "tool": "run_shell",
+          "arguments": {
+            "command": "npm test"
+          }
+        },
+        {
+          "text": "npm test could not run because the dependency is missing; no files were changed."
+        },
+        {
+          "text": "npm test could not run because the dependency is missing; no files were changed."
+        },
+        {
+          "text": "npm test could not run because the dependency is missing; no files were changed."
+        }
+      ]
+    },
+    "checks": {
+      "files": [
+        {
+          "path": "test.cjs",
+          "contains": "deecoo_eval_missing_dependency_20261022"
+        }
+      ],
+      "unchanged": [
+        "package.json",
+        "test.cjs"
+      ]
+    },
+    "expectedRun": {
+      "status": "failed",
+      "stoppedReason": "task_contract_invalid",
+      "verificationStatus": "failed",
+      "completionType": "blocked"
+    }
+  }
+}

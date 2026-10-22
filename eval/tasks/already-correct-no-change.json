@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 2,
+  "id": "already-correct-no-change",
+  "title": "Already Correct No Change",
+  "category": "no-change",
+  "task": "Fix src/add.js if needed; if already correct leave it unchanged. Run npm test.",
+  "execution": {
+    "permissionMode": "workspace-write",
+    "files": {
+      "package.json": "{\"private\":true,\"type\":\"module\",\"scripts\":{\"test\":\"node --test test.js\"}}\n",
+      "src/add.js": "export const add = (a,b) => a + b;\n",
+      "test.js": "import assert from 'node:assert/strict';import {add} from './src/add.js';assert.equal(add(2,3),5);assert.equal(add(-2,3),1);\n"
+    },
+    "allowedChanges": [],
+    "scripted": {
+      "main": [
+        {
+          "tool": "read_file",
+          "arguments": {
+            "path": "src/add.js"
+          }
+        },
+        {
+          "tool": "run_shell",
+          "arguments": {
+            "command": "npm test"
+          }
+        },
+        {
+          "text": "src/add.js already returns the sum; no changes were needed. npm test passed."
+        }
+      ]
+    },
+    "checks": {
+      "commands": [
+        {
+          "command": "node",
+          "args": [
+            "--input-type=module",
+            "-e",
+            "import assert from 'node:assert/strict';import {add} from './src/add.js';for(const [a,b] of [[2,3],[-3,1],[0,0]])assert.equal(add(a,b),a+b);"
+          ],
+          "name": "independent-behavior"
+        }
+      ],
+      "unchanged": [
+        "src/",
+        "test.js",
+        "package.json"
+      ]
+    },
+    "expectedRun": {
+      "completionType": "no-change"
+    }
+  }
+}

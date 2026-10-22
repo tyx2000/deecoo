@@ -14,7 +14,16 @@ import {
 import { EXIT_SIGNAL, isExitCommand, printSlashHelp } from "./registry.js";
 import { shortSessionId } from "../cli/sessionView.js";
 
-export async function runTopLevelCommand({ command, client, cwd, config, sessionStore, tools, settingsPath, startInteractive }) {
+export async function runTopLevelCommand({ command, client, cwd, config, sessionStore, tools, settingsPath, startInteractive, continueInterrupted }) {
+  if (command === "continue") {
+    const sessions = await sessionStore.listSessions();
+    for (const session of sessions) {
+      const checkpoint = await sessionStore.loadCheckpoint(session.id);
+      if (checkpoint) return continueInterrupted({ session, checkpoint });
+    }
+    console.log("No interrupted task checkpoint for this project.");
+    return;
+  }
   if (command === "model") {
     await selectModel({ client, config, settingsPath });
     return;
@@ -104,6 +113,12 @@ export async function runSlashCommand({ command, client, config, sessionStore, t
   if (command === "/eval") {
     await showEval({ sessionStore, session });
     return;
+  }
+
+  if (command === "/continue") {
+    const checkpoint = session ? await sessionStore.loadCheckpoint(session.id) : undefined;
+    if (!checkpoint) { console.log("No interrupted task checkpoint for this conversation."); return; }
+    return { kind: "continue-task", checkpoint };
   }
 
   if (command === "/new") {

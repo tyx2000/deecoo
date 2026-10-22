@@ -3,6 +3,7 @@
 // captured to a fixture and replayed with no side effects for golden-transcript regression.
 
 import { createHash } from "node:crypto";
+import { createReplayEntries } from "../harness/replayEntries.js";
 
 export function toolCallKey(name, args) {
   return name + "::" + createHash("sha256").update(stableStringify(args ?? {})).digest("hex").slice(0, 16);
@@ -24,18 +25,14 @@ export function createRecordingTools(tools, fixture = []) {
 // Replay tool results from a fixture with no real execution. Falls back to queue order when a
 // key is not found (strict throws instead).
 export function createReplayTools(fixture = [], { schemas = [], strict = true } = {}) {
-  const byKey = new Map();
-  const queue = [...fixture];
-  for (const entry of fixture) {
-    if (entry?.key && !byKey.has(entry.key)) byKey.set(entry.key, entry.result);
-  }
+  const entries = createReplayEntries(fixture, "key");
 
   const replayExecute = async (name, args) => {
     const key = toolCallKey(name, args);
-    if (byKey.has(key)) return byKey.get(key);
+    const match = entries.take(key, { fallback: !strict });
+    if (match) return match.result;
     // Strict replay is keyed only — an unmatched call is a miss, never a wrong queued result.
     if (strict) return { ok: false, error: "No tool replay fixture for " + name, code: "REPLAY_MISS" };
-    if (queue.length) return queue.shift().result;
     return { ok: true };
   };
 

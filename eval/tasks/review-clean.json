@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 2,
+  "id": "review-clean",
+  "title": "Review Clean",
+  "category": "review",
+  "task": "Review src/value.js for concrete arithmetic bugs; do not modify files.",
+  "execution": {
+    "permissionMode": "workspace-write",
+    "files": {
+      "package.json": "{\"type\":\"module\"}\n",
+      "src/value.js": "export const total = (quantity, price) => quantity * price;\n"
+    },
+    "allowedChanges": [],
+    "scripted": {
+      "main": [
+        {
+          "tool": "read_file",
+          "arguments": {
+            "path": "src/value.js"
+          }
+        },
+        {
+          "text": "{\"schema_version\": 1, \"review\": {\"target\": \"src/value.js\", \"base\": \"unknown\", \"project_context\": \"JavaScript\", \"mode\": \"quick\", \"lanes\": [\"code\"]}, \"findings\": [], \"open_questions\": [], \"test_gaps\": [], \"residual_risks\": []}"
+        }
+      ]
+    },
+    "checks": {
+      "commands": [
+        {
+          "command": "node",
+          "args": [
+            "--input-type=module",
+            "-e",
+            "import assert from 'node:assert/strict';import {total} from './src/value.js';for(const [a,b] of [[2,3],[0,8],[-2,4]])assert.equal(total(a,b),a*b);"
+          ],
+          "name": "independent-behavior"
+        }
+      ]
+    },
+    "expectedRun": {
+      "findingCount": 0
+    }
+  }
+}

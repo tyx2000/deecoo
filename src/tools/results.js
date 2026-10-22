@@ -6,6 +6,7 @@ export function toolExceptionResult(error) {
     error: error?.message ?? String(error),
   };
   if (error?.code) result.code = error.code;
+  if (error?.effects) result.effects = error.effects;
   if (isPathNotFoundError(error)) {
     result.recoverable = true;
     result.suggestion =

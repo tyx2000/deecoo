@@ -1,15 +1,17 @@
-import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, join, relative } from "node:path";
+import { dataContextMessage } from "../harness/contentTrust.js";
+import { createContextFileAccess } from "./fileAccess.js";
 
 const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", "coverage", ".next"]);
 const MAX_FILES = 400;
 const MAX_DEPTH = 4;
 
 export async function buildProjectIndex(cwd) {
+  const access = await createContextFileAccess(cwd);
   const files = [];
-  await walk(cwd, cwd, MAX_DEPTH, files);
+  await walk(cwd, cwd, MAX_DEPTH, files, access);
   files.sort();
-  const packageInfo = await readPackageInfo(cwd);
+  const packageInfo = await readPackageInfo(access);
   return {
     root: cwd,
     projectName: packageInfo?.name ?? basename(cwd),
@@ -24,13 +26,10 @@ export async function buildProjectIndex(cwd) {
   };
 }
 
-export async function buildProjectIndexMessages(cwd) {
-  const index = await buildProjectIndex(cwd);
+export async function buildProjectIndexMessages(cwd, { index } = {}) {
+  const current = index ?? await buildProjectIndex(cwd);
   return [
-    {
-      role: "system",
-      content: projectIndexContext(index),
-    },
+    dataContextMessage({ source: "project-index", scope: "project", kind: "project-index", reference: cwd, content: projectIndexContext(current) }),
   ];
 }
 
@@ -48,11 +47,11 @@ function projectIndexContext(index) {
   ].join("\n");
 }
 
-async function walk(root, current, depth, files) {
+async function walk(root, current, depth, files, access) {
   if (depth < 0 || files.length >= MAX_FILES) return;
   let entries;
   try {
-    entries = await readdir(current, { withFileTypes: true });
+    entries = await access.readDirectory(relative(root, current) || ".");
   } catch {
     return;
   }
@@ -62,16 +61,16 @@ async function walk(root, current, depth, files) {
     const full = join(current, entry.name);
     const rel = relative(root, full);
     if (entry.isDirectory()) {
-      await walk(root, full, depth - 1, files);
+      await walk(root, full, depth - 1, files, access);
     } else if (entry.isFile()) {
       files.push(rel);
     }
   }
 }
 
-async function readPackageInfo(cwd) {
+async function readPackageInfo(access) {
   try {
-    return JSON.parse(await readFile(join(cwd, "package.json"), "utf8"));
+    return JSON.parse(await access.readText("package.json"));
   } catch {
     return undefined;
   }

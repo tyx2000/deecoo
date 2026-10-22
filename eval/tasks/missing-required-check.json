@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 2,
+  "id": "missing-required-check",
+  "title": "Missing Required Check",
+  "category": "acceptance",
+  "task": "Run npm test and npm run check.",
+  "execution": {
+    "permissionMode": "workspace-write",
+    "files": {
+      "package.json": "{\"scripts\":{\"test\":\"node --version\",\"check\":\"node --version\"}}\n"
+    },
+    "allowedChanges": [],
+    "scripted": {
+      "main": [
+        {
+          "tool": "run_shell",
+          "arguments": {
+            "command": "npm run check"
+          }
+        },
+        {
+          "text": "npm run check passed; task complete."
+        },
+        {
+          "text": "npm run check passed; task complete."
+        },
+        {
+          "text": "npm run check passed; task complete."
+        }
+      ]
+    },
+    "checks": {
+      "files": [
+        {
+          "path": "package.json",
+          "contains": "test"
+        }
+      ]
+    },
+    "expectedRun": {
+      "status": "failed",
+      "stoppedReason": "task_contract_invalid",
+      "validationError": "required check"
+    }
+  }
+}

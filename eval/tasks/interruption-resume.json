@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 2,
+  "id": "interruption-resume",
+  "title": "Interruption Resume",
+  "category": "recovery",
+  "task": "Fix src/add.js to return a sum and run npm test.",
+  "execution": {
+    "permissionMode": "workspace-write",
+    "files": {
+      "package.json": "{\"private\":true,\"type\":\"module\",\"scripts\":{\"test\":\"node --test test.js\"}}\n",
+      "src/add.js": "export const add = (a,b) => a - b;\n",
+      "test.js": "import assert from 'node:assert/strict';import {add} from './src/add.js';assert.equal(add(2,3),5);assert.equal(add(-2,3),1);\n"
+    },
+    "allowedChanges": [
+      "src/add.js"
+    ],
+    "scripted": {
+      "main": [
+        {
+          "tool": "read_file",
+          "arguments": {
+            "path": "src/add.js"
+          }
+        },
+        {
+          "tool": "edit_file",
+          "arguments": {
+            "path": "src/add.js",
+            "search": "a - b",
+            "replace": "a + b"
+          }
+        },
+        {
+          "interrupt": true
+        }
+      ]
+    },
+    "checks": {
+      "commands": [
+        {
+          "command": "node",
+          "args": [
+            "--input-type=module",
+            "-e",
+            "import assert from 'node:assert/strict';import {add} from './src/add.js';assert.equal(add(-2,3),1);"
+          ],
+          "name": "independent-behavior"
+        }
+      ],
+      "unchanged": [
+        "test.js",
+        "package.json"
+      ]
+    },
+    "resumeScripted": {
+      "main": [
+        {
+          "tool": "read_file",
+          "arguments": {
+            "path": "src/add.js"
+          }
+        },
+        {
+          "tool": "run_shell",
+          "arguments": {
+            "command": "npm test"
+          }
+        },
+        {
+          "text": "Fixed src/add.js before interruption; inspected it after resuming. npm test passed."
+        }
+      ]
+    }
+  }
+}

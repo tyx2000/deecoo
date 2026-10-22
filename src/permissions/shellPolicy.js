@@ -1,4 +1,5 @@
 import { egressViolations } from "./egress.js";
+import { isSensitivePath } from "./sensitivePaths.js";
 
 const BLOCK_PATTERNS = [
   { pattern: /\bgit\s+reset\s+--hard\b/i, reason: "destructive git reset" },
@@ -11,17 +12,9 @@ const BLOCK_PATTERNS = [
 ];
 
 // Sensitive paths a workspace command should never need to touch. Reading them is the classic
-// credential-exfiltration step, so treat any reference as a hard block (the shell is not
-// sandboxed at the OS level, so this policy is the containment boundary).
+// credential-exfiltration step. These checks are defense in depth, not OS isolation.
 const SENSITIVE_PATH_PATTERNS = [
-  { pattern: /(^|[\s"'=:])(?:~?\/|\.\/|[\w./-]+\/)?\.env(?:\.[\w-]+)?\b/i, reason: "dotenv secret file access" },
-  { pattern: /(^|[\s"'=:])(?:~?\/|\.\/|[\w./-]+\/)?\.envrc\b/i, reason: "dotenv shell config access" },
-  { pattern: /(^|[\s"'=:])~?\/?\.ssh\b/i, reason: "SSH key/config access" },
-  { pattern: /(^|[\s"'=:])~?\/?\.aws\b/i, reason: "AWS credential access" },
-  { pattern: /(^|[\s"'=:])~?\/?\.gnupg\b/i, reason: "GPG key access" },
   { pattern: /\/etc\/(shadow|sudoers)\b/i, reason: "system credential file access" },
-  { pattern: /\bid_(rsa|ed25519|ecdsa|dsa)\b/i, reason: "private key access" },
-  { pattern: /(^|[\s"'=:])~?\/?\.(netrc|npmrc|pypirc|docker\/config\.json|kube\/config)\b/i, reason: "service credential file access" },
   // The agent's own credential store and environment are prime exfiltration targets — the env
   // is scrubbed for child processes, but the on-disk settings file and /proc must be blocked too.
   { pattern: /\.deecoo\/settings\.json/i, reason: "agent credential store access" },
@@ -51,6 +44,7 @@ export function classifyShellCommand(command, { egressAllowlist } = {}) {
   const blocked = [
     ...detectBlockedShellTokens(text),
     ...detectInteractiveShellCommands(text),
+    ...(shellTokens(text).some((token) => token.split(/[=:]/).some((path) => isSensitivePath(path.replace(/^[@<>]+/, "")))) ? ["sensitive path access"] : []),
     ...BLOCK_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason),
     ...SENSITIVE_PATH_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason),
     ...EGRESS_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason),
@@ -83,7 +77,7 @@ export function classifyShellCommand(command, { egressAllowlist } = {}) {
 }
 
 export function normalizeShellCommand(command) {
-  return String(command ?? "").trim().replace(/\s+/g, " ");
+  return String(command ?? "").trim();
 }
 
 const SECRET_ENV_PATTERN = /(^|_)(API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE[_-]?KEY|AUTH)($|_)/i;
@@ -176,7 +170,8 @@ function shellTokens(command) {
       continue;
     }
     if (char === "\\") {
-      escaped = true;
+      if (quote === "'") current += char;
+      else escaped = true;
       continue;
     }
     if (quote) {

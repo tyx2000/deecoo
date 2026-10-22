@@ -3,6 +3,7 @@ import { readPromptLine, selectOption } from "../terminal/select.js";
 
 export function createPrompter(autoApproveShell) {
   return async (question, options = {}) => {
+    throwIfAborted(options.signal);
     if (autoApproveShell && options.kind === "shell-command-approval") return true;
     if (
       (options.kind === "file-write-approval" || options.kind === "shell-command-approval") &&
@@ -22,10 +23,21 @@ export function createPrompter(autoApproveShell) {
         title: question,
         options: promptOptions,
         filterable: false,
+        signal: options.signal,
       });
+      throwIfAborted(options.signal);
       return selected?.value ?? "deny";
     }
-    const answer = await readPromptLine(formatActionPrompt(question) + " [y/N] ", []);
+    const answer = await readPromptLine(formatActionPrompt(question) + " [y/N] ", [], { signal: options.signal });
+    throwIfAborted(options.signal);
     return answer.trim().toLowerCase() === "y" || answer.trim().toLowerCase() === "yes";
   };
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  const error = new Error(signal.reason?.message ?? "Task interrupted.");
+  error.name = "AbortError";
+  error.code = "ABORT_ERR";
+  throw error;
 }

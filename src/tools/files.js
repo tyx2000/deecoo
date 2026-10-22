@@ -1,14 +1,15 @@
 import { createHash } from "node:crypto";
-import { link, lstat, mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { link, lstat, mkdir, open, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import {
   assertExistingWorkspacePath,
   assertSafePath,
   assertWorkspaceWriteParent,
-  DEFAULT_EXCLUDES,
+  isExcludedWorkspacePath,
+  isSensitivePath,
   isPathNotFoundError,
   pathNotFoundResult,
-  SENSITIVE_BASENAMES,
 } from "./pathPolicy.js";
 import { countLineChanges, countOccurrences, unifiedDiff } from "./textDiff.js";
 
@@ -43,9 +44,9 @@ async function walk(current, workspace, depth, files) {
   if (depth < 0) return;
   const entries = await readdir(current, { withFileTypes: true });
   for (const entry of entries) {
-    if (DEFAULT_EXCLUDES.has(entry.name) || SENSITIVE_BASENAMES.has(entry.name)) continue;
     const full = join(current, entry.name);
     const rel = relative(workspace, full);
+    if (isExcludedWorkspacePath(rel) || isSensitivePath(rel)) continue;
     files.push(entry.isDirectory() ? `${rel}/` : rel);
     if (entry.isDirectory()) {
       await walk(full, workspace, depth - 1, files);
@@ -55,47 +56,70 @@ async function walk(current, workspace, depth, files) {
 
 export async function readWorkspaceFile(workspace, getRealWorkspace, args, permissionState) {
   if (!args.path) return { ok: false, error: "path is required" };
+  let options;
+  try { options = normalizeReadRange(args); } catch (error) { return { ok: false, code: "INVALID_READ_RANGE", error: error.message }; }
   const path = assertSafePath(workspace, args.path);
-  const maxBytes = Math.min(Number(args.maxBytes ?? 20000), 100000);
   const rel = relative(workspace, path);
-  const cacheKey = `${rel}:${maxBytes}`;
-  const cached = permissionState.readCache.get(cacheKey);
-  if (cached) {
-    return {
-      ...cached,
-      cached: true,
-      activity: {
-        ...cached.activity,
-        label: "Read a file",
-        detail: `${cached.activity.detail} cached`,
-      },
-    };
-  }
-  let info;
-  try {
-    info = await assertExistingWorkspacePath(workspace, getRealWorkspace, path);
-  } catch (error) {
-    if (isPathNotFoundError(error)) {
-      return pathNotFoundResult(workspace, path, args.path, "file");
-    }
-    throw error;
-  }
-  if (!info.isFile()) return { ok: false, error: "path is not a file" };
+  const cacheKey = `${rel}:${options.rangeRequested ? JSON.stringify(options) : options.maxBytes}`;
+  const metrics = permissionState.contextReadMetrics ??= { reads: 0, cacheHits: 0, cacheMisses: 0, invalidations: 0, bytesRead: 0 };
+  metrics.reads += 1;
   let content;
+  let contentHash;
   try {
-    content = await readFile(path, "utf8");
+    const info = await assertExistingWorkspacePath(workspace, getRealWorkspace, path);
+    if (!info.isFile()) return { ok: false, error: "path is not a file" };
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.dev !== info.dev || opened.ino !== info.ino) throw new Error("File changed before reading: " + rel);
+      await assertExistingWorkspacePath(workspace, getRealWorkspace, path);
+      const bytes = await handle.readFile();
+      contentHash = createHash("sha256").update(bytes).digest("hex");
+      try { new TextDecoder("utf8", { fatal: true }).decode(bytes); } catch { return { ok: false, code: "NON_UTF8_FILE", error: "read_file supports UTF-8 text files.", path: rel, contentHash, version: contentHash }; }
+      content = bytes.toString("utf8");
+      const after = await handle.stat();
+      const current = await assertExistingWorkspacePath(workspace, getRealWorkspace, path);
+      if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || current.dev !== opened.dev || current.ino !== opened.ino) {
+        return { ok: false, code: "FILE_CHANGED_DURING_READ", error: "File changed while reading; retry the range.", path: rel, recoverable: true };
+      }
+    } finally { await handle.close(); }
   } catch (error) {
-    if (isPathNotFoundError(error)) {
-      return pathNotFoundResult(workspace, path, args.path, "file");
-    }
+    if (isPathNotFoundError(error)) { deleteReadCache(permissionState, rel); return pathNotFoundResult(workspace, path, args.path, "file"); }
     throw error;
   }
-  const result = cachedReadResult(rel, content, maxBytes);
+  metrics.bytesRead += Buffer.byteLength(content, "utf8");
+  const version = contentHash;
+  const cached = permissionState.readCache.get(cacheKey);
+  if (cached?.contentHash === version) {
+    metrics.cacheHits += 1;
+    return { ...cached, cached: true, cacheValidatedBy: "content-sha256", activity: { ...cached.activity, detail: cached.activity.detail + " cached" } };
+  }
+  const prior = [...permissionState.readCache].some(([key, value]) => key.startsWith(`${rel}:`) && value.contentHash !== version);
+  if (prior) { deleteReadCache(permissionState, rel); metrics.invalidations += 1; }
+  metrics.cacheMisses += 1;
+  const result = cachedReadResult(rel, content, options, contentHash);
   permissionState.readCache.set(cacheKey, result);
   return result;
 }
 
-export async function editFile(workspace, getRealWorkspace, args, prompter, permissionState) {
+export function getFileReadMetrics(permissionState) {
+  return { ...(permissionState.contextReadMetrics ?? { reads: 0, cacheHits: 0, cacheMisses: 0, invalidations: 0, bytesRead: 0 }) };
+}
+
+export function normalizeReadRange(args = {}) {
+  const integer = (value, name, min) => { const number = Number(value); if (!Number.isInteger(number) || number < min) throw new Error(name + " must be an integer >= " + min); return number; };
+  const maxBytes = Math.min(integer(args.maxBytes ?? 20000, "maxBytes", 1), 100000);
+  const byLine = args.startLine !== undefined || args.endLine !== undefined;
+  const byOffset = args.offset !== undefined || args.limit !== undefined;
+  if (byLine && byOffset) throw new Error("startLine/endLine cannot be combined with offset/limit");
+  const startLine = byOffset ? integer(args.offset ?? 0, "offset", 0) + 1 : integer(args.startLine ?? 1, "startLine", 1);
+  const endLine = byOffset && args.limit !== undefined ? startLine + integer(args.limit, "limit", 1) - 1 : args.endLine === undefined ? undefined : integer(args.endLine, "endLine", 1);
+  if (endLine !== undefined && endLine < startLine) throw new Error("endLine must be >= startLine");
+  return { maxBytes, startLine, endLine, rangeRequested: byLine || byOffset };
+}
+
+export async function editFile(workspace, getRealWorkspace, args, prompter, permissionState, signal) {
+  throwIfAborted(signal);
   if (!args.path) return { ok: false, error: "path is required" };
   if (typeof args.search !== "string") return { ok: false, error: "search is required" };
   if (typeof args.replace !== "string") return { ok: false, error: "replace is required" };
@@ -127,6 +151,7 @@ export async function editFile(workspace, getRealWorkspace, args, prompter, perm
     action: "Apply edit",
     prompter,
     permissionState,
+    signal,
   });
   if (!allowed) return { ok: false, error: "User denied file edit." };
 
@@ -143,6 +168,7 @@ export async function editFile(workspace, getRealWorkspace, args, prompter, perm
   const finalContent = current.content.replace(args.search, args.replace);
   const finalStats = countLineChanges(current.content, finalContent);
 
+  throwIfAborted(signal);
   await writeFile(path, finalContent, "utf8");
   updateReadCache(permissionState, rel, finalContent);
   return {
@@ -237,7 +263,8 @@ export async function proposeStructuredPatchSet(workspace, getRealWorkspace, arg
   };
 }
 
-export async function applyStructuredPatch(workspace, getRealWorkspace, args, prompter, permissionState) {
+export async function applyStructuredPatch(workspace, getRealWorkspace, args, prompter, permissionState, signal) {
+  throwIfAborted(signal);
   if (!args.path) return { ok: false, error: "path is required" };
   if (!Array.isArray(args.hunks) || args.hunks.length === 0) return { ok: false, error: "hunks must be a non-empty array" };
 
@@ -266,6 +293,7 @@ export async function applyStructuredPatch(workspace, getRealWorkspace, args, pr
     action: "Apply structured patch",
     prompter,
     permissionState,
+    signal,
   });
   if (!allowed) return { ok: false, error: "User denied file patch." };
 
@@ -281,6 +309,7 @@ export async function applyStructuredPatch(workspace, getRealWorkspace, args, pr
   }
   const finalStats = countLineChanges(current.content, finalPlan.content);
 
+  throwIfAborted(signal);
   await writeFile(path, finalPlan.content, "utf8");
   updateReadCache(permissionState, rel, finalPlan.content);
   return {
@@ -300,7 +329,8 @@ export async function applyStructuredPatch(workspace, getRealWorkspace, args, pr
   };
 }
 
-export async function applyStructuredPatchSet(workspace, getRealWorkspace, args, prompter, permissionState) {
+export async function applyStructuredPatchSet(workspace, getRealWorkspace, args, prompter, permissionState, signal) {
+  throwIfAborted(signal);
   const planned = await planPatchSet(workspace, getRealWorkspace, args);
   if (!planned.ok) return planned;
   const { plans } = planned;
@@ -313,6 +343,7 @@ export async function applyStructuredPatchSet(workspace, getRealWorkspace, args,
     action: "Apply structured patch set",
     prompter,
     permissionState,
+    signal,
   });
   if (!allowed) return { ok: false, error: "User denied file patch set." };
 
@@ -328,8 +359,10 @@ export async function applyStructuredPatchSet(workspace, getRealWorkspace, args,
   const written = [];
   for (const plan of freshPlans) {
     try {
-      await applyPatchSetPlan(plan);
+      throwIfAborted(signal);
+      await applyPatchSetPlan(plan, signal);
       written.push(plan);
+      throwIfAborted(signal);
       updateCacheForPatchSetPlan(permissionState, plan);
     } catch (error) {
       return await rollbackPatchSetWrites({ written, permissionState, cause: error });
@@ -341,7 +374,7 @@ export async function applyStructuredPatchSet(workspace, getRealWorkspace, args,
     ok: true,
     filesChanged: freshPlans.length,
     hunksApplied: freshPlans.reduce((total, plan) => total + (plan.hunks?.length ?? 0), 0),
-    paths: freshPlans.map((plan) => plan.rel),
+    paths: [...new Set(freshPlans.flatMap((plan) => [plan.fromRel, plan.rel].filter(Boolean)))],
     additions: totals.additions,
     deletions: totals.deletions,
     activity: {
@@ -397,7 +430,8 @@ function patchSetPlanPreview(plan) {
   };
 }
 
-export async function applyJsonPatch(workspace, getRealWorkspace, args, prompter, permissionState) {
+export async function applyJsonPatch(workspace, getRealWorkspace, args, prompter, permissionState, signal) {
+  throwIfAborted(signal);
   if (!args.path) return { ok: false, error: "path is required" };
   if (!Array.isArray(args.operations) || args.operations.length === 0) {
     return { ok: false, error: "operations must be a non-empty array" };
@@ -427,6 +461,7 @@ export async function applyJsonPatch(workspace, getRealWorkspace, args, prompter
     action: "Apply JSON patch",
     prompter,
     permissionState,
+    signal,
   });
   if (!allowed) return { ok: false, error: "User denied JSON patch." };
 
@@ -442,6 +477,7 @@ export async function applyJsonPatch(workspace, getRealWorkspace, args, prompter
   }
   const finalStats = countLineChanges(current.content, finalPlan.content);
 
+  throwIfAborted(signal);
   await writeFile(path, finalPlan.content, "utf8");
   updateReadCache(permissionState, rel, finalPlan.content);
   return {
@@ -493,6 +529,7 @@ async function rollbackPatchSetWrites({ written, permissionState, cause }) {
     code: rolledBack ? "PATCH_SET_WRITE_FAILED" : "PATCH_SET_ROLLBACK_FAILED",
     rolledBack,
     filesRolledBack: rolledBack ? written.map((plan) => plan.rel) : [],
+    uncertainPaths: rolledBack ? [] : [...new Set(written.flatMap((plan) => [plan.fromRel, plan.rel].filter(Boolean)))],
     rollbackErrors,
   };
 }
@@ -612,16 +649,22 @@ async function planPatchSetMove({ workspace, getRealWorkspace, file, index, seen
   };
 }
 
-async function applyPatchSetPlan(plan) {
+async function applyPatchSetPlan(plan, signal) {
+  throwIfAborted(signal);
   if (plan.action === "update") {
     await assertPatchSetUpdateStillCurrent(plan);
+    throwIfAborted(signal);
     await writeFile(plan.path, plan.content, "utf8");
   } else if (plan.action === "create") {
+    throwIfAborted(signal);
     await mkdir(dirname(plan.path), { recursive: true });
+    throwIfAborted(signal);
     await writeFile(plan.path, plan.content, { encoding: "utf8", flag: "wx" });
   } else if (plan.action === "move") {
     await assertPatchSetMoveStillCurrent(plan);
+    throwIfAborted(signal);
     await mkdir(dirname(plan.path), { recursive: true });
+    throwIfAborted(signal);
     await link(plan.fromPath, plan.path);
     try {
       await unlink(plan.fromPath);
@@ -690,7 +733,8 @@ function restoreCacheForPatchSetPlan(permissionState, plan) {
   }
 }
 
-export async function writeWorkspaceFile(workspace, getRealWorkspace, args, prompter, permissionState) {
+export async function writeWorkspaceFile(workspace, getRealWorkspace, args, prompter, permissionState, signal) {
+  throwIfAborted(signal);
   if (!args.path) return { ok: false, error: "path is required" };
   if (typeof args.content !== "string") return { ok: false, error: "content is required" };
   if (args.expectedContent !== undefined && typeof args.expectedContent !== "string") {
@@ -728,6 +772,7 @@ export async function writeWorkspaceFile(workspace, getRealWorkspace, args, prom
     action: existed ? "Overwrite" : "Create",
     prompter,
     permissionState,
+    signal,
   });
   if (!allowed) return { ok: false, error: "User denied file write." };
 
@@ -748,8 +793,10 @@ export async function writeWorkspaceFile(workspace, getRealWorkspace, args, prom
   }
   const finalStats = countLineChanges(finalOriginal, args.content);
 
+  throwIfAborted(signal);
   await mkdir(dirname(path), { recursive: true });
   try {
+    throwIfAborted(signal);
     await writeFile(path, args.content, { encoding: "utf8", flag: existed ? "w" : "wx" });
   } catch (error) {
     if (!existed && error?.code === "EEXIST") {
@@ -1006,7 +1053,8 @@ function sameLines(left, right) {
   return left.length === right.length && left.every((line, index) => line === right[index]);
 }
 
-async function approveFileWrite({ rel, action, prompter, permissionState }) {
+async function approveFileWrite({ rel, action, prompter, permissionState, signal }) {
+  throwIfAborted(signal);
   if (permissionState.mode === "read-only") return false;
   if (permissionState.mode === "workspace-write") return true;
   if (permissionState.mode === "ask-once" && permissionState.fileWriteApprovedForTask) return true;
@@ -1015,7 +1063,8 @@ async function approveFileWrite({ rel, action, prompter, permissionState }) {
     permissionState.mode === "ask-once"
       ? `${action} ${rel}? This will allow further file edits for this task.`
       : `${action} ${rel}?`;
-  const decision = await prompter(question, { kind: "file-write-approval" });
+  const decision = await prompter(question, { kind: "file-write-approval", signal });
+  throwIfAborted(signal);
   if (decision === "always") {
     permissionState.mode = "workspace-write";
     permissionState.fileWriteApprovedForTask = true;
@@ -1030,31 +1079,45 @@ async function approveFileWrite({ rel, action, prompter, permissionState }) {
 
 function updateReadCache(permissionState, rel, content) {
   const prefix = `${rel}:`;
-  for (const [key] of permissionState.readCache) {
+  for (const [key, value] of permissionState.readCache) {
     if (!key.startsWith(prefix)) continue;
-    const maxBytes = Number(key.slice(prefix.length));
-    permissionState.readCache.set(key, cachedReadResult(rel, content, maxBytes));
+    const options = value?.readRange ?? normalizeReadRange({ maxBytes: Number(key.slice(prefix.length)) || 20000 });
+    permissionState.readCache.set(key, cachedReadResult(rel, content, options));
   }
 }
 
 function deleteReadCache(permissionState, rel) {
   const prefix = `${rel}:`;
-  for (const [key] of permissionState.readCache) {
-    if (key.startsWith(prefix)) permissionState.readCache.delete(key);
-  }
+  for (const [key] of permissionState.readCache) if (key.startsWith(prefix)) permissionState.readCache.delete(key);
 }
 
-function cachedReadResult(rel, content, maxBytes) {
-  return {
-    ok: true,
-    path: rel,
-    truncated: Buffer.byteLength(content, "utf8") > maxBytes,
-    content: content.slice(0, maxBytes),
-    activity: {
-      kind: "read",
-      label: "Read a file",
-      target: rel,
-      detail: `${content.split(/\r?\n/).length} lines`,
-    },
-  };
+function cachedReadResult(rel, content, options, actualHash) {
+  if (typeof options === "number") options = normalizeReadRange({ maxBytes: options });
+  const lines = content.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  const endLine = Math.min(options.endLine ?? lines.length, lines.length);
+  const selected = lines.slice(options.startLine - 1, endLine).join("");
+  const bytes = Buffer.from(selected, "utf8");
+  const truncated = bytes.length > options.maxBytes;
+  let bounded = bytes.subarray(0, options.maxBytes);
+  // Do not return a replacement character for a UTF-8 code point split by the cap.
+  while (bounded.length) { try { new TextDecoder("utf8", { fatal: true }).decode(bounded); break; } catch { bounded = bounded.subarray(0, -1); } }
+  const visible = bounded.toString("utf8");
+  const contentHash = actualHash ?? sha256Hex(content);
+  const returnedLines = visible.match(/[^\n]*\n|[^\n]+$/g)?.length ?? 0;
+  return { ok: true, path: rel, content: visible, truncated,
+    sourceComplete: !options.rangeRequested && !truncated,
+    contentHash, version: contentHash, totalLines: lines.length, totalBytes: Buffer.byteLength(content, "utf8"),
+    startLine: options.startLine, endLine: returnedLines ? options.startLine + returnedLines - 1 : options.startLine - 1,
+    rangeComplete: !truncated, nextStartLine: truncated ? options.startLine + Math.max(0, returnedLines - (visible.endsWith("\n") ? 0 : 1)) : endLine < lines.length ? endLine + 1 : undefined,
+    readRange: options,
+    activity: { kind: "read", label: "Read a file", target: rel,
+      detail: `${returnedLines} of ${lines.length} lines${options.rangeRequested ? " (range)" : ""}` } };
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  const error = new Error(signal.reason?.message ?? "Task interrupted.");
+  error.name = "AbortError";
+  error.code = "ABORT_ERR";
+  throw error;
 }

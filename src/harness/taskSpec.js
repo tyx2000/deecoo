@@ -1,18 +1,25 @@
-export function buildTaskSpec({ task, cwd, coordination, activeSkills = [] }) {
+import { inferTaskIntent } from "./taskIntent.js";
+import { buildAcceptance } from "./acceptance.js";
+
+export function buildTaskSpec({ task, cwd, coordination, activeSkills = [], mode, acceptance, requiredChecks }) {
   const text = String(task ?? "").trim();
+  const contract = inferTaskIntent(text, { mode });
+  const outcome = buildAcceptance({ task: text, intent: contract, acceptance, requiredChecks });
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    acceptance: outcome,
+    requiredChecks: outcome.requiredChecks,
     goal: text,
     cwd,
-    requestType: coordination?.requestType ?? "general",
+    ...contract,
     complexity: coordination?.complex ? "complex" : "simple",
     constraints: {
-      reviewOnly: coordination?.requestType === "review",
+      reviewOnly: !contract.mayWrite,
       activeSkills: activeSkills.map((skill) => skill.name || skill.id).filter(Boolean),
     },
     phases: (coordination?.phases ?? []).map((phase) => phase.name),
     riskDomains: (coordination?.riskDomains ?? []).map((domain) => domain.name),
-    successCriteria: successCriteria(text, coordination?.requestType),
+    successCriteria: successCriteria(contract),
   };
 }
 
@@ -27,7 +34,7 @@ export function taskSpecMessage(taskSpec) {
   };
 }
 
-function successCriteria(task, requestType) {
+function successCriteria({ requestType, requiresCodeChange, mayWrite }) {
   if (requestType === "review") {
     return [
       "Inspect relevant code before judging.",
@@ -35,7 +42,7 @@ function successCriteria(task, requestType) {
       "Do not edit files.",
     ];
   }
-  if (requestType === "edit" || requestType === "debug") {
+  if (requiresCodeChange) {
     return [
       "Make minimal scoped changes.",
       "Run or explain relevant verification.",
@@ -45,5 +52,5 @@ function successCriteria(task, requestType) {
   if (requestType === "command") {
     return ["Run the requested command or explain why it cannot be run.", "Report important output and exit status."];
   }
-  return ["Answer the user request using inspected context when code facts are needed."];
+  return ["Answer the user request using inspected context when code facts are needed.", ...(!mayWrite ? ["Do not edit files or run commands with potential side effects."] : [])];
 }

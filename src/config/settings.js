@@ -1,4 +1,4 @@
-import { access, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, extname, resolve } from "node:path";
 import { normalizeShellCommand } from "../permissions/shellPolicy.js";
@@ -10,7 +10,7 @@ import {
   providerDefaults,
 } from "./providers.js";
 
-export async function loadSettingsEnv({ settingsPath } = {}) {
+export async function loadSettingsEnv({ settingsPath, workspace = process.cwd() } = {}) {
   const path = resolveSettingsPath(settingsPath ?? process.env.DEECOO_SETTINGS_PATH);
 
   try {
@@ -22,7 +22,7 @@ export async function loadSettingsEnv({ settingsPath } = {}) {
       env: {},
       activeProvider: "deepseek",
       providers: defaultProviderSettings(),
-      permissions: normalizeSettingsPermissions({}),
+      permissions: await resolveShellPermissions({}, { workspace }),
     };
   }
 
@@ -37,7 +37,7 @@ export async function loadSettingsEnv({ settingsPath } = {}) {
     env: operationalSettingsEnv(env),
     activeProvider,
     providers: normalizeSettingsProviders(parsed, env),
-    permissions: normalizeSettingsPermissions(parsed),
+    permissions: await resolveShellPermissions(parsed.permissions, { workspace }),
   };
 }
 
@@ -93,33 +93,39 @@ export async function writeProviderModel({ settingsPath, provider, model }) {
   return { path, activeProvider: name, model: next.providers[name].model };
 }
 
-export async function addApprovedShellCommand({ settingsPath, command }) {
+export const SHELL_APPROVAL_POLICY_VERSION = 2;
+
+export async function addApprovedShellCommand({ settingsPath, command, workspace = process.cwd(), scope = "workspace" }) {
   const normalizedCommand = normalizeShellCommand(command);
   if (!normalizedCommand) throw new Error("command is required");
+  const identity = await approvalIdentity({ workspace, scope });
 
   const { path, shell } = await updateShellPermissions({
     settingsPath,
     mutate: (currentShell) => {
-      const approvedCommands = new Set(Array.isArray(currentShell.approvedCommands) ? currentShell.approvedCommands : []);
-      approvedCommands.add(normalizedCommand);
-      return { ...currentShell, approvedCommands: [...approvedCommands].sort() };
+      const approval = { ...identity, command: normalizedCommand };
+      const approvals = currentShell.approvals.filter((entry) => !sameApproval(entry, approval));
+      return { ...currentShell, approvals: [...approvals, approval] };
     },
   });
-  return { path, approvedCommands: shell.approvedCommands };
+  const permissions = await resolveShellPermissions({ shell }, { workspace });
+  return { path, ...permissions.shell };
 }
 
-export async function setAutoApproveAllShellCommands({ settingsPath }) {
-  const { path } = await updateShellPermissions({
+export async function setAutoApproveAllShellCommands({ settingsPath, workspace = process.cwd(), scope = "workspace" }) {
+  const identity = await approvalIdentity({ workspace, scope });
+  const { path, shell } = await updateShellPermissions({
     settingsPath,
-    mutate: (currentShell) => ({ ...currentShell, autoApproveAll: true }),
+    mutate: (currentShell) => ({ ...currentShell, autoApprovals: [...currentShell.autoApprovals.filter((entry) => !sameScope(entry, identity)), identity] }),
   });
-  return { path, autoApproveAll: true };
+  const permissions = await resolveShellPermissions({ shell }, { workspace });
+  return { path, ...permissions.shell };
 }
 
 export async function resetShellApprovals({ settingsPath }) {
   const { path } = await updateShellPermissions({
     settingsPath,
-    mutate: () => ({ approvedCommands: [], autoApproveAll: false }),
+    mutate: () => emptyShellPermissions(),
   });
   return { path, approvedCommands: [], autoApproveAll: false };
 }
@@ -127,7 +133,7 @@ export async function resetShellApprovals({ settingsPath }) {
 async function updateShellPermissions({ settingsPath, mutate }) {
   const path = resolveSettingsPath(settingsPath ?? process.env.DEECOO_SETTINGS_PATH);
   const existing = await readSettingsFile(path);
-  const currentShell = existing.permissions?.shell && typeof existing.permissions.shell === "object" ? existing.permissions.shell : {};
+  const currentShell = normalizeShellStorage(existing.permissions?.shell);
   const shell = mutate(currentShell);
   const migrated = mergeSettings(existing, {});
 
@@ -284,19 +290,54 @@ function normalizeSettingsEnv(settings) {
   return env;
 }
 
-function normalizeSettingsPermissions(settings) {
-  const approvedCommands = Array.isArray(settings.permissions?.shell?.approvedCommands)
-    ? settings.permissions.shell.approvedCommands.map(normalizeShellCommand).filter(Boolean)
-    : [];
-  const autoApproveAll = settings.permissions?.shell?.autoApproveAll === true;
+// Legacy unscoped grants are exposed for migration, never made effective automatically.
+// Call this again after resolving a task's cwd, rather than reusing another workspace's view.
+export async function resolveShellPermissions(permissions, { workspace = process.cwd() } = {}) {
+  const canonicalWorkspace = await canonicalWorkspacePath(workspace);
+  const shell = normalizeShellStorage(permissions?.shell);
+  const applies = (entry) => entry.scope === "global" || entry.workspace === canonicalWorkspace;
+  return { shell: {
+    ...shell,
+    workspace: canonicalWorkspace,
+    approvedCommands: [...new Set(shell.approvals.filter(applies).map((entry) => entry.command))],
+    autoApproveAll: shell.autoApprovals.some(applies),
+    legacyPending: shell.legacy.approvedCommands.length > 0 || shell.legacy.autoApproveAll,
+  } };
+}
 
+function emptyShellPermissions() {
+  return { policyVersion: SHELL_APPROVAL_POLICY_VERSION, approvals: [], autoApprovals: [], legacy: { approvedCommands: [], autoApproveAll: false } };
+}
+
+function normalizeShellStorage(source = {}) {
+  const current = source && typeof source === "object" ? source : {};
+  const versioned = current.policyVersion === SHELL_APPROVAL_POLICY_VERSION;
+  const validScope = (entry) => entry && entry.version === SHELL_APPROVAL_POLICY_VERSION
+    && (entry.scope === "global" || (entry.scope === "workspace" && typeof entry.workspace === "string" && entry.workspace.length > 0));
+  const legacy = current.legacy && typeof current.legacy === "object" ? current.legacy : (!versioned ? current : {});
   return {
-    shell: {
-      approvedCommands: [...new Set(approvedCommands)],
-      autoApproveAll,
+    policyVersion: SHELL_APPROVAL_POLICY_VERSION,
+    approvals: versioned && Array.isArray(current.approvals) ? current.approvals.filter((entry) => validScope(entry) && typeof entry.command === "string" && normalizeShellCommand(entry.command)).map((entry) => ({ ...entry, command: normalizeShellCommand(entry.command) })) : [],
+    autoApprovals: versioned && Array.isArray(current.autoApprovals) ? current.autoApprovals.filter(validScope) : [],
+    legacy: {
+      approvedCommands: Array.isArray(legacy.approvedCommands) ? [...new Set(legacy.approvedCommands.map(normalizeShellCommand).filter(Boolean))] : [],
+      autoApproveAll: legacy.autoApproveAll === true,
     },
   };
 }
+
+async function canonicalWorkspacePath(workspace) {
+  const path = resolve(workspace);
+  try { return await realpath(path); } catch { return path; }
+}
+
+async function approvalIdentity({ workspace, scope }) {
+  if (!["workspace", "global"].includes(scope)) throw new Error("approval scope must be workspace or global");
+  return { version: SHELL_APPROVAL_POLICY_VERSION, scope, ...(scope === "workspace" ? { workspace: await canonicalWorkspacePath(workspace) } : {}) };
+}
+
+function sameScope(left, right) { return left.scope === right.scope && left.workspace === right.workspace; }
+function sameApproval(left, right) { return sameScope(left, right) && left.command === right.command; }
 
 function isSupportedSettingsKey(key) {
   return isProviderApiKey(key) || key.startsWith("DEECOO_");

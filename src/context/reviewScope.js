@@ -1,18 +1,14 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { execReadOnlyGit } from "../permissions/gitPolicy.js";
 import { isScorActive } from "../skills/scor.js";
+import { dataContextMessage } from "../harness/contentTrust.js";
 
-const execFileAsync = promisify(execFile);
 const MAX_SCOPE_FILES = 80;
 
 export async function buildReviewScopeMessages({ cwd, task, activeSkills, requestType }) {
   if (!isScorActive(activeSkills) || requestType !== "review") return [];
   const scope = await resolveReviewScope({ cwd, task });
   return [
-    {
-      role: "system",
-      content: reviewScopeContext(scope),
-    },
+    dataContextMessage({ source: scope.source, scope: "project", kind: "review-scope", reference: cwd, content: reviewScopeContext(scope) }),
   ];
 }
 
@@ -88,7 +84,7 @@ async function gitStatusNames(cwd) {
 
 async function safeGit(cwd, args) {
   try {
-    return await execFileAsync("git", args, { cwd, timeout: 5000, maxBuffer: 1024 * 1024 });
+    return await execReadOnlyGit(cwd, args, { timeout: 5000, maxBuffer: 1024 * 1024 });
   } catch {
     return { stdout: "" };
   }

@@ -1,5 +1,6 @@
 export const SLASH_COMMANDS = sortSlashCommands([
   { label: "/resume Select previous project conversation", value: "/resume" },
+  { label: "/continue Continue interrupted task from checkpoint", value: "/continue" },
   { label: "/delete Delete previous project conversation", value: "/delete" },
   { label: "/eval   Score latest run audit with matching eval case", value: "/eval" },
   { label: "/export Export previous project conversation", value: "/export" },
@@ -15,7 +16,7 @@ export const SLASH_COMMANDS = sortSlashCommands([
   { label: "/exit   Leave Deecoo", value: "/exit" },
 ]);
 
-export const APP_COMMANDS = new Set(["model", "resume", "delete", "eval", "export", "permissions", "skills", "trace", "theme", "usage", "help"]);
+export const APP_COMMANDS = new Set(["model", "resume", "continue", "delete", "eval", "export", "permissions", "skills", "trace", "theme", "usage", "help"]);
 export const EXIT_SIGNAL = Symbol("exit");
 
 export function isExitCommand(value) {

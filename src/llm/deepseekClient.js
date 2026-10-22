@@ -1,3 +1,5 @@
+import { assertCompleteToolCalls, incompleteResponse } from "./streamCompletion.js";
+
 export function createDeepSeekClient(config) {
   return createOpenAICompatibleClient(config, { provider: "DeepSeek", supportsBalance: true });
 }
@@ -76,7 +78,9 @@ async function requestChatCompletionStream(config, request, handlers) {
     } catch (error) {
       lastError = error;
       if (isExternalAbort(handlers.signal) || emittedContent || attempt >= attempts || !shouldRetry(error)) break;
-      await delay(backoffMs(attempt));
+      const delayMs = backoffMs(attempt);
+      (typeof handlers !== "undefined" ? handlers : options).onRuntimeEvent?.({ type: "model-retry", attempt, delayMs, status: error.status });
+      await delay(delayMs);
     } finally {
       clearTimeout(timeout);
       removeAbortListener();
@@ -91,6 +95,7 @@ async function readChatCompletionSse(body, handlers) {
   const decoder = new TextDecoder();
   const message = { role: "assistant", content: "", tool_calls: [] };
   let finishReason;
+  let sawDone = false;
   let usage;
   let buffer = "";
 
@@ -101,7 +106,10 @@ async function readChatCompletionSse(body, handlers) {
     const events = consumeSseEvents(buffer);
     buffer = events.rest;
     for (const event of events.items) {
-      if (event === "[DONE]") continue;
+      if (event === "[DONE]") {
+        sawDone = true;
+        continue;
+      }
       const parsed = JSON.parse(event);
       if (parsed.usage) usage = parsed.usage;
       const choice = parsed.choices?.[0];
@@ -113,7 +121,10 @@ async function readChatCompletionSse(body, handlers) {
 
   buffer += decoder.decode();
   for (const event of consumeSseEvents(`${buffer}\n\n`).items) {
-    if (event === "[DONE]") continue;
+    if (event === "[DONE]") {
+      sawDone = true;
+      continue;
+    }
     const parsed = JSON.parse(event);
     if (parsed.usage) usage = parsed.usage;
     const choice = parsed.choices?.[0];
@@ -122,6 +133,10 @@ async function readChatCompletionSse(body, handlers) {
     applyChatDelta(message, choice.delta ?? {}, handlers);
   }
 
+  if (!sawDone || !finishReason) {
+    throw incompleteResponse("Stream ended before its completion marker and finish reason.", usage);
+  }
+  assertCompleteToolCalls(message.tool_calls, usage);
   if (message.tool_calls.length === 0) delete message.tool_calls;
   return {
     choices: [{ message, finish_reason: finishReason }],
@@ -203,7 +218,9 @@ async function requestJson(config, path, init, options = {}) {
     } catch (error) {
       lastError = error;
       if (isExternalAbort(options.signal) || attempt >= attempts || !shouldRetry(error)) break;
-      await delay(backoffMs(attempt));
+      const delayMs = backoffMs(attempt);
+      (typeof handlers !== "undefined" ? handlers : options).onRuntimeEvent?.({ type: "model-retry", attempt, delayMs, status: error.status });
+      await delay(delayMs);
     } finally {
       clearTimeout(timeout);
       removeAbortListener();
@@ -236,6 +253,7 @@ function isExternalAbort(signal) {
 }
 
 function shouldRetry(error) {
+  if (error.code === "INCOMPLETE_RESPONSE") return false;
   if (error.name === "AbortError") return true;
   if (/Request timed out/i.test(error.message ?? "")) return true;
   if (error.status === 429 || (error.status >= 500 && error.status <= 599)) return true;

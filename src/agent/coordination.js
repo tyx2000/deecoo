@@ -1,5 +1,8 @@
-export function analyzeTaskCoordination(task) {
-  const requestType = classifyRequest(task);
+import { inferTaskIntent } from "../harness/taskIntent.js";
+
+export function analyzeTaskCoordination(task, options = {}) {
+  const contract = inferTaskIntent(task, options);
+  const requestType = contract.requestType;
   const basis = coordinationBasis(task, requestType);
   const riskDomains = selectRiskDomains(task, requestType);
   const phases = selectPhases(task, requestType, riskDomains);
@@ -15,6 +18,7 @@ export function analyzeTaskCoordination(task) {
     splitTriggers.length >= 2;
 
   return {
+    ...contract,
     requestType,
     complex,
     basis,
@@ -26,20 +30,6 @@ export function analyzeTaskCoordination(task) {
     verification: complex ? plan.verification : undefined,
     agents: complex ? [...plan.parallel, ...plan.serial, ...(plan.verification ? [plan.verification] : [])] : [],
   };
-}
-
-function classifyRequest(task) {
-  const text = String(task ?? "").toLowerCase();
-  if (/(报错|错误|失败|bug|debug|修复|fix|failed|error|crash|异常)/i.test(text)) return "debug";
-  const hasEdit = hasEditIntent(text);
-  const hasReview = /(review|审查|评审|code review|风险|隐患)/i.test(text);
-  if (hasReview && !hasEdit) return "review";
-  if (hasEdit) return "edit";
-  if (/(解释|说明|分析|为什么|架构|方案|路径|是否合理|how|why|explain|analy[sz]e|architecture)/i.test(text)) {
-    return "analysis";
-  }
-  if (/(运行|执行|命令|run|command|测试|test|验证|check)/i.test(text)) return "command";
-  return "general";
 }
 
 function coordinationBasis(task, requestType) {
@@ -70,10 +60,7 @@ function coordinationBasis(task, requestType) {
 }
 
 function hasEditIntent(text) {
-  return (
-    /(修改|新增|实现|改造|搭建|接入|edit|write|implement|update|change|refactor|build|add)/i.test(text) ||
-    (/(继续|完善)/i.test(text) && /(代码|实现|功能|文件|修复|测试|验证|code|file|feature|test|verify|fix)/i.test(text))
-  );
+  return inferTaskIntent(text).requiresCodeChange;
 }
 
 const RISK_DOMAIN_DEFINITIONS = [
@@ -152,7 +139,7 @@ function selectPhases(task, requestType, riskDomains) {
   if (requestType !== "command") {
     phases.push({ name: "Synthesis", reason: "the main agent must combine findings into a concrete plan or answer" });
   }
-  if (requestType === "edit" || (requestType === "debug" && /(修复|fix|修改|change|update)/i.test(text))) {
+  if (inferTaskIntent(task).requiresCodeChange) {
     phases.push({ name: "Implementation", reason: "the task may require scoped file changes" });
   }
   if (["edit", "debug", "command"].includes(requestType) || riskDomains.some((domain) => domain.name === "Tests")) {

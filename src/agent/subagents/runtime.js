@@ -1,16 +1,21 @@
 import { randomUUID } from "node:crypto";
 import { runAgent } from "../loop.js";
 import { normalizeWorkerMode } from "../../tools/definitions.js";
+import { linkSignals } from "../../harness/budget.js";
+import { createMutex } from "../../harness/mutex.js";
 
 const MAX_WORKER_PROMPT_CHARS = 8000;
 const MAX_WORKERS_PER_TASK = 8;
 const MAX_SHARED_WORKING_SET_CHARS = 16000;
 
-export function createSubagentRuntime({ client, createWorkerTools, workerTools, cwd, config, activeSkills = [], contextMessages = [], parentWorkingSet, signal }) {
+export function createSubagentRuntime({ client, createWorkerTools, workerTools, cwd, config, activeSkills = [], contextMessages = [], parentWorkingSet, signal, verificationPlan, onEvent, secretRegistry }) {
   const workers = new Map();
+  const contextHistory = [];
+  const workspaceWriter = createMutex();
 
   return {
-    async start(args = {}) {
+    contextHistory: () => structuredClone(contextHistory),
+    async start(args = {}, options = {}) {
       if (workers.size >= MAX_WORKERS_PER_TASK) {
         return { ok: false, error: "worker limit reached for this task", code: "WORKER_LIMIT_REACHED" };
       }
@@ -21,17 +26,17 @@ export function createSubagentRuntime({ client, createWorkerTools, workerTools, 
       if (!prompt) return { ok: false, error: "prompt is required" };
       const worker = createWorker({ description, prompt, mode, role });
       workers.set(worker.id, worker);
-      return runWorkerTurn({ worker, prompt, action: "started" });
+      return runWorkerTurn({ worker, prompt, action: "started", signal: options.signal });
     },
 
-    async send(args = {}) {
+    async send(args = {}, options = {}) {
       const id = String(args.to ?? args.task_id ?? "");
       const worker = workers.get(id);
       if (!worker) return { ok: false, error: "worker not found: " + id };
       if (worker.status === "stopped") return { ok: false, error: "worker is stopped: " + id };
       const message = normalizeWorkerPrompt(args.message);
       if (!message) return { ok: false, error: "message is required" };
-      return runWorkerTurn({ worker, prompt: message, action: "continued" });
+      return runWorkerTurn({ worker, prompt: message, action: "continued", signal: options.signal });
     },
 
     async stop(args = {}) {
@@ -39,6 +44,7 @@ export function createSubagentRuntime({ client, createWorkerTools, workerTools, 
       const worker = workers.get(id);
       if (!worker) return { ok: false, error: "worker not found: " + id };
       worker.status = "stopped";
+      worker.controller.abort(new Error("Worker stopped."));
       return {
         ok: true,
         task_id: id,
@@ -67,9 +73,10 @@ export function createSubagentRuntime({ client, createWorkerTools, workerTools, 
   };
 
   function createWorker({ description, prompt, mode, role }) {
-    const tools = createWorkerTools?.({ mode }) ?? workerTools;
+    const id = "agent-" + randomUUID().slice(0, 8);
+    const tools = createWorkerTools?.({ mode, workerId: id }) ?? workerTools;
     return {
-      id: "agent-" + randomUUID().slice(0, 8),
+      id,
       description,
       role,
       mode,
@@ -77,13 +84,12 @@ export function createSubagentRuntime({ client, createWorkerTools, workerTools, 
       startedAt: new Date().toISOString(),
       completedAt: undefined,
       tools,
+      controller: new AbortController(),
       messages: [
-        ...contextMessages,
+        { role: "system", content: workerSystemPrompt({ mode, role, tools }) },
+        ...contextMessages.filter((message) => message.role === "system"),
+        ...contextMessages.filter((message) => message.role !== "system"),
         ...sharedWorkingSetMessages(),
-        {
-          role: "system",
-          content: workerSystemPrompt({ mode, role, tools }),
-        },
       ],
       initialPrompt: prompt,
       usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
@@ -104,9 +110,35 @@ export function createSubagentRuntime({ client, createWorkerTools, workerTools, 
     ];
   }
 
-  async function runWorkerTurn({ worker, prompt, action }) {
+  async function runWorkerTurn({ worker, prompt, action, signal: callSignal }) {
+    if (worker.active) return { ok: false, error: "worker is already running", code: "WORKER_BUSY" };
+    worker.active = true;
+    worker.status = "queued";
+    try {
+      const execute = () => executeWorkerTurn({ worker, prompt, action, callSignal });
+      // Unknown command/write sets share one workspace lock. Research stays
+      // concurrent; scoped parallel writers require a future conflict backend.
+      if (worker.mode === "research") return await execute();
+      const queued = linkSignals([signal, callSignal, worker.controller.signal, client.taskBudget?.signal]);
+      try {
+        const release = await acquireWriter(workspaceWriter, queued.signal);
+        try { return await execute(); } finally { release(); }
+      } finally { queued.dispose(); }
+    } catch (error) {
+      worker.status = "stopped";
+      throw error;
+    } finally {
+      worker.active = false;
+    }
+  }
+
+  async function executeWorkerTurn({ worker, prompt, action, callSignal }) {
+    const turnId = randomUUID();
+    const queuedMs = Date.now() - Date.parse(worker.startedAt);
+    onEvent?.({ type: "worker-start", workerId: worker.id, mode: worker.mode, queuedMs });
     worker.status = "running";
-    const deadline = createWorkerDeadline(signal, config?.workerTimeoutMs);
+    const linked = linkSignals([signal, callSignal, worker.controller.signal, client.taskBudget?.signal]);
+    const deadline = createWorkerDeadline(linked.signal, config?.workerTimeoutMs);
     try {
       const result = await runAgent({
         client,
@@ -115,23 +147,31 @@ export function createSubagentRuntime({ client, createWorkerTools, workerTools, 
         cwd,
         model: config.model,
         maxTokens: config.maxTokens,
+        contextWindow: config.contextWindow,
+        outputReserve: config.outputReserve,
         reasoningEffort: config.reasoningEffort,
         thinking: config.thinking,
         stream: false,
         maxSteps: config.maxSteps,
         tokenBudget: config.workerTokenBudget,
+        reportTaskUsage: false,
         deadline: deadline.deadline,
         contextMessages: worker.messages,
         activeSkills,
         signal: deadline.signal,
+        verificationPlan,
+        secretRegistry,
+        onEvent: (event) => onEvent?.({ ...event, workerId: worker.id }),
       });
+      if (result.contextState) contextHistory.push({ workerId: worker.id, turnId, contextState: result.contextState });
       worker.messages = result.messages ?? worker.messages;
-      worker.status = "completed";
+      worker.status = result.workflow?.status === "failed" ? "stopped" : "completed";
       worker.completedAt = new Date().toISOString();
+      onEvent?.({ type: "worker-end", workerId: worker.id, status: worker.status, usage: result.usage });
       worker.structured = parseWorkerStructured(result.finalText);
       addUsage(worker.usage, result.usage);
       return {
-        ok: true,
+        ok: result.workflow?.status !== "failed",
         task_id: worker.id,
         role: worker.role,
         mode: worker.mode,
@@ -141,6 +181,8 @@ export function createSubagentRuntime({ client, createWorkerTools, workerTools, 
         structured: worker.structured,
         usage: result.usage,
         stoppedReason: result.stoppedReason,
+        effects: result.effects,
+        verification: result.verification,
         activity: {
           kind: "subagent",
           label: action === "started" ? "Ran worker" : "Continued worker",
@@ -149,9 +191,11 @@ export function createSubagentRuntime({ client, createWorkerTools, workerTools, 
         },
       };
     } catch (error) {
+      if (error.runSnapshot?.contextState) contextHistory.push({ workerId: worker.id, turnId, contextState: error.runSnapshot.contextState });
+      addUsage(worker.usage, error?.agentUsage);
+      worker.status = "stopped";
+      worker.completedAt = new Date().toISOString();
       if (deadline.timedOut) {
-        worker.status = "stopped";
-        worker.completedAt = new Date().toISOString();
         return {
           ok: false,
           task_id: worker.id,
@@ -159,6 +203,8 @@ export function createSubagentRuntime({ client, createWorkerTools, workerTools, 
           mode: worker.mode,
           status: "stopped",
           code: "WORKER_TIMEOUT",
+          usage: error?.agentUsage,
+          effects: error?.effects,
           error: "Worker exceeded its time budget and was stopped.",
           summary: "Worker timed out (" + worker.role + "/" + worker.mode + "): " + worker.description,
           activity: { kind: "subagent", label: "Worker timed out", target: worker.description, detail: worker.role + "/" + worker.mode },
@@ -167,6 +213,7 @@ export function createSubagentRuntime({ client, createWorkerTools, workerTools, 
       throw error;
     } finally {
       deadline.dispose();
+      linked.dispose();
     }
   }
 }
@@ -181,7 +228,9 @@ function workerSystemPrompt({ mode, role, tools }) {
     "Follow the delegated prompt exactly.",
     roleInstruction(role),
     mode === "research" ? "This is a read-only worker. Do not attempt shell commands or file edits." : "",
-    mode === "verify" ? "This worker may run focused verification commands but must not edit files." : "",
+    mode === "verify" ? ((tools?.schemas ?? []).some((schema) => schema.function.name === "run_shell")
+      ? "This worker may run focused verification commands under the parent's write permissions. Commands can have side effects; direct file-edit tools are unavailable."
+      : "This worker can inspect files. The parent task is read-only, so commands and edits are unavailable.") : "",
     mode === "implement" ? "This worker may edit files only within the delegated scope." : "",
     "Report concrete file paths, line numbers when available, commands run, verification status, and residual risks.",
     "Do not spawn additional workers. Use the available workspace tools directly.",
@@ -331,4 +380,19 @@ function addUsage(total, usage = {}) {
   total.promptTokens += Number(usage.promptTokens ?? usage.prompt_tokens ?? 0);
   total.completionTokens += Number(usage.completionTokens ?? usage.completion_tokens ?? 0);
   total.totalTokens += Number(usage.totalTokens ?? usage.total_tokens ?? 0);
+}
+
+function acquireWriter(mutex, signal) {
+  const pending = mutex.acquire();
+  if (!signal) return pending;
+  return new Promise((resolve, reject) => {
+    let aborted = false;
+    const onAbort = () => { aborted = true; signal.removeEventListener("abort", onAbort); reject(signal.reason ?? new Error("Worker stopped while queued.")); };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+    pending.then((release) => {
+      signal.removeEventListener("abort", onAbort);
+      if (aborted) release(); else resolve(release);
+    });
+  });
 }

@@ -1,11 +1,17 @@
+import { inferTaskIntent } from "./taskIntent.js";
+import { verificationIsFresh, hasFailedVerification } from "../verification/state.js";
+import { evaluateTaskAcceptance } from "./acceptance.js";
 const MAX_REPAIR_ATTEMPTS = 2;
 
 export function createTaskFinalValidator({ taskSpec, verificationPlan } = {}) {
-  return ({ finalText, requestType, agentState, trace, attempt = 0 }) => {
-    const errors = validateTaskFinal({ finalText, requestType, taskSpec, verificationPlan, agentState, trace });
-    if (errors.length === 0) return { ok: true };
+  return ({ finalText, requestType, agentState, trace, verification, effects, completionType, attempt = 0 }) => {
+    const errors = validateTaskFinal({ finalText, requestType, taskSpec, verificationPlan, agentState, trace, verification, effects, completionType });
+    const acceptance = evaluateTaskAcceptance({ taskSpec, verificationPlan, verification, agentState, effects, completionType });
+    if (errors.length === 0) return { ok: true, acceptance, ...((agentState?.filesEdited?.length && verificationPlan?.required && !verificationIsFresh(verification, verificationPlan))
+      ? { verificationDecision: { status: "unverified-with-reason", reason: String(finalText).trim() } } : {}) };
     return {
       ok: false,
+      acceptance,
       reason: "task_contract_invalid",
       errors,
       maxRepairAttempts: MAX_REPAIR_ATTEMPTS,
@@ -14,14 +20,14 @@ export function createTaskFinalValidator({ taskSpec, verificationPlan } = {}) {
   };
 }
 
-export function validateTaskFinal({ finalText, requestType, taskSpec, verificationPlan, agentState, trace } = {}) {
+export function validateTaskFinal({ finalText, requestType, taskSpec, verificationPlan, agentState, trace, verification, effects, completionType } = {}) {
   const text = String(finalText ?? "").trim();
   const task = String(taskSpec?.goal ?? "");
   const type = requestType ?? taskSpec?.requestType ?? "general";
   const filesEdited = agentState?.filesEdited ?? [];
-  const commandsRun = agentState?.commandsRun ?? [];
   const toolTrace = Array.isArray(trace) ? trace : [];
-  const errors = [];
+  const acceptance = evaluateTaskAcceptance({ taskSpec, verificationPlan, verification, agentState, effects, completionType });
+  const errors = [...acceptance.errors];
 
   if (isWeakCompletionText(text)) {
     errors.push("final answer is a weak completion marker and does not summarize completed work");
@@ -29,11 +35,16 @@ export function validateTaskFinal({ finalText, requestType, taskSpec, verificati
   if (looksLikeInProgressText(text)) {
     errors.push("final answer still contains in-progress planning language instead of a completed result");
   }
-  if (requiresCodeChange({ task, requestType: type }) && filesEdited.length === 0 && !successfulEditTool(toolTrace)) {
+  if (type === "command" && !(agentState?.commandsRun?.length) && !explainsSkippedVerification(text)) {
+    errors.push("command task has no executed command evidence; execute it or explain why it could not run");
+  }
+  if ((taskSpec?.requiresCodeChange ?? inferTaskIntent(task).requiresCodeChange) && filesEdited.length === 0 && !successfulEditTool(toolTrace) && !(taskSpec?.acceptance && acceptance.completionType === "no-change" && acceptance.satisfied)) {
     errors.push("task appears to require code changes, but no successful file edit was recorded");
   }
-  if (filesEdited.length > 0 && verificationPlan?.required && commandsRun.length === 0 && !explainsSkippedVerification(text)) {
-    errors.push("files were edited but no verification command was recorded or explicitly explained as skipped");
+  if (filesEdited.length > 0 && verificationPlan?.required && !verificationIsFresh(verification, verificationPlan)) {
+    if (hasFailedVerification(verification, verificationPlan) || !explainsSkippedVerification(text)) {
+      errors.push("files were edited but fresh successful verification evidence is missing or failed; run relevant checks or explicitly explain why verification was not run");
+    }
   }
   if ((type === "edit" || type === "debug") && filesEdited.length > 0 && !mentionsChangedWork(text, filesEdited)) {
     errors.push("final answer does not mention changed files or implementation outcome");
@@ -60,20 +71,6 @@ function taskFinalRepairPrompt({ errors, taskSpec, agentState, attempt }) {
   ].join("\n");
 }
 
-function requiresCodeChange({ task, requestType }) {
-  if (requestType === "edit") return hasCodeChangeIntent(task);
-  if (requestType !== "debug") return false;
-  return hasCodeChangeIntent(task) || /(修复|fix|change|update)/i.test(task);
-}
-
-function hasCodeChangeIntent(task) {
-  const text = String(task ?? "");
-  return (
-    /(修改|新增|实现|改造|搭建|接入|edit|write|implement|update|change|refactor|build|add)/i.test(text) ||
-    (/(继续|完善)/i.test(text) && /(代码|实现|功能|文件|修复|测试|验证|code|file|feature|test|verify|fix)/i.test(text))
-  );
-}
-
 function successfulEditTool(trace) {
   return trace.some((entry) => {
     return (
@@ -88,11 +85,13 @@ function isWeakCompletionText(text) {
 }
 
 function looksLikeInProgressText(text) {
-  return /(let me|i need to|i will|i'll|next i|我需要|我先|让我|接下来|下一步|准备|继续读取|检查\s*diff|读取.*文件)/i.test(text);
+  return /^(?:let me|i need to|i will|i'll|我需要|我先|让我|准备)/i.test(text) &&
+    !/(implemented|fixed|changed|修复|完成|改动)/i.test(text);
 }
 
 function explainsSkippedVerification(text) {
-  return /(未运行|没有运行|无法运行|不能运行|跳过|not run|did not run|could not run|unable to run|skipped)/i.test(text);
+  return /(未运行|没有运行|无法运行|不能运行|跳过|not run|did not run|could not run|unable to run|skipped)/i.test(text) &&
+    /(because|due to|missing|unavailable|not installed|no (?:test|runtime|dependency)|docs?[- ]only|documentation|environment|not provided|read.only|permission|policy|原因|因为|由于|缺少|未安装|环境|文档|没有.*测试|无.*测试|权限|策略)/i.test(text);
 }
 
 function mentionsChangedWork(text, filesEdited) {

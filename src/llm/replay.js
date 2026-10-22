@@ -3,31 +3,51 @@
 // loop can be exercised deterministically in tests and regression runs.
 
 import { createHash } from "node:crypto";
+import { createReplayEntries } from "../harness/replayEntries.js";
 
+export const REPLAY_FINGERPRINT_VERSION = 2;
+
+// Hash the complete JSON request body, including tool definitions, assistant tool
+// calls and sampling parameters. Sorting object keys avoids serialization-order
+// differences; arrays retain their semantic order. The prefix makes old fixtures
+// fail explicitly rather than silently matching an incomplete v1 request shape.
 export function requestFingerprint(request) {
-  const shape = {
-    model: request?.model,
-    messages: (request?.messages ?? []).map((message) => ({
-      role: message.role,
-      content: typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? ""),
-      tool_call_id: message.tool_call_id,
-    })),
-    tool_choice: request?.tool_choice,
-  };
-  return createHash("sha256").update(JSON.stringify(shape)).digest("hex").slice(0, 16);
+  const shape = { version: REPLAY_FINGERPRINT_VERSION, request: canonicalJson(request ?? {}) };
+  return "v2:" + createHash("sha256").update(JSON.stringify(shape)).digest("hex").slice(0, 16);
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map((item) => canonicalJson(item));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort()
+      .filter((key) => value[key] !== undefined)
+      .map((key) => [key, canonicalJson(value[key])]));
+  }
+  return value;
+}
+
+// Migration requires the original request. A v1 hash alone cannot recover fields
+// that were omitted from it, so callers must re-record such fixtures.
+export function migrateReplayFixture(fixture) {
+  return fixture.map((entry) => {
+    if (!entry.request) throw new Error("Replay fixture migration requires each original request; re-record this fixture.");
+    return { ...entry, fingerprintVersion: REPLAY_FINGERPRINT_VERSION, fingerprint: requestFingerprint(entry.request) };
+  });
 }
 
 export function createRecordingClient(client, fixture = []) {
   return {
     ...client,
     async chatCompletion(request, options) {
+      const recorded = canonicalJson(request);
       const response = await client.chatCompletion(request, options);
-      fixture.push({ fingerprint: requestFingerprint(request), response });
+      fixture.push({ fingerprintVersion: REPLAY_FINGERPRINT_VERSION, fingerprint: requestFingerprint(recorded), request: recorded, response });
       return response;
     },
     async chatCompletionStream(request, handlers) {
+      const recorded = canonicalJson(request);
       const response = await client.chatCompletionStream(request, handlers);
-      fixture.push({ fingerprint: requestFingerprint(request), response });
+      fixture.push({ fingerprintVersion: REPLAY_FINGERPRINT_VERSION, fingerprint: requestFingerprint(recorded), request: recorded, response });
       return response;
     },
     fixture,
@@ -35,17 +55,13 @@ export function createRecordingClient(client, fixture = []) {
 }
 
 export function createReplayClient(fixture = [], { strict = true } = {}) {
-  const byFingerprint = new Map();
-  const queue = [...fixture];
-  for (const entry of fixture) {
-    if (entry?.fingerprint && !byFingerprint.has(entry.fingerprint)) byFingerprint.set(entry.fingerprint, entry.response);
-  }
+  const entries = createReplayEntries(fixture, "fingerprint");
 
   const resolve = (request) => {
     const fingerprint = requestFingerprint(request);
-    if (byFingerprint.has(fingerprint)) return byFingerprint.get(fingerprint);
-    if (queue.length) return queue.shift().response;
-    if (strict) throw new Error("No replay fixture for request " + fingerprint);
+    const match = entries.take(fingerprint, { fallback: !strict });
+    if (match) return match.response;
+    if (strict) throw new Error("No replay fixture for request " + fingerprint + "; v1 fixtures require migration with original requests or re-recording.");
     return { choices: [{ message: { role: "assistant", content: "" } }] };
   };
 

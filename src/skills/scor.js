@@ -1,12 +1,13 @@
+import { buildTaskToolPolicy } from "../permissions/taskPolicy.js";
+
 export function isScorActive(activeSkills = []) {
   return activeSkills.some((skill) => (skill.name || skill.id) === "s-cor");
 }
 
 export function scorReviewToolPolicy() {
   return {
+    ...buildTaskToolPolicy({ mayWrite: false }),
     name: "s-cor review mode",
-    blockedTools: ["propose_patch", "propose_patch_set", "apply_patch", "apply_patch_set", "apply_json_patch", "edit_file", "write_file"],
-    allowedWorkerModes: ["research", "verify"],
   };
 }
 

@@ -18,17 +18,28 @@ import {
   recordToolObservation,
   serializeProcessController,
   snapshotProcessMetrics,
+  synchronizeWorkspaceRevision,
 } from "../harness/processController.js";
 import { advanceWorkflowState, createWorkflowState } from "../harness/workflow.js";
 import { createVerificationStateMachine } from "../verification/state.js";
-import { CONTENT_TRUST_INSTRUCTION, markUntrustedToolResult } from "../harness/contentTrust.js";
+import { CONTENT_TRUST_INSTRUCTION, fenceUntrustedContent, markUntrustedToolResult } from "../harness/contentTrust.js";
 import { estimateCostUsd } from "../harness/cost.js";
 import { createMutex } from "../harness/mutex.js";
-import { createQuarantine } from "../harness/quarantine.js";
+import { createQuarantine, projectUntrustedContent } from "../harness/quarantine.js";
+import { linkSignals } from "../harness/budget.js";
+import { compactToolResult } from "../tools/projection.js";
+export { compactToolResult } from "../tools/projection.js";
+import { appendEffects } from "../harness/effects.js";
+import { buildContextBudget, estimateTokens, measureContextMessages } from "../context/builder.js";
+import { randomUUID } from "node:crypto";
+import { redact } from "../observability/audit.js";
+import { applyContextCompaction, contextFingerprint, createContextState, isBalancedContextBoundary, planContextCompaction, snapshotContextState, syncContextState } from "../context/compaction.js";
+import { projectModelRequest } from "../llm/requestSnapshot.js";
 
 const MAX_LIVE_MESSAGE_CHARS = 180000;
 const RECENT_LIVE_MESSAGES = 10;
 const MAX_PARALLEL_DISPATCH = 4;
+const LIVE_CONTEXT_STATES = new WeakMap();
 
 export async function runAgent({
   client,
@@ -37,6 +48,8 @@ export async function runAgent({
   cwd,
   model,
   maxTokens,
+  contextWindow,
+  outputReserve,
   reasoningEffort,
   thinking,
   contextMessages = [],
@@ -48,6 +61,7 @@ export async function runAgent({
   deadline,
   costBudgetUsd,
   priceOverrides,
+  reportTaskUsage = true,
   trustToolOutput = true,
   resume,
   onModelStart,
@@ -59,10 +73,17 @@ export async function runAgent({
   onEvent,
   secretRegistry,
   finalValidator,
+  verificationPlan,
   signal,
 }) {
+  const taskBudget = client.taskBudget;
+  const linkedSignal = linkSignals([signal, taskBudget?.signal]);
+  signal = linkedSignal.signal;
   const quarantine = createQuarantine();
   const usage = resume?.usage ? { ...emptyUsage(), ...resume.usage } : emptyUsage();
+  if (reportTaskUsage && resume?.usage && taskBudget && Object.values(taskBudget.snapshot()).every((value) => value === 0)) {
+    taskBudget.record(resume.usage);
+  }
   const coordination = providedCoordination ?? analyzeTaskCoordination(task);
   const requestType = coordination.requestType;
   const trace = Array.isArray(resume?.trace) ? structuredClone(resume.trace) : [];
@@ -76,11 +97,16 @@ export async function runAgent({
   // Expose this run's pinned observations so dispatched workers can reuse them instead of
   // re-reading the same files. Worker tool runtimes lack this hook, so the call safely no-ops.
   tools.setWorkingSetProvider?.(() => (hasWorkingSet(processController) ? buildWorkingSetSummary(processController) : undefined));
-  const verification = createVerificationStateMachine(resume?.verification);
+  const verification = createVerificationStateMachine(resume?.verification, { plan: verificationPlan });
+  const effects = Array.isArray(resume?.effects?.events) ? structuredClone(resume.effects.events) : [];
+  const effectSnapshot = () => ({ version: 1, revision: tools.getWorkspaceRevision?.() ?? 0, events: [...effects] });
   let workflow = resume?.workflow
     ? structuredClone(resume.workflow)
     : advanceWorkflowState(createWorkflowState({ requestType }), { type: "planned" });
   let finalValidationAttempt = 0;
+  let acceptance;
+  let contextBudget = buildContextBudget({ contextWindow: contextWindow ?? client.capabilities?.contextWindow ?? 128000,
+    outputReserve: Math.max(outputReserve ?? 0, maxTokens ?? outputReserve ?? client.capabilities?.outputReserve ?? 4096) });
   const systemContent = trustToolOutput
     ? buildSystemPrompt(cwd, requestType, activeSkills, coordination) + "\n\n" + CONTENT_TRUST_INSTRUCTION
     : buildSystemPrompt(cwd, requestType, activeSkills, coordination);
@@ -93,15 +119,27 @@ export async function runAgent({
         ...contextMessages,
         { role: "user", content: task },
       ];
+  let contextState;
+  try { contextState = createContextState(messages, { saved: resume?.contextState, legacy: !!resume && !resume.contextState }); }
+  catch (error) { linkedSignal.dispose(); throw error; }
+  const firstAssistant = messages.findIndex((message) => message.role === "assistant");
+  contextState.protectedPrefixCount ??= resume ? firstAssistant < 0 ? messages.length : Math.max(1, firstAssistant) : 1 + contextMessages.length + 1;
+  const contextSnapshot = () => snapshotContextState(contextState, messages);
+  const compactionEvent = (transaction) => onEvent?.({ type: "context-compacted", step, transaction,
+    liveMessageIds: [...contextState.liveMessageIds] });
 
+  const currentUsage = () => reportTaskUsage && taskBudget ? taskBudget.snapshot() : { ...usage };
+  const syncUsage = () => { agentState.usage = currentUsage(); };
   const finishRun = ({ finalText, stoppedReason, workflowType, extra = {} }) => {
+    syncUsage();
     const process = snapshotProcessMetrics(processController);
     recordProcessSnapshot(agentState, process);
     return {
       finalText,
       messages,
+      contextState: contextSnapshot(),
       steps: step,
-      usage,
+      usage: currentUsage(),
       stoppedReason,
       transition: terminalTransition(stoppedReason ?? TERMINAL_TRANSITIONS.COMPLETED, { step }),
       transitions,
@@ -110,239 +148,342 @@ export async function runAgent({
       requestType,
       process,
       verification: verification.snapshot(),
+      effects: effectSnapshot(),
       workflow: workflowType ? advanceWorkflowState(workflow, { type: workflowType, step }) : workflow,
       quarantine: quarantine.snapshot(),
+      acceptance,
       ...extra,
     };
   };
 
   let step = Number.isFinite(resume?.step) ? resume.step + 1 : 1;
-  while (true) {
-    throwIfAborted(signal);
-    const budgetStop = evaluateBudgets({
-      step,
-      maxSteps,
-      tokens: usage.totalTokens,
-      tokenBudget,
-      deadline,
-      cost: costBudgetUsd ? estimateCostUsd(usage, model, priceOverrides) : 0,
-      costBudgetUsd,
-    });
-    if (budgetStop) {
-      return finishRun({ finalText: budgetStop.message, stoppedReason: budgetStop.reason, workflowType: "failed", extra: { budget: budgetStop } });
-    }
-    compactLiveMessages(messages, {
-      protectedPrefixCount: 1 + contextMessages.length + 1,
-      agentState,
-      processController,
-      step,
-    });
-    const request = {
-      model,
-      messages,
-      tools: tools.schemas,
-      tool_choice: "auto",
-      max_tokens: maxTokens,
-    };
-    if (thinking) request.thinking = thinking;
-    if (reasoningEffort) request.reasoning_effort = reasoningEffort;
-
-    workflow = advanceWorkflowState(workflow, { type: "model-start", step });
-    onModelStart?.({ step });
-    const modelStartedAt = Date.now();
-    const completion = await requestChatCompletion({
-      client,
-      request,
-      stream,
-      onTextDelta,
-      onModelEnd,
-      step,
-      signal,
-    });
-    addUsage(usage, completion.usage);
-    onEvent?.({ type: "model-call", step, usage: completion.usage });
-
-    const message = completion.choices?.[0]?.message;
-    if (!message) {
-      throw new Error("DeepSeek returned no message.");
-    }
-    recordModelStep(agentState, {
-      step,
-      message,
-      usage: completion.usage,
-      startedAt: modelStartedAt,
-    });
-
-    messages.push(message);
-
-    if (!message.tool_calls?.length) {
-      const process = snapshotProcessMetrics(processController);
-      recordProcessSnapshot(agentState, process);
-      const finalText = message.content || "Done.";
-      const finalValidation = finalValidator?.({
-        finalText,
-        messages,
-        requestType,
-        task,
-        agentState,
-        trace,
-        verification: verification.snapshot(),
-        workflow,
-        process,
-        attempt: finalValidationAttempt,
+  try {
+    while (true) {
+      syncUsage();
+      const sharedStop = taskBudget?.stopped();
+      const budgetStop = sharedStop ?? evaluateBudgets({
+        step,
+        maxSteps,
+        tokens: usage.totalTokens,
+        tokenBudget,
+        deadline,
+        cost: costBudgetUsd ? estimateCostUsd(usage, model, priceOverrides) : 0,
+        costBudgetUsd,
       });
-      if (finalValidation && !finalValidation.ok && finalValidationAttempt < finalValidation.maxRepairAttempts) {
-        transitions.push(continueTransition(CONTINUE_TRANSITIONS.FINAL_VALIDATION_REPAIR, {
-          step,
-          errors: finalValidation.errors,
-        }));
-        workflow = advanceWorkflowState(workflow, { type: "final-validation-repair", step });
-        messages.push({
-          role: "user",
-          content: finalValidation.repairPrompt,
-        });
-        finalValidationAttempt += 1;
-        step += 1;
-        continue;
+      if (budgetStop) {
+        return finishRun({ finalText: budgetStop.message, stoppedReason: budgetStop.reason, workflowType: "failed", extra: { budget: budgetStop } });
       }
-      if (looksLikePseudoToolCall(message.content)) {
-        return {
-          finalText:
-            "The model returned tool-call markup as plain text instead of a final answer. I stopped before showing that raw internal markup. Please continue with a narrower request.",
+      throwIfAborted(signal);
+      compactLiveMessages(messages, {
+        protectedPrefixCount: contextState.protectedPrefixCount,
+        agentState,
+        processController,
+        step,
+        contextState,
+        onCompaction: compactionEvent,
+        secretRegistry,
+        maxEstimatedTokens: contextBudget.inputTokens - estimateTokens(tools.schemas ?? []),
+      });
+      let request = {
+        model,
+        messages,
+        tools: tools.schemas,
+        tool_choice: "auto",
+        max_tokens: maxTokens,
+      };
+      if (thinking) request.thinking = thinking;
+      if (reasoningEffort) request.reasoning_effort = reasoningEffort;
+      let prepared = client.prepareRequest ? await client.prepareRequest(request, { signal }) : undefined;
+      if (prepared) {
+        contextBudget = buildContextBudget({ contextWindow: contextWindow ?? prepared.capabilities.contextWindow,
+          outputReserve: Math.max(outputReserve ?? 0, prepared.effectiveConfig.maxTokens) });
+        if (measureContextMessages(messages) + estimateTokens(prepared.request.tools ?? []) > contextBudget.inputTokens) {
+          compactLiveMessages(messages, {
+            protectedPrefixCount: contextState.protectedPrefixCount,
+            agentState, processController, step, contextState, onCompaction: compactionEvent, secretRegistry,
+            maxEstimatedTokens: contextBudget.inputTokens - estimateTokens(prepared.request.tools ?? []),
+          });
+          prepared = await client.prepareRequest({ ...request, messages }, { signal });
+        }
+        request = prepared.request;
+      }
+      const inputTokens = measureContextMessages(request.messages) + estimateTokens(request.tools ?? []);
+      if (inputTokens > contextBudget.inputTokens) throw Object.assign(new Error("Required instructions, task, tools and current observations exceed the configured context window."),
+        { code: "CONTEXT_BUDGET_EXCEEDED", contextBudget, estimatedInputTokens: inputTokens });
+      if (prepared) onEvent?.({ type: "request-prepared", step, routeIdentity: prepared.routeIdentity,
+        requestFingerprint: prepared.requestFingerprint, effectiveConfig: prepared.effectiveConfig, estimatedInputTokens: inputTokens });
+
+      syncContextState(contextState, messages);
+      const attemptId = "attempt_" + randomUUID();
+      const requestSnapshot = projectModelRequest(request, { filterText: (text) => redact(text, { secretRegistry, maxTextChars: Infinity }) });
+      onEvent?.({ type: "model-attempt-start", step, attemptId, request: requestSnapshot,
+        requestHash: contextFingerprint(requestSnapshot), requestFingerprint: prepared?.requestFingerprint, messageIds: [...contextState.liveMessageIds],
+        routeIdentity: prepared?.routeIdentity, effectiveConfig: prepared?.effectiveConfig ?? { source: "unprepared-client",
+          contextWindow: contextBudget.contextWindow, outputReserve: contextBudget.outputReserve } });
+
+      workflow = advanceWorkflowState(workflow, { type: "model-start", step });
+      onModelStart?.({ step });
+      const modelStartedAt = Date.now();
+      let firstTokenAt;
+      let completion;
+      try { completion = await requestChatCompletion({
+        client,
+        request,
+        prepared,
+        stream,
+        onTextDelta: (delta) => {
+          if (firstTokenAt === undefined) { firstTokenAt = Date.now(); onEvent?.({ type: "first-token", step, latencyMs: firstTokenAt - modelStartedAt }); }
+          onTextDelta?.(delta);
+        },
+        onRuntimeEvent: (event) => onEvent?.({ ...event, step, attemptId }),
+        onModelEnd,
+        step,
+        signal,
+      }); } catch (error) {
+        onEvent?.({ type: "model-attempt-end", step, attemptId, outcome: signal?.aborted ? "interrupted" : "failed",
+          reportedUsage: error?.usage, usageKnown: false, errorCode: error?.code ?? error?.name ?? "MODEL_REQUEST_FAILED", durationMs: Date.now() - modelStartedAt });
+        throw error;
+      }
+      onEvent?.({ type: "model-attempt-end", step, attemptId, outcome: "completed", usage: completion.usage, usageKnown: !!completion.usage, durationMs: Date.now() - modelStartedAt });
+      addUsage(usage, completion.usage);
+      onEvent?.({ type: "model-call", step, attemptId, usage: completion.usage, durationMs: Date.now() - modelStartedAt, estimatedInputTokens: inputTokens });
+
+      const message = completion.choices?.[0]?.message;
+      if (!message) {
+        throw new Error("DeepSeek returned no message.");
+      }
+      recordModelStep(agentState, {
+        step,
+        message,
+        usage: completion.usage,
+        startedAt: modelStartedAt,
+      });
+
+      syncUsage();
+      const completedBudgetStop = taskBudget?.stopped();
+      if (completedBudgetStop) {
+        return finishRun({ finalText: completedBudgetStop.message, stoppedReason: completedBudgetStop.reason, workflowType: "failed", extra: { budget: completedBudgetStop } });
+      }
+      throwIfAborted(signal);
+      messages.push(message);
+
+      if (!message.tool_calls?.length) {
+        const process = snapshotProcessMetrics(processController);
+        recordProcessSnapshot(agentState, process);
+        const finalText = message.content || "Done.";
+        const finalValidation = finalValidator?.({
+          finalText,
           messages,
+          requestType,
+          task,
+          agentState,
+          trace,
+          verification: verification.snapshot(),
+          effects: effectSnapshot(),
+          workflow,
+          process,
+          attempt: finalValidationAttempt,
+        });
+        acceptance = finalValidation?.acceptance;
+        if (finalValidation?.ok && finalValidation.verificationDecision?.status === "unverified-with-reason") {
+          verification.skip(finalValidation.verificationDecision.reason);
+        }
+        if (finalValidation && !finalValidation.ok && finalValidationAttempt < finalValidation.maxRepairAttempts) {
+          transitions.push(continueTransition(CONTINUE_TRANSITIONS.FINAL_VALIDATION_REPAIR, {
+            step,
+            errors: finalValidation.errors,
+          }));
+          workflow = advanceWorkflowState(workflow, { type: "final-validation-repair", step });
+          messages.push({
+            role: "user",
+            content: finalValidation.repairPrompt,
+          });
+          finalValidationAttempt += 1;
+          step += 1;
+          continue;
+        }
+        if (looksLikePseudoToolCall(message.content)) {
+          return {
+            finalText:
+              "The model returned tool-call markup as plain text instead of a final answer. I stopped before showing that raw internal markup. Please continue with a narrower request.",
+            messages,
+            contextState: contextSnapshot(),
+            steps: step,
+            usage: currentUsage(),
+            stoppedReason: TERMINAL_TRANSITIONS.PSEUDO_TOOL_CALL_TEXT,
+            transition: terminalTransition(TERMINAL_TRANSITIONS.PSEUDO_TOOL_CALL_TEXT, { step }),
+            transitions,
+            trace,
+            agentState,
+            requestType,
+            process,
+            verification: verification.snapshot(),
+            effects: effectSnapshot(),
+            quarantine: quarantine.snapshot(),
+            workflow: advanceWorkflowState(workflow, { type: "failed", step }),
+          };
+        }
+        const failedReason = finalValidation?.reason ?? TERMINAL_TRANSITIONS.REVIEW_SCHEMA_INVALID;
+        workflow = advanceWorkflowState(workflow, { type: finalValidation?.ok === false ? "failed" : "completed", step });
+        return {
+          finalText,
+          messages,
+          contextState: contextSnapshot(),
           steps: step,
-          usage,
-          stoppedReason: TERMINAL_TRANSITIONS.PSEUDO_TOOL_CALL_TEXT,
-          transition: terminalTransition(TERMINAL_TRANSITIONS.PSEUDO_TOOL_CALL_TEXT, { step }),
+          usage: currentUsage(),
+          stoppedReason: finalValidation?.ok === false ? failedReason : undefined,
+          transition: terminalTransition(finalValidation?.ok === false ? failedReason : TERMINAL_TRANSITIONS.COMPLETED, { step }),
           transitions,
           trace,
           agentState,
           requestType,
           process,
+          reviewReport: finalValidation?.report,
+          reviewValidation: finalValidation,
+          acceptance,
           verification: verification.snapshot(),
+          effects: effectSnapshot(),
           quarantine: quarantine.snapshot(),
-          workflow: advanceWorkflowState(workflow, { type: "failed", step }),
+          workflow,
         };
       }
-      const failedReason = finalValidation?.reason ?? TERMINAL_TRANSITIONS.REVIEW_SCHEMA_INVALID;
-      workflow = advanceWorkflowState(workflow, { type: finalValidation?.ok === false ? "failed" : "completed", step });
-      return {
-        finalText,
-        messages,
-        steps: step,
-        usage,
-        stoppedReason: finalValidation?.ok === false ? failedReason : undefined,
-        transition: terminalTransition(finalValidation?.ok === false ? failedReason : TERMINAL_TRANSITIONS.COMPLETED, { step }),
-        transitions,
-        trace,
-        agentState,
-        requestType,
-        process,
-        reviewReport: finalValidation?.report,
-        reviewValidation: finalValidation,
-        verification: verification.snapshot(),
-        quarantine: quarantine.snapshot(),
-        workflow,
+
+      const evaluated = message.tool_calls.map((call) => {
+        const name = call.function?.name;
+        const parsedArguments = parseToolArguments(call.function?.arguments);
+        const args = parsedArguments.args;
+        workflow = advanceWorkflowState(workflow, { type: "tool-start", tool: name, step });
+        // Decide immediately before execution so earlier tools in this turn can
+        // invalidate cached observations. Evaluate and count each call once.
+        const decision = { action: "pending", reasons: [] };
+        const lane = name === "agent" ? "dispatch:" + call.id : undefined;
+        return { call, name, args, argumentError: parsedArguments.error, decision, lane };
+      });
+
+      const runOne = async (item) => {
+        const sharedStop = taskBudget?.stopped();
+        if (sharedStop) throw Object.assign(new Error(sharedStop.message), { budget: sharedStop });
+        throwIfAborted(signal);
+        synchronizeWorkspaceRevision(processController, tools.getWorkspaceRevision?.());
+        // Earlier tools in this same model turn may have changed the workspace.
+        item.decision = evaluateToolCall(processController, { name: item.name, args: item.args, step, lane: item.lane });
+        onToolStart?.({ name: item.name, args: item.args, decision: item.decision });
+        const startedAt = Date.now();
+        const result = item.argumentError
+          ? {
+              ok: false,
+              code: "INVALID_TOOL_ARGUMENTS",
+              error: "Tool arguments were incomplete or invalid JSON. Retry with one complete, valid JSON object.",
+              recoverable: true,
+            }
+          : item.decision.action === "short_circuit"
+            ? item.decision.result
+            : await tools.execute(item.name, item.args, { signal });
+        if (!taskBudget && ["agent", "send_message"].includes(item.name) && item.decision.action !== "short_circuit") {
+          addUsage(usage, result?.usage);
+        }
+        const endedAt = Date.now();
+        // One event boundary updates all projections, including effects completed
+        // just before cancellation. Worker prose is never used for these facts.
+        const verificationState = await recordMutex.run(() => {
+          appendEffects(effects, result);
+          recordToolObservation(processController, { name: item.name, args: item.args, result, step, lane: item.lane });
+          const state = verification.observeTool({ name: item.name, args: item.args, result, step });
+          transitions.push(continueTransition(result?.ok === false ? CONTINUE_TRANSITIONS.TOOL_ERROR : CONTINUE_TRANSITIONS.TOOL_USE, { step, tool: item.name }));
+          recordToolStep(agentState, { step, name: item.name, args: item.args, result, startedAt, endedAt });
+          trace.push(toolTraceEvent({ step, name: item.name, args: item.args, result, durationMs: Math.max(0, endedAt - startedAt) }));
+          return state;
+        });
+        throwIfAborted(signal);
+        return { ...item, result, startedAt, endedAt, verificationState };
       };
-    }
 
-    const evaluated = message.tool_calls.map((call) => {
-      const name = call.function?.name;
-      const parsedArguments = parseToolArguments(call.function?.arguments);
-      const args = parsedArguments.args;
-      workflow = advanceWorkflowState(workflow, { type: "tool-start", tool: name, step });
-      const decision = evaluateToolCall(processController, { name, args, step });
-      // Concurrent dispatches get a stable per-dispatch lane; serial tools stay in the main
-      // lane so their cross-turn dedup is unchanged.
-      const lane = isParallelDispatch({ name, decision }) ? "dispatch:" + call.id : undefined;
-      onToolStart?.({ name, args, decision });
-      return { call, name, args, argumentError: parsedArguments.error, decision, lane };
-    });
-
-    const runOne = async (item) => {
-      throwIfAborted(signal);
-      const startedAt = Date.now();
-      const result = item.argumentError
-        ? {
-            ok: false,
-            code: "INVALID_TOOL_ARGUMENTS",
-            error: "Tool arguments were incomplete or invalid JSON. Retry with one complete, valid JSON object.",
-            recoverable: true,
-          }
-        : item.decision.action === "short_circuit"
-          ? item.decision.result
-          : await tools.execute(item.name, item.args, { signal });
-      throwIfAborted(signal);
-      // Record while running (under the mutex) so concurrent dispatches never race on the
-      // shared controller and each stays isolated in its own lane.
-      await recordMutex.run(() => recordToolObservation(processController, { name: item.name, args: item.args, result, step, lane: item.lane }));
-      return { ...item, result, startedAt, endedAt: Date.now() };
-    };
-
-    // Independent subagent dispatches are I/O-bound on the model and isolated from the parent
-    // workspace, so run them concurrently; every other tool stays serial because dedup and
-    // observation semantics assume ordered execution.
-    const executedById = new Map();
-    for (const item of evaluated.filter((item) => !isParallelDispatch(item))) {
-      executedById.set(item.call.id, await runOne(item));
-    }
-    for (const executed of await mapWithConcurrency(evaluated.filter(isParallelDispatch), MAX_PARALLEL_DISPATCH, runOne)) {
-      executedById.set(executed.call.id, executed);
-    }
-
-    for (const item of evaluated) {
-      const { name, args, result, startedAt, endedAt } = executedById.get(item.call.id);
-      const verificationState = verification.observeTool({ name, args, result, step });
-      transitions.push(continueTransition(result?.ok === false ? CONTINUE_TRANSITIONS.TOOL_ERROR : CONTINUE_TRANSITIONS.TOOL_USE, { step, tool: name }));
-      recordToolStep(agentState, { step, name, args, result, startedAt, endedAt });
-      trace.push(toolTraceEvent({ step, name, args, result, durationMs: Math.max(0, endedAt - startedAt) }));
-      const compacted = compactToolResult(name, result);
-      let { result: trustedResult, scan } = trustToolOutput
-        ? markUntrustedToolResult(name, compacted)
-        : { result: compacted, scan: { suspicious: false, reasons: [] } };
-      // Data/instruction separation: when injection is suspected, quarantine the raw content
-      // out-of-band and show the model only an inert projection with imperative lines withheld.
-      if (trustToolOutput && scan.suspicious) {
-        trustedResult = quarantineSuspiciousResult(name, trustedResult, quarantine);
+      // Read-only dispatches may overlap. The Worker runtime serializes all
+      // potentially writing workers that share this workspace.
+      const executedById = new Map();
+      for (const item of evaluated.filter((item) => !isParallelDispatch(item))) {
+        executedById.set(item.call.id, await runOne(item));
       }
-      // Redact any known secret values that a tool surfaced before the model or logs see them.
-      if (secretRegistry) trustedResult = redactResultSecrets(trustedResult, secretRegistry);
-      onToolEnd?.({ name, args, result, decision: item.decision, verification: verificationState, injection: scan });
-      onEvent?.({
-        type: "tool-call",
-        step,
-        tool: name,
-        ok: result?.ok !== false,
-        reused: result?.alreadyAvailable === true || result?.code === "ALREADY_AVAILABLE",
-        injectionSuspected: scan.suspicious,
-      });
-      messages.push({
-        role: "tool",
-        tool_call_id: item.call.id,
-        content: JSON.stringify(trustedResult),
-      });
-    }
+      for (const executed of await mapWithConcurrency(evaluated.filter(isParallelDispatch), MAX_PARALLEL_DISPATCH, runOne)) {
+        executedById.set(executed.call.id, executed);
+      }
 
-    const processNudge = maybeBuildProcessNudge(processController, { step });
-    if (processNudge) {
-      messages.push(processNudge);
-      transitions.push(continueTransition(CONTINUE_TRANSITIONS.TOOL_USE, { step, tool: "process_guard" }));
+      for (const item of evaluated) {
+        const { name, args, result, verificationState } = executedById.get(item.call.id);
+        const transport = (value, preview = false) => {
+          const marked = trustToolOutput ? markUntrustedToolResult(name, value)
+            : { result: value, scan: { suspicious: false, reasons: [] } };
+          let content = marked.result;
+          if (trustToolOutput && marked.scan.suspicious) content = quarantineSuspiciousResult(name, content, quarantine, { preview });
+          if (secretRegistry) content = redactResultSecrets(content, secretRegistry);
+          return { result: content, scan: marked.scan };
+        };
+        const compacted = tools.projectResult
+          ? await tools.projectResult(name, result, { secretRegistry, maxBytes: Math.max(1024, Math.min(16000, Math.floor(contextBudget.inputTokens / 8))),
+            measure: (value) => Buffer.byteLength(JSON.stringify(transport(value, true).result)) })
+          : compactToolResult(name, result);
+        const { result: trustedResult, scan } = transport(compacted);
+        onToolEnd?.({ name, args, result, decision: item.decision, verification: verificationState, injection: scan });
+        onEvent?.({
+          type: "tool-call",
+          step,
+          tool: name,
+          ok: result?.ok !== false,
+          reused: result?.alreadyAvailable === true || result?.code === "ALREADY_AVAILABLE",
+          injectionSuspected: scan.suspicious,
+        });
+        messages.push({
+          role: "tool",
+          tool_call_id: item.call.id,
+          content: JSON.stringify(trustedResult),
+        });
+      }
+
+      const processNudge = maybeBuildProcessNudge(processController, { step });
+      if (processNudge) {
+        messages.push(processNudge);
+        transitions.push(continueTransition(CONTINUE_TRANSITIONS.TOOL_USE, { step, tool: "process_guard" }));
+      }
+      onEvent?.({ type: "step", step });
+      syncUsage();
+      await onCheckpoint?.(serializeRunState({
+        step,
+        messages,
+        contextState: contextSnapshot(),
+        usage: currentUsage(),
+        workflow,
+        process: snapshotProcessMetrics(processController),
+        processController: serializeProcessController(processController),
+        requestType,
+        trace,
+        transitions,
+        agentState,
+        verification: verification.snapshot(),
+        effects: effectSnapshot(),
+      }));
+      step += 1;
     }
-    onEvent?.({ type: "step", step });
-    onCheckpoint?.(serializeRunState({
-      step,
-      messages,
-      usage,
-      workflow,
-      process: snapshotProcessMetrics(processController),
-      processController: serializeProcessController(processController),
-      requestType,
-      trace,
-      transitions,
-      agentState,
-      verification: verification.snapshot(),
-    }));
-    step += 1;
+  } catch (error) {
+    if (error?.usage) addUsage(usage, error.usage);
+    syncUsage();
+    const stopped = taskBudget?.stopped();
+    if (stopped) {
+      return finishRun({ finalText: stopped.message, stoppedReason: stopped.reason, workflowType: "failed", extra: { budget: stopped } });
+    }
+    if (error && typeof error === "object") {
+      error.agentUsage = { ...usage };
+      error.effects = effectSnapshot();
+      let savedContext;
+      try { savedContext = contextSnapshot(); }
+      catch (snapshotError) {
+        savedContext = snapshotContextState(contextState);
+        error.contextSnapshotError = { code: snapshotError.code ?? "CONTEXT_SNAPSHOT_FAILED", message: snapshotError.message };
+      }
+      error.runSnapshot = serializeRunState({ step, messages, contextState: savedContext, usage: currentUsage(), workflow, trace, transitions, agentState, acceptance, verification: verification.snapshot(), effects: effectSnapshot(), processController: serializeProcessController(processController) });
+    }
+    throw error;
+  } finally {
+    linkedSignal.dispose();
   }
 }
 
@@ -382,7 +523,7 @@ function evaluateBudgets({ step, maxSteps, tokens, tokenBudget, deadline, cost =
   return undefined;
 }
 
-export function serializeRunState({ step, messages, usage, workflow, process, processController, requestType, trace, transitions, agentState, verification }) {
+export function serializeRunState({ step, messages, contextState, usage, workflow, process, processController, requestType, trace, transitions, agentState, verification, effects, acceptance }) {
   return {
     version: 1,
     at: new Date().toISOString(),
@@ -391,6 +532,7 @@ export function serializeRunState({ step, messages, usage, workflow, process, pr
     status: workflow?.status,
     phase: workflow?.phase,
     messages: Array.isArray(messages) ? structuredClone(messages) : undefined,
+    contextState: contextState ? structuredClone(contextState) : undefined,
     usage: { ...usage },
     workflow: workflow ? structuredClone(workflow) : undefined,
     process: process ? { ...process } : undefined,
@@ -399,6 +541,8 @@ export function serializeRunState({ step, messages, usage, workflow, process, pr
     transitions: Array.isArray(transitions) ? structuredClone(transitions) : [],
     agentState: agentState ? structuredClone(agentState) : undefined,
     verification: verification ? structuredClone(verification) : undefined,
+    effects: effects ? structuredClone(effects) : undefined,
+    acceptance: acceptance ? structuredClone(acceptance) : undefined,
   };
 }
 
@@ -419,65 +563,108 @@ function hydrateAgentState(saved, { task, cwd, usage }) {
 
 export function compactLiveMessages(
   messages,
-  { protectedPrefixCount, agentState, processController, step, maxChars = MAX_LIVE_MESSAGE_CHARS } = {},
+  { protectedPrefixCount, agentState, processController, step, contextState, onCompaction, secretRegistry,
+    maxChars = MAX_LIVE_MESSAGE_CHARS, maxEstimatedTokens = Infinity } = {},
 ) {
+  if (protectedPrefixCount !== undefined && (!Number.isSafeInteger(protectedPrefixCount) || protectedPrefixCount < 1)
+    || typeof maxChars !== "number" || Number.isNaN(maxChars) || maxChars < 0
+    || typeof maxEstimatedTokens !== "number" || Number.isNaN(maxEstimatedTokens)) throw Object.assign(new Error("Invalid context compaction budget or prefix."), { code: "COMPACTION_RANGE_INVALID" });
+  const state = contextState ?? LIVE_CONTEXT_STATES.get(messages) ?? createContextState(messages);
+  LIVE_CONTEXT_STATES.set(messages, state);
+  syncContextState(state, messages);
   const beforeChars = messageChars(messages);
-  if (beforeChars <= maxChars) return false;
+  if (beforeChars <= maxChars && measureContextMessages(messages) <= maxEstimatedTokens) return false;
   const beforeMessages = messages.length;
-  const safePrefixCount = Math.max(1, Math.min(protectedPrefixCount ?? 1, messages.length));
-  const protectedMessages = messages.slice(0, safePrefixCount);
-  const dynamicMessages = messages.slice(safePrefixCount).filter((message) => !isRunStateSummary(message));
-  let tailStart = Math.max(0, dynamicMessages.length - RECENT_LIVE_MESSAGES);
-  while (tailStart > 0 && dynamicMessages[tailStart]?.role === "tool") {
-    tailStart -= 1;
-  }
-  const tail = dynamicMessages.slice(tailStart);
-  const summaryParts = ["Run state summary (local context compaction):", buildAgentStateSummary(agentState)];
-  if (processController) {
-    summaryParts.push("", buildWorkingSetSummary(processController));
-  }
-  const summary = {
-    role: "system",
-    content: summaryParts.join("\n"),
-  };
-  messages.splice(0, messages.length, ...protectedMessages, summary, ...tail);
-  if (agentState) {
-    if (processController) {
-      recordProcessSnapshot(agentState, snapshotProcessMetrics(processController));
+  let safePrefixCount = Math.max(1, Math.min(protectedPrefixCount ?? state.protectedPrefixCount ?? 1, messages.length));
+  while (safePrefixCount > 1 && !isBalancedContextBoundary(messages, safePrefixCount)) safePrefixCount--;
+  if (!isBalancedContextBoundary(messages, safePrefixCount)) return false;
+  let end = Math.max(safePrefixCount, messages.length - RECENT_LIVE_MESSAGES);
+  while (end > safePrefixCount && !isBalancedContextBoundary(messages, end)) end--;
+  const bodies = compactionSummaryBodies(agentState, processController, messages.slice(safePrefixCount));
+  let selected;
+  for (;;) {
+    if (end > safePrefixCount && isBalancedContextBoundary(messages, end)) {
+      for (const content of bodies) {
+        const body = redact(projectUntrustedContent(content).safe, { secretRegistry, maxTextChars: Infinity });
+        const replacement = { role: "user", content: fenceUntrustedContent("context-compaction", body).text };
+        let proposal;
+        try { proposal = planContextCompaction({ messages, contextState: state, start: safePrefixCount, end, replacement,
+          protectedPrefixCount: safePrefixCount }); }
+        catch (error) { if (["COMPACTION_NO_PROGRESS", "COMPACTION_UNBALANCED_TOOLS"].includes(error.code)) continue; throw error; }
+        const next = [...messages.slice(0, safePrefixCount), replacement, ...messages.slice(end)];
+        if (!selected || proposal.afterTotalEstimate < selected.afterTotalEstimate) selected = proposal;
+        if (messageChars(next) <= maxChars && proposal.afterTotalEstimate <= maxEstimatedTokens) { selected = proposal; break; }
+      }
+      if (selected && messageChars([...messages.slice(0, selected.start), selected.replacement, ...messages.slice(selected.end)]) <= maxChars
+        && selected.afterTotalEstimate <= maxEstimatedTokens) break;
     }
-    recordContextCompaction(agentState, {
-      beforeMessages,
-      afterMessages: messages.length,
-      beforeChars,
-      afterChars: messageChars(messages),
-      step,
-    });
+    if (end >= messages.length) break;
+    end++;
+    while (end < messages.length && !isBalancedContextBoundary(messages, end)) end++;
   }
+  if (!selected) return false;
+  const transaction = applyContextCompaction(state, messages, selected);
+  if (agentState) {
+    if (processController) recordProcessSnapshot(agentState, snapshotProcessMetrics(processController));
+    recordContextCompaction(agentState, { beforeMessages, afterMessages: messages.length, beforeChars,
+      afterChars: messageChars(messages), step, transaction });
+  }
+  onCompaction?.(structuredClone(transaction));
   return true;
 }
 
-function isRunStateSummary(message) {
-  return message?.role === "system" && String(message.content ?? "").startsWith("Run state summary (local context compaction):");
+function compactionSummaryBodies(agentState, processController, source) {
+  const heading = "Run state summary (local context compaction):";
+  const full = [heading, agentState ? buildAgentStateSummary(agentState) : "No execution state recorded."];
+  if (processController) full.push("", buildWorkingSetSummary(processController));
+  const observations = (agentState?.observations ?? []).filter((entry) => entry.type !== "context-compaction").slice(-3)
+    .map((entry) => String(entry.summary ?? "").slice(0, 120));
+  const compact = [heading, ...observations];
+  if (processController) {
+    compact.push("Working-set observations:");
+    const files = [...processController.workingSet.files.values()].slice(-1);
+    for (const file of files) compact.push(String(file.path) + ": " + String(file.content).slice(0, 120));
+  }
+  const refs = [];
+  for (const message of source) {
+    if (message.role !== "tool") continue;
+    try {
+      const value = JSON.parse(message.content);
+      if (/^out_[A-Za-z0-9_-]{32}$/.test(value.outputRef ?? "")) refs.push("outputRef=" + value.outputRef);
+      if (typeof value.jobId === "string" && /^[A-Za-z0-9_-]{1,100}$/.test(value.jobId)) refs.push("jobId=" + value.jobId);
+    } catch { /* non-JSON historical text remains in the source transcript */ }
+  }
+  const retained = [...new Set(refs)].slice(-8);
+  if (retained.length) {
+    const line = "Retained output references: " + retained.join(", ");
+    full.push(line); compact.push(line);
+  }
+  return [full.join("\n"), compact.join("\n")];
 }
 
 async function requestChatCompletion({
   client,
   request,
+  prepared,
   stream,
   onTextDelta,
   onModelEnd,
   step,
+  onRuntimeEvent,
   finalizing = false,
   signal,
 }) {
   try {
+    if (prepared) return await prepared.dispatch({ stream: stream && typeof client.chatCompletionStream === "function", signal,
+      onContent: (content) => onTextDelta?.({ content, step, finalizing }), onRuntimeEvent });
     if (stream && typeof client.chatCompletionStream === "function") {
       return await client.chatCompletionStream(request, {
         signal,
         onContent: (content) => onTextDelta?.({ content, step, finalizing }),
+        onRuntimeEvent,
       });
     }
-    return await client.chatCompletion(request, { signal });
+    return await client.chatCompletion(request, { signal, onRuntimeEvent });
   } finally {
     onModelEnd?.({ step, finalizing });
   }
@@ -494,35 +681,34 @@ function isParallelDispatch(item) {
   return item.name === "agent" && item.decision.action !== "short_circuit";
 }
 
-const QUARANTINE_FIELDS = ["content", "stdout", "stderr", "diff", "status", "failureSummary", "result", "summary"];
-
-function quarantineSuspiciousResult(name, result, quarantine) {
-  if (!result || typeof result !== "object") return result;
-  const next = { ...result };
-  for (const field of QUARANTINE_FIELDS) {
-    if (typeof next[field] !== "string" || next[field].length === 0) continue;
-    const held = quarantine.store(next[field], { tool: name, field });
-    next[field] =
-      `[quarantined ${held.id}: ${held.withheld.length} instruction-like line(s) withheld; inert projection below]\n` + held.safe;
-  }
-  next.quarantined = quarantine.list().map((entry) => entry.id);
+function quarantineSuspiciousResult(name, result, quarantine, { preview = false } = {}) {
+  const ids = [];
+  const walk = (value, path = "") => {
+    if (typeof value === "string") {
+      const projection = projectUntrustedContent(value);
+      if (!projection.withheld.length) return value;
+      // Size checks must be pure: only the final projection commits quarantine
+      // entries. Include this result's references rather than the entire run's.
+      const held = preview ? { ...projection, id: "q" + (quarantine.size() + ids.length + 1) }
+        : quarantine.store(value, { tool: name, field: path });
+      ids.push(held.id);
+      return `[quarantined ${held.id}: ${held.withheld.length} instruction-like line(s) withheld; inert projection below]\n` + held.safe;
+    }
+    if (Array.isArray(value)) return value.map((item, index) => walk(item, `${path}.${index}`));
+    if (!value || typeof value !== "object") return value;
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
+      ["effects", "workspaceRevision", "provenance", "injectionSuspected"].includes(key) ? item : walk(item, path ? `${path}.${key}` : key)]));
+  };
+  const next = walk(result);
+  if (next && typeof next === "object" && ids.length) next.quarantined = ids;
   return next;
 }
 
-const SECRET_REDACTABLE_FIELDS = ["content", "stdout", "stderr", "diff", "status", "failureSummary", "result", "summary", "error"];
-
 function redactResultSecrets(result, secretRegistry) {
+  if (typeof result === "string") return secretRegistry.redact(result);
+  if (Array.isArray(result)) return result.map((value) => redactResultSecrets(value, secretRegistry));
   if (!result || typeof result !== "object") return result;
-  let next = result;
-  for (const field of SECRET_REDACTABLE_FIELDS) {
-    if (typeof result[field] !== "string" || result[field].length === 0) continue;
-    const redacted = secretRegistry.redact(result[field]);
-    if (redacted !== result[field]) {
-      if (next === result) next = { ...result };
-      next[field] = redacted;
-    }
-  }
-  return next;
+  return Object.fromEntries(Object.entries(result).map(([key, value]) => [key, redactResultSecrets(value, secretRegistry)]));
 }
 
 async function mapWithConcurrency(items, limit, fn) {
@@ -537,7 +723,9 @@ async function mapWithConcurrency(items, limit, fn) {
       results[index] = await fn(items[index]);
     }
   };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, runner));
+  const settled = await Promise.allSettled(Array.from({ length: Math.min(limit, items.length) }, runner));
+  const failed = settled.find((entry) => entry.status === "rejected");
+  if (failed) throw failed.reason;
   return results;
 }
 
@@ -561,9 +749,11 @@ function emptyUsage() {
 
 function addUsage(total, usage) {
   if (!usage) return;
-  total.promptTokens += Number(usage.prompt_tokens ?? usage.promptTokens ?? 0);
-  total.completionTokens += Number(usage.completion_tokens ?? usage.completionTokens ?? 0);
-  total.totalTokens += Number(usage.total_tokens ?? usage.totalTokens ?? 0);
+  const prompt = Number(usage.prompt_tokens ?? usage.promptTokens ?? 0);
+  const completion = Number(usage.completion_tokens ?? usage.completionTokens ?? 0);
+  total.promptTokens += prompt;
+  total.completionTokens += completion;
+  total.totalTokens += Number(usage.total_tokens ?? usage.totalTokens ?? prompt + completion);
 }
 
 function parseToolArguments(value) {
@@ -580,59 +770,6 @@ function parseToolArguments(value) {
   }
 }
 
-export function compactToolResult(name, result) {
-  if (!result || typeof result !== "object") return result;
-  const compact = {};
-  for (const key of [
-    "ok",
-    "code",
-    "error",
-    "recoverable",
-    "suggestion",
-    "cached",
-    "alreadyAvailable",
-    "reason",
-    "priorStep",
-    "signature",
-    "truncated",
-    "path",
-    "requestedPath",
-    "bytesWritten",
-    "status",
-    "task_id",
-    "mode",
-    "stoppedReason",
-  ]) {
-    if (result[key] !== undefined) compact[key] = result[key];
-  }
-  if (result.activity) compact.activity = result.activity;
-  if (result.usage) compact.usage = result.usage;
-  if (result.files) compact.files = compactArray(result.files, 120);
-  if (result.matches) compact.matches = compactArray(result.matches, 80);
-  if (result.content !== undefined) compact.content = truncateText(result.content, 30000);
-  if (result.failureSummary !== undefined) compact.failureSummary = truncateText(result.failureSummary, 12000);
-  if (result.stdout !== undefined) compact.stdout = truncateText(result.stdout, 12000);
-  if (result.stderr !== undefined) compact.stderr = truncateText(result.stderr, 12000);
-  if (result.diff !== undefined) compact.diff = truncateText(result.diff, 20000);
-  if (result.status !== undefined && name === "git_status") compact.status = truncateText(result.status, 8000);
-  if (result.summary !== undefined) compact.summary = truncateText(result.summary, 4000);
-  if (result.result !== undefined) compact.result = truncateText(result.result, 16000);
-  return compact;
-}
-
-function compactArray(values, maxItems) {
-  if (!Array.isArray(values) || values.length <= maxItems) return values;
-  return [
-    ...values.slice(0, maxItems),
-    `... truncated ${values.length - maxItems} additional item${values.length - maxItems === 1 ? "" : "s"}`,
-  ];
-}
-
-function truncateText(value, maxChars) {
-  const text = String(value ?? "");
-  if (text.length <= maxChars) return text;
-  return text.slice(0, maxChars) + `\n... truncated ${text.length - maxChars} additional characters`;
-}
 
 function messageChars(messages) {
   return messages.reduce((total, message) => total + String(message?.content ?? "").length, 0);

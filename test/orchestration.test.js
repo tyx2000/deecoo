@@ -45,7 +45,7 @@ test("research worker tools are read-only", async () => {
 
   assert.deepEqual(
     workerTools.schemas.map((schema) => schema.function.name),
-    ["list_files", "read_file", "search_text", "git_status", "git_diff"],
+    ["list_files", "read_file", "search_text", "git_status", "git_diff", "read_output", "search_output", "find_symbols", "find_references", "task_diff"],
   );
 
   const result = await workerTools.execute("write_file", { path: "blocked.txt", content: "no" });
@@ -1057,7 +1057,7 @@ test("agent repairs invalid review output before returning", async () => {
   const result = await runAgent({
     client,
     tools,
-    task: "review this project",
+    task: "review this project\n```js\nconst value = 1;\n```",
     cwd: "/tmp/workspace",
     model: "test",
     stream: false,
@@ -1470,19 +1470,18 @@ test("workspace snapshot includes bounded high-signal project context", async ()
   assert.equal(snapshot.projectInstructions.additional[0].path, "AGENTS.md");
   assert.equal(snapshot.tree.lines.includes("index.js"), true);
   assert.match(messages[0].content, /Workspace snapshot/);
-  assert.match(messages[0].content, /primary project instructions \(.deecoo.md\)/);
+  assert.match(messages.find((message) => message.role === "system").content, /primary project instructions \(.deecoo.md\)/);
   assert.match(messages[0].content, /git:/);
 });
 
-test("workspace snapshot falls back to README when no instruction file exists", async () => {
+test("workspace snapshot keeps README as reference data when no instruction file exists", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "deecoo-workspace-instructions-"));
   await writeFile(join(workspace, "README.md"), "# Demo\n\nUse small patches.", "utf8");
 
   const snapshot = await buildWorkspaceSnapshot(workspace);
 
-  assert.equal(snapshot.projectInstructions.primary.path, "README.md");
-  assert.equal(snapshot.projectInstructions.primary.fallback, true);
-  assert.match(snapshot.projectInstructions.primary.content, /Use small patches/);
+  assert.equal(snapshot.projectInstructions.primary, undefined);
+  assert.match(snapshot.readme.content, /Use small patches/);
 });
 
 test("project description refreshes generated section without removing manual notes", async () => {
