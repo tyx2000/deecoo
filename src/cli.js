@@ -16,6 +16,7 @@ import { loadConfig } from "./config/env.js";
 import { addApprovedShellCommand, applySettingsEnv, loadSettingsEnv, resolveShellPermissions, setAutoApproveAllShellCommands } from "./config/settings.js";
 import { ensureProjectDescription } from "./context/workspaceSnapshot.js";
 import { createModelClient } from "./llm/clientFactory.js";
+import { discoverModelMetadata } from "./llm/modelDiscovery.js";
 import { createSessionStore } from "./session/store.js";
 import { listCodexSkills, loadCodexSkill } from "./skills/install.js";
 import { formatToolLine } from "./terminal/markdown.js";
@@ -117,6 +118,7 @@ async function mainInner(args) {
     const value = { ...structuredRunResult({ task: result.agentState?.task ?? args.task, result }), acceptance: result.acceptance, runId: result.runId, taskId: result.taskId, changes: result.changes, terminationSignal: result.terminationSignal };
     console.log(JSON.stringify({ schemaVersion: 1, type: "result", result: redact(value, { secretRegistry }) }));
   };
+  const modelMetadata = discoverModelMetadata(config);
   const permissions = await resolveShellPermissions(settings.permissions, { workspace: cwd });
   const task = args.task.trim();
   const interactiveLaunch = !args.command && !task;
@@ -124,6 +126,7 @@ async function mainInner(args) {
   if (!args.nonInteractive) title.set(`${basename(cwd) || cwd}###deecoo`);
   await initializeProjectDescription(cwd);
 
+  config.modelMetadata ??= await modelMetadata;
   const client = createModelClient(config);
   const prompter = args.nonInteractive ? async () => "deny" : createPrompter(args.yes);
   const tools = createToolRuntime({
@@ -150,6 +153,7 @@ async function mainInner(args) {
     ["Workspace", cwd],
     ["Provider", config.provider],
     ["Model", config.model],
+    ["Context", `${client.capabilities.contextWindow} tokens (${client.capabilities.contextWindowSource})`],
     ["Permissions", tools.getPermissionMode()],
     ["Theme", getThemeName()],
   ]);

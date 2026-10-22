@@ -30,7 +30,7 @@ import { linkSignals } from "../harness/budget.js";
 import { compactToolResult } from "../tools/projection.js";
 export { compactToolResult } from "../tools/projection.js";
 import { appendEffects } from "../harness/effects.js";
-import { buildBudgetedContext, buildContextBudget, estimateTokens, measureContextMessages } from "../context/builder.js";
+import { buildBudgetedContext, buildContextBudget, contextWindowHint, estimateTokens, measureContextMessages } from "../context/builder.js";
 import { randomUUID } from "node:crypto";
 import { redact } from "../observability/audit.js";
 import { applyContextCompaction, contextFingerprint, createContextState, isBalancedContextBoundary, planContextCompaction, snapshotContextState, syncContextState } from "../context/compaction.js";
@@ -220,7 +220,8 @@ export async function runAgent({
         request = prepared.request;
       }
       const inputTokens = measureContextMessages(request.messages) + estimateTokens(request.tools ?? []);
-      if (inputTokens > contextBudget.inputTokens) throw Object.assign(new Error("Required instructions, task, tools and current observations exceed the configured context window."),
+      if (inputTokens > contextBudget.inputTokens) throw Object.assign(new Error("Required instructions, task, tools and current observations exceed the configured context window."
+        + contextWindowHint({ contextWindow: contextBudget.contextWindow, contextWindowSource: contextWindow === undefined ? prepared?.capabilities.contextWindowSource : "configured" })),
         { code: "CONTEXT_BUDGET_EXCEEDED", contextBudget, estimatedInputTokens: inputTokens });
       if (prepared) onEvent?.({ type: "request-prepared", step, routeIdentity: prepared.routeIdentity,
         requestFingerprint: prepared.requestFingerprint, effectiveConfig: prepared.effectiveConfig, estimatedInputTokens: inputTokens });

@@ -139,6 +139,7 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
   const effectiveMaxTokens = preparation?.request?.max_tokens ?? config.maxTokens ?? config.outputReserve ?? client.capabilities?.outputReserve ?? 4096;
   const effectiveCapabilities = preparation?.capabilities ?? client.capabilities;
   const contextOptions = { contextWindow: config.contextWindow ?? effectiveCapabilities?.contextWindow ?? 128000,
+    contextWindowSource: effectiveCapabilities?.contextWindowSource,
     outputReserve: Math.max(config.outputReserve ?? 0, effectiveMaxTokens ?? effectiveCapabilities?.outputReserve ?? 4096) };
   const identity = await checkpointIdentity({ cwd, model: config.model, tools, taskSpec, config, client });
   const resume = resumeCheckpoint ? prepareCheckpointResume(validateCheckpoint(resumeCheckpoint, identity)) : undefined;

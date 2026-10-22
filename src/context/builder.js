@@ -24,6 +24,12 @@ export function buildContextBudget({ contextWindow = 128000, outputReserve, safe
     estimator: "conservative-utf8-byte-estimate", exactTokenizer: false };
 }
 
+// An assumed window is the usual cause of an over-budget request; say how to set the real one.
+export function contextWindowHint({ contextWindow, contextWindowSource } = {}) {
+  return contextWindowSource === "conservative-fallback"
+    ? ` The context window of this model is unknown, so ${contextWindow} tokens was assumed; set DEECOO_CONTEXT_WINDOW or pass --context-window with its real size.` : "";
+}
+
 export function buildBudgetedContext(items, options = {}) {
   const started = performance.now();
   const budget = buildContextBudget(options);
@@ -32,7 +38,7 @@ export function buildBudgetedContext(items, options = {}) {
   const reservedInputTokens = measureContextMessages(options.reservedMessages ?? [])
     + (options.reservedTools === undefined ? 0 : estimateTokens(options.reservedTools));
   const availableContextTokens = budget.inputTokens - reservedInputTokens;
-  if (availableContextTokens < 0) throw Object.assign(new Error("Required request instructions, task and tools exceed the model input budget."),
+  if (availableContextTokens < 0) throw Object.assign(new Error("Required request instructions, task and tools exceed the model input budget." + contextWindowHint(options)),
     { code: "CONTEXT_BUDGET_EXCEEDED", requiredTokens: reservedInputTokens, budget });
   const sorted = items.filter((item) => item?.message).map((item, index) => ({ ...item, index,
     message: normalizeMessage(item.message), layer: item.layer ?? inferLayer(item) }))
@@ -47,7 +53,7 @@ export function buildBudgetedContext(items, options = {}) {
     const layerLimit = budget.layers[item.layer] === undefined ? availableContextTokens
       : Math.floor(budget.layers[item.layer] * availableContextTokens / budget.inputTokens);
     if (used + cost > budget.inputTokens) {
-      if (item.required) throw Object.assign(new Error("Required context exceeds the model input budget."), { code: "CONTEXT_BUDGET_EXCEEDED", requiredTokens: used + cost, budget });
+      if (item.required) throw Object.assign(new Error("Required context exceeds the model input budget." + contextWindowHint(options)), { code: "CONTEXT_BUDGET_EXCEEDED", requiredTokens: used + cost, budget });
       deferred.push({ ...item, cost }); continue;
     }
     if (!item.required && layerUsed + cost > layerLimit) { deferred.push({ ...item, cost }); continue; }
