@@ -15,7 +15,7 @@ export async function selectOption({ title, options, selectedIndex = 0, filterab
 
   let selected = Math.max(0, Math.min(selectedIndex, options.length - 1));
   let query = "";
-  let renderedLines = 0;
+  let renderedFrame;
 
   readline.emitKeypressEvents(input);
   const resumeStatusLine = pauseStatusLine();
@@ -31,51 +31,38 @@ export async function selectOption({ title, options, selectedIndex = 0, filterab
     };
 
     const render = () => {
-      if (renderedLines > 0) {
-        output.write(`\x1B[${renderedLines}A`);
-        output.write("\x1B[J");
-      }
-
       const visible = filteredOptions();
       if (selected >= visible.length) selected = Math.max(0, visible.length - 1);
 
-      output.write(paint("title", title));
-      if (filterable) {
-        output.write(
-          query ? `  ${paint("muted", "filter:")} ${highlightQuery(query, query)}` : `  ${paint("muted", "type to filter")}`,
-        );
-      }
-      output.write("\n");
-
+      const filter = !filterable ? "" : query
+        ? `  ${paint("muted", "filter:")} ${highlightQuery(query, query)}` : `  ${paint("muted", "type to filter")}`;
+      const lines = [paint("title", title) + filter];
       if (visible.length === 0) {
-        output.write(`  ${paint("muted", "No matches")}\n`);
-        renderedLines = 2;
-        return;
-      }
-
-      const windowed = menuWindow(visible, selected);
-      for (let i = 0; i < windowed.items.length; i += 1) {
-        const optionIndex = windowed.start + i;
-        for (const line of renderMenuOptionLines(windowed.items[i], query, { selected: optionIndex === selected })) {
-          output.write(`${line}\n`);
+        lines.push(`  ${paint("muted", "No matches")}`);
+      } else {
+        const windowed = menuWindow(visible, selected);
+        for (let i = 0; i < windowed.items.length; i += 1) {
+          const optionIndex = windowed.start + i;
+          lines.push(...renderMenuOptionLines(windowed.items[i], query, { selected: optionIndex === selected }));
         }
-      }
-      if (windowed.hasOverflow) {
-        output.write(`  ${paint("muted", `${selected + 1}/${visible.length}`)}\n`);
+        if (windowed.hasOverflow) {
+          lines.push(`  ${paint("muted", `${selected + 1}/${visible.length}`)}`);
+        }
+        const preview = visible[selected]?.preview;
+        if (preview) lines.push("", String(preview));
       }
 
-      const preview = visible[selected]?.preview;
-      if (preview) {
-        output.write(`\n${preview}\n`);
+      // Long labels (for example CJK session summaries) wrap, so the menu is
+      // laid out in physical rows and patched in place like the prompt.
+      const frame = layoutPromptFrame({ prompt: lines.join("\n") + "\n", buffer: "", columns: output.columns, rows: output.rows });
+      if (renderedFrame && renderedFrame.columns !== frame.columns) {
+        clearFrame(renderedFrame);
+        renderedFrame = undefined;
       }
-      renderedLines =
-        windowed.items.reduce((total, option, offset) => {
-          return total + renderMenuOptionLines(option, query, { selected: windowed.start + offset === selected }).length;
-        }, 0) +
-        1 +
-        (windowed.hasOverflow ? 1 : 0) +
-        (preview ? previewLineCount(preview) + 1 : 0);
+      output.write("\x1B[?2026h" + framePatch(renderedFrame, frame) + "\x1B[?2026l");
+      renderedFrame = frame;
     };
+    const onResize = () => { if (!finished) render(); };
 
     const onAbort = () => cleanup(undefined);
     let finished = false;
@@ -84,6 +71,7 @@ export async function selectOption({ title, options, selectedIndex = 0, filterab
       finished = true;
       signal?.removeEventListener("abort", onAbort);
       input.off("keypress", onKeypress);
+      output.off("resize", onResize);
       input.setRawMode(wasRaw);
       resumeStatusLine();
       output.write("\x1B[?25h");
@@ -139,6 +127,7 @@ export async function selectOption({ title, options, selectedIndex = 0, filterab
     };
 
     input.on("keypress", onKeypress);
+    output.on("resize", onResize);
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted) onAbort();
     else render();
@@ -223,10 +212,7 @@ export async function readPromptLine(prompt, slashOptions, { history, triggers =
 
     const clearRendered = () => {
       if (!renderedFrame) return;
-      const availableRows = Number.isSafeInteger(output.rows) && output.rows > 0 ? output.rows : Infinity;
-      const cursorRow = Math.min(reflowCursorRow(renderedFrame, output.columns), availableRows - 1);
-      if (cursorRow > 0) output.write(`\x1B[${cursorRow}A`);
-      output.write("\r\x1B[J");
+      clearFrame(renderedFrame);
       renderedFrame = undefined;
     };
 
@@ -492,8 +478,12 @@ function normalizedHistory(values) {
   return items.slice(-200);
 }
 
-function previewLineCount(value) {
-  return String(value ?? "").split(/\r?\n/).length;
+// Erases a drawn frame from its first row, after the terminal reflowed it to the current width.
+function clearFrame(frame) {
+  const availableRows = Number.isSafeInteger(output.rows) && output.rows > 0 ? output.rows : Infinity;
+  const cursorRow = Math.min(reflowCursorRow(frame, output.columns), availableRows - 1);
+  if (cursorRow > 0) output.write(`\x1B[${cursorRow}A`);
+  output.write("\r\x1B[J");
 }
 
 function renderMenuOptionLines(option, query, { selected = false } = {}) {

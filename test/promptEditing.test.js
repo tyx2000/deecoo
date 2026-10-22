@@ -62,7 +62,7 @@ async function promptFixture(action, { columns = 10, rows = 30, slashOptions = [
   const directory = await mkdtemp(join(tmpdir(), "deecoo-prompt-screen-"));
   const script = join(directory, "prompt.mjs");
   await writeFile(script, `
-import { readPromptLine } from ${JSON.stringify(new URL("../src/terminal/select.js", import.meta.url).href)};
+import { readPromptLine, selectOption } from ${JSON.stringify(new URL("../src/terminal/select.js", import.meta.url).href)};
 import { setImmediate } from 'node:timers/promises';
 Object.defineProperty(process.stdin, 'isTTY', { value: true });
 Object.defineProperty(process.stdout, 'isTTY', { value: true });
@@ -74,7 +74,8 @@ process.on('message', async (message) => {
   if (message.type === 'start') {
     process.stdout.columns = message.columns; process.stdout.rows = message.rows;
     readPromptLine(message.prompt, message.slashOptions, { history: message.history ?? [], signal: controller.signal }).then((value) => process.send({ type: 'complete', value }));
-  } else if (message.type === 'keypress') process.stdin.emit('keypress', message.str, message.key);
+  } else if (message.type === 'select') selectOption(message.options).then((option) => process.send({ type: 'selected', value: option?.value }));
+  else if (message.type === 'keypress') process.stdin.emit('keypress', message.str, message.key);
   else if (message.type === 'abort') controller.abort();
   await setImmediate();
   process.send({ type: 'ack', id: message.id });
@@ -84,11 +85,12 @@ process.on('message', async (message) => {
   const screen = new Screen(columns, rows); const waiters = new Map(); const writes = [];
   let sequence = 0, stderr = "", fatal;
   child.stderr.setEncoding("utf8"); child.stderr.on("data", (text) => { stderr += text; });
-  let complete;
+  let complete, selection;
   const pending = new Promise((resolve) => { complete = resolve; });
   child.on("message", (message) => {
     if (message.type === "output") { writes.push(message.text); try { screen.write(message.text); } catch (error) { fatal = error; } }
     if (message.type === "complete") complete(message.value);
+    if (message.type === "selected") selection = message.value;
     if (message.type === "ack") waiters.get(message.id)?.();
   });
   const closed = new Promise((resolve) => child.once("close", resolve));
@@ -107,7 +109,8 @@ process.on('message', async (message) => {
     const press = (str, key = {}) => send({ type: "keypress", str, key });
     const start = (history) => send({ type: "start", columns, rows, slashOptions, prompt, history });
     const takeWrites = () => writes.splice(0);
-    await action({ screen, press, pending, start, takeWrites });
+    const select = (options) => send({ type: "select", options });
+    await action({ screen, press, pending, start, takeWrites, select, selection: () => selection });
   } finally {
     child.kill("SIGTERM"); await closed;
     await rm(directory, { recursive: true, force: true });
@@ -264,3 +267,20 @@ test("INPUT-003 each keystroke is one synchronized write that leaves the header 
   assert.deepEqual(screen.lines().slice(0, 3), ["deecoo", "> abcdefg", ""], "the emptied wrapped row is cleared");
   assert.deepEqual(screen.cursor(), { row: 1, column: 9 });
 }));
+
+test("INPUT-004 a picker with wrapped labels keeps one title while the selection moves", async () => promptFixture(async ({ screen, press, pending, select, selection }) => {
+  await press("\r", { name: "return" });
+  assert.equal(await pending, "");
+  await select({ title: "Resume conversation", options: [
+    { label: "7e8eab4f  " + "以一个harness工具的角度对本项目进行审查".repeat(2), value: "long" },
+    { label: "b7c41ce5  short task", value: "short" },
+  ] });
+  const titles = () => screen.lines().filter((line) => line.includes("Resume conversation")).length;
+  for (const name of ["down", "up", "down"]) {
+    await press("", { name });
+    assert.equal(titles(), 1, screen.lines().join("\n"));
+  }
+  assert.ok(screen.lines().some((line) => line.startsWith("> b7c41ce5")));
+  await press("\r", { name: "return" });
+  assert.equal(selection(), "short");
+}, { columns: 40 }));
