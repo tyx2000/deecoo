@@ -164,6 +164,10 @@ function consumeSseEvents(buffer) {
 }
 
 function applyChatDelta(message, delta, handlers) {
+  // Every generated piece counts toward output, including reasoning and tool arguments.
+  const generated = (delta.content ?? "") + (delta.reasoning_content ?? "")
+    + (delta.tool_calls ?? []).map((call) => call.function?.arguments ?? "").join("");
+  if (generated) handlers.onProgress?.(generated);
   if (delta.role) message.role = delta.role;
   if (delta.content) {
     message.content += delta.content;

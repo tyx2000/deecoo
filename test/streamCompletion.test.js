@@ -179,3 +179,16 @@ test("OUTPUT-001 a tool call cut off by the output limit names the setting to ra
     await assert.rejects(createDeepSeekClient(config).chatCompletionStream(request, {}), { message: "Stream ended with incomplete tool arguments." });
   });
 });
+
+test("STATUS-001 stream progress counts reasoning, text and tool arguments as they arrive", async () => {
+  const payload = openAiEvent({ choices: [{ delta: { reasoning_content: "think " } }] })
+    + openAiEvent({ choices: [{ delta: { content: "answer " } }] })
+    + openAiEvent({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "read_file", arguments: "{\"path\":" } }] } }] })
+    + openAiEvent({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "\"a.js\"}" } }] } }] })
+    + openAiEvent({ choices: [{ delta: {}, finish_reason: "tool_calls" }] }) + "data: [DONE]\n\n";
+  await withPayload(payload, async () => {
+    const progress = [];
+    await createDeepSeekClient(config).chatCompletionStream(request, { onProgress: (text) => progress.push(text) });
+    assert.deepEqual(progress, ["think ", "answer ", "{\"path\":", "\"a.js\"}"]);
+  });
+});

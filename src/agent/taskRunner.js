@@ -42,7 +42,7 @@ import { buildSessionContext, recordTurn } from "../session/store.js";
 import { artifactContextMessages, saveSkillArtifact } from "../session/artifacts.js";
 import { scorArtifactMetadata } from "../skills/scor.js";
 import { createAssistantStreamPrinter, formatRunFooter, formatToolLine, printAssistantResponse } from "../terminal/markdown.js";
-import { createSpinner } from "../terminal/spinner.js";
+import { createStatusLine, formatStatusLine } from "../terminal/statusLine.js";
 import { createPhaseProgress, formatActivityBlock, formatActivityStart } from "../cli/activity.js";
 import { buildVerificationPlan, verificationPlanMessage } from "../verification/planner.js";
 
@@ -121,7 +121,14 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
 
 async function runTaskInner({ client, tools, task, cwd, config, sessionStore, session, activeSkills = [], signal, taskDeadline, resumeCheckpoint, runtimeContext, secretRegistry, taskPluginScope }) {
   const log = config.quiet ? () => {} : console.log;
-  const spinner = config.quiet ? { start() {}, stop() {} } : createSpinner("Thinking");
+  // Bottom status line: phase, elapsed time and the whole task's token usage,
+  // with the current stream's output estimated until the provider reports it.
+  let statusPhase = "Thinking", streamingBytes = 0;
+  const status = config.quiet ? undefined : createStatusLine({ render: (frame) => {
+    const usage = taskBudget.snapshot();
+    return formatStatusLine({ frame, phase: statusPhase, elapsedMs: Date.now() - startedAt,
+      usage: { ...usage, completionTokens: usage.completionTokens + Math.ceil(streamingBytes / 4) } });
+  } });
   const streamPrinter = createAssistantStreamPrinter();
   let streamed = false;
   let streamedContent = "";
@@ -247,6 +254,7 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
         droppedTraceEvents: tracer.snapshot().droppedEvents, retainedBytes: tracer.snapshot().retainedBytes, resumedFromSequence: journalResume?.sequence ?? 0 } };
   };
   try {
+  status?.start();
   checkpointWriter = session && sessionStore ? createCheckpointWriter({ store: sessionStore, sessionId: session.id,
     identity, task: contractTask, runId: runtimeContext.runId, strict: true }) : undefined;
   await checkpointWriter?.ready?.();
@@ -319,30 +327,31 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
       finalValidator,
       signal,
       onModelStart: ({ step }) => {
-        spinner.stop();
+        statusPhase = "Thinking";
         log(formatToolLine("Thinking(step " + step + ") · waiting for model response"));
-        spinner.start();
       },
-      onModelEnd: () => spinner.stop(),
+      onModelEnd: () => { streamingBytes = 0; },
+      onOutputProgress: (text) => { streamingBytes += Buffer.byteLength(text); },
       onToolStart: ({ name, args, decision }) => {
-        spinner.stop();
+        statusPhase = "Running " + name;
         const phase = phaseProgress.tool({ name, args });
         if (phase) log(phase + "\n");
         log(formatActivityStart({ name, args, decision }) + "\n");
         if (name === "agent") tracer.record({ type: "worker", name, description: args?.description, mode: args?.mode ?? args?.subagent_type });
       },
       onToolEnd: ({ name, args, result, decision }) => {
-        spinner.stop();
+        statusPhase = "Thinking";
         log(formatActivityBlock({ name, args, result, decision }) + "\n");
       },
       onTextDelta: ({ content }) => {
-        spinner.stop();
+        statusPhase = "Responding";
         if (config.quiet) return;
         streamed = true;
         streamedContent += content;
         streamPrinter.push(content);
       },
     });
+    status?.stop();
 
     result.runId = runtimeContext.runId;
     result.taskId = runtimeContext.taskId;
@@ -431,7 +440,7 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
       costUsd,
     };
   } catch (error) {
-    spinner.stop();
+    status?.stop();
     if (streamed) streamPrinter.finish();
     const result = reportTaskFailure({ error, startedAt, taskDeadline, signal, secretRegistry, taskBudget, quiet: config.quiet });
     result.runId = runtimeContext.runId; result.taskId = runtimeContext.taskId;

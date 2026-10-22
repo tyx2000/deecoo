@@ -70,6 +70,7 @@ export async function runAgent({
   onToolStart,
   onToolEnd,
   onTextDelta,
+  onOutputProgress,
   onCheckpoint,
   onEvent,
   secretRegistry,
@@ -249,6 +250,7 @@ export async function runAgent({
           onTextDelta?.(delta);
         },
         onRuntimeEvent: (event) => onEvent?.({ ...event, step, attemptId }),
+        onProgress: onOutputProgress,
         onModelEnd,
         step,
         signal,
@@ -664,17 +666,19 @@ async function requestChatCompletion({
   onModelEnd,
   step,
   onRuntimeEvent,
+  onProgress,
   finalizing = false,
   signal,
 }) {
   try {
     if (prepared) return await prepared.dispatch({ stream: stream && typeof client.chatCompletionStream === "function", signal,
-      onContent: (content) => onTextDelta?.({ content, step, finalizing }), onRuntimeEvent });
+      onContent: (content) => onTextDelta?.({ content, step, finalizing }), onRuntimeEvent, onProgress });
     if (stream && typeof client.chatCompletionStream === "function") {
       return await client.chatCompletionStream(request, {
         signal,
         onContent: (content) => onTextDelta?.({ content, step, finalizing }),
         onRuntimeEvent,
+        onProgress,
       });
     }
     return await client.chatCompletion(request, { signal, onRuntimeEvent });

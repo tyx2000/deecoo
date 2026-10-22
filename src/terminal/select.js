@@ -2,6 +2,7 @@ import readline from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
 import { ansi, paint, styleStart } from "./theme.js";
 import { adjacentGraphemeIndex, framePatch, layoutPromptFrame, reflowCursorRow } from "./promptLayout.js";
+import { pauseStatusLine } from "./statusLine.js";
 
 const MAX_MENU_ITEMS = 10;
 const promptHistory = [];
@@ -17,6 +18,7 @@ export async function selectOption({ title, options, selectedIndex = 0, filterab
   let renderedLines = 0;
 
   readline.emitKeypressEvents(input);
+  const resumeStatusLine = pauseStatusLine();
   const wasRaw = input.isRaw;
   input.setRawMode(true);
   output.write("\x1B[?25l");
@@ -83,6 +85,7 @@ export async function selectOption({ title, options, selectedIndex = 0, filterab
       signal?.removeEventListener("abort", onAbort);
       input.off("keypress", onKeypress);
       input.setRawMode(wasRaw);
+      resumeStatusLine();
       output.write("\x1B[?25h");
       resolve(value);
     };
@@ -155,6 +158,7 @@ export async function readPromptLine(prompt, slashOptions, { history, triggers =
   }
 
   readline.emitKeypressEvents(input);
+  const resumeStatusLine = pauseStatusLine();
   const wasRaw = input.isRaw;
   input.setRawMode(true);
 
@@ -180,6 +184,7 @@ export async function readPromptLine(prompt, slashOptions, { history, triggers =
       input.off("keypress", onKeypress);
       output.off("resize", onResize);
       input.setRawMode(wasRaw);
+      resumeStatusLine();
       resolve(value);
     };
 

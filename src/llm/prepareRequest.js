@@ -89,7 +89,7 @@ export function prepareModelRequest(receiver, input, config = {}, { signal } = {
   const completeStream = receiver?.chatCompletionStream;
   let consumed = false;
   const prepared = { request: immutableRequest, effectiveConfig, capabilities, routeIdentity, requestFingerprint,
-    async dispatch({ stream = false, signal: dispatchSignal, onContent, onRuntimeEvent } = {}) {
+    async dispatch({ stream = false, signal: dispatchSignal, onContent, onRuntimeEvent, onProgress } = {}) {
       if (consumed) throw failure("PREPARED_REQUEST_CONSUMED", "A prepared request can be dispatched only once");
       consumed = true;
       const linked = linkSignals([signal, dispatchSignal]);
@@ -98,7 +98,7 @@ export function prepareModelRequest(receiver, input, config = {}, { signal } = {
         if (stream && capabilities.streaming === false) throw unsupported("streaming");
         if (stream) {
           if (typeof completeStream !== "function") throw failure("PROVIDER_STREAMING_UNAVAILABLE", "This client does not implement streaming dispatch");
-          return await completeStream.call(receiver, immutableRequest, { signal: linked.signal, onContent, onRuntimeEvent });
+          return await completeStream.call(receiver, immutableRequest, { signal: linked.signal, onContent, onRuntimeEvent, onProgress });
         }
         if (typeof complete !== "function") throw failure("PROVIDER_DISPATCH_UNAVAILABLE", "This client does not implement model dispatch");
         return await complete.call(receiver, immutableRequest, { signal: linked.signal, onRuntimeEvent });

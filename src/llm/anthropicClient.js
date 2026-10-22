@@ -233,6 +233,7 @@ async function readAnthropicSse(body, handlers) {
       });
       if (block.type === "tool_use") handlers.onToolUse?.();
     } else if (event.type === "content_block_delta") {
+      handlers.onProgress?.(event.delta?.text ?? event.delta?.partial_json ?? event.delta?.thinking ?? "");
       const block = blocks.get(event.index) ?? { type: event.delta?.type === "text_delta" ? "text" : "tool_use", text: "", arguments: "" };
       if (event.delta?.type === "text_delta") {
         block.text += event.delta.text ?? "";

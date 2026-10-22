@@ -133,7 +133,8 @@ export function framePatch(previous, next) {
   return out + verticalMove(next.cursor.row - row) + "\r" + (next.cursor.column > 0 ? `\x1B[${next.cursor.column}C` : "");
 }
 
-function prefixAtColumn(value, column) {
+// The longest prefix (ANSI kept) that fits in `column` terminal cells.
+export function prefixAtColumn(value, column) {
   let used = 0, prefix = "";
   for (const token of tokens(value)) {
     if (token.ansi) { prefix += token.value; continue; }
