@@ -167,3 +167,15 @@ test("SCOR-006 incomplete response errors preserve reported usage for task accou
     });
   });
 });
+
+test("OUTPUT-001 a tool call cut off by the output limit names the setting to raise", async () => {
+  const toolStart = openAiEvent({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "write_file", arguments: "{\"path\":\"review.md\",\"content\":\"# Rev" } }] } }] });
+  const ended = (reason) => toolStart + openAiEvent({ choices: [{ delta: {}, finish_reason: reason }] }) + "data: [DONE]\n\n";
+  await withPayload(ended("length"), async () => {
+    await assert.rejects(createDeepSeekClient(config).chatCompletionStream(request, {}),
+      (error) => error.code === "INCOMPLETE_RESPONSE" && /output-token limit/.test(error.message) && /DEECOO_MAX_TOKENS/.test(error.message));
+  });
+  await withPayload(ended("tool_calls"), async () => {
+    await assert.rejects(createDeepSeekClient(config).chatCompletionStream(request, {}), { message: "Stream ended with incomplete tool arguments." });
+  });
+});

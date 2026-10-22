@@ -180,3 +180,14 @@ test("DSH-REF-003 mismatched endpoint metadata cannot declare route support and 
   const circular = request(); circular.self = circular;
   assert.throws(() => client.prepareRequest(circular), { code: "REQUEST_NOT_SERIALIZABLE" });
 });
+
+test("OUTPUT-001 routes that declare an output limit get room for long tool calls by default", () => {
+  const prepare = (metadata, extra = {}) => createModelClient({ ...config, ...extra, modelMetadata: metadata }).prepareRequest({ model: config.model, messages: [] });
+  const large = prepare({ contextWindow: 1048576, maxOutputTokens: 393216 });
+  assert.equal(large.request.max_tokens, 32768); assert.equal(large.effectiveConfig.sources.maxTokens, "route-default");
+  assert.equal(prepare({ contextWindow: 65536, maxOutputTokens: 32768 }).request.max_tokens, 16384, "never more than a quarter of the window");
+  assert.equal(prepare({ contextWindow: 1048576, maxOutputTokens: 8192 }).request.max_tokens, 8192, "never more than the route allows");
+  const configured = prepare({ contextWindow: 1048576, maxOutputTokens: 393216 }, { maxTokens: 4096 });
+  assert.equal(configured.request.max_tokens, 4096); assert.equal(configured.effectiveConfig.sources.maxTokens, "configured");
+  assert.equal(prepare(undefined).request.max_tokens, 4096, "an undeclared route keeps the compatible default");
+});

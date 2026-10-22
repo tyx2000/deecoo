@@ -7,13 +7,16 @@ export function incompleteResponse(message, usage) {
   return error;
 }
 
-export function assertCompleteToolCalls(toolCalls = [], usage) {
+export function assertCompleteToolCalls(toolCalls = [], usage, finishReason) {
   for (const call of toolCalls) {
     let args;
     try {
       args = JSON.parse(call?.function?.arguments ?? "");
     } catch {
-      throw incompleteResponse("Stream ended with incomplete tool arguments.", usage);
+      // "length" means the output-token cap cut the call off, not a broken stream.
+      throw incompleteResponse(finishReason === "length"
+        ? "The model reached its output-token limit while writing a tool call. Raise DEECOO_MAX_TOKENS to allow longer tool calls."
+        : "Stream ended with incomplete tool arguments.", usage);
     }
     if (!call?.id || !call.function?.name || !args || typeof args !== "object" || Array.isArray(args)) {
       throw incompleteResponse("Stream ended with an incomplete tool call.", usage);

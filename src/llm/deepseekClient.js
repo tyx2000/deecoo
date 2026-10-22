@@ -136,7 +136,7 @@ async function readChatCompletionSse(body, handlers) {
   if (!sawDone || !finishReason) {
     throw incompleteResponse("Stream ended before its completion marker and finish reason.", usage);
   }
-  assertCompleteToolCalls(message.tool_calls, usage);
+  assertCompleteToolCalls(message.tool_calls, usage, finishReason);
   if (message.tool_calls.length === 0) delete message.tool_calls;
   return {
     choices: [{ message, finish_reason: finishReason }],

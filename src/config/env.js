@@ -33,7 +33,8 @@ export function loadConfig(env, args = {}, settings = {}) {
     retentionDays: optionalNonnegativeFrom(args.retentionDays ?? env.DEECOO_RETENTION_DAYS),
     storageMaxBytes: optionalNonnegativeFrom(args.storageMaxBytes ?? env.DEECOO_STORAGE_MAX_BYTES),
     durableToolEvents: args.durableToolEvents ?? booleanFrom(env.DEECOO_DURABLE_TOOL_EVENTS, false),
-    maxTokens: numberFrom(env.DEECOO_MAX_TOKENS, 4096),
+    // Unset means the route decides: see defaultOutputTokens in llm/prepareRequest.js.
+    maxTokens: optionalNumberFrom(env.DEECOO_MAX_TOKENS),
     timeoutMs: numberFrom(env.DEECOO_TIMEOUT_MS, 120000),
     retryAttempts: numberFrom(env.DEECOO_API_RETRIES, 5),
     maxSteps: numberFrom(env.DEECOO_MAX_STEPS, 150),

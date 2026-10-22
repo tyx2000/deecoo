@@ -273,7 +273,7 @@ async function readAnthropicSse(body, handlers) {
       type: "function",
       function: { name: block.name, arguments: block.arguments || "{}" },
     }));
-  assertCompleteToolCalls(toolCalls, usage);
+  assertCompleteToolCalls(toolCalls, usage, finishReason);
   if (toolCalls.length) message.tool_calls = toolCalls;
   return {
     choices: [{ message, finish_reason: finishReason }],

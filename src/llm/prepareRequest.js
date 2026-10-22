@@ -20,6 +20,15 @@ export function createRouteIdentity({ config = {}, client, model, tools = [] } =
   return deepFreeze({ ...identity, hash: stableFingerprint(identity) });
 }
 
+// A single tool call (for example writing a report file) can need far more
+// than 4096 output tokens. Routes that declare their output limit get room for
+// it, without reserving more than a quarter of the context window; undeclared
+// routes keep the widely accepted 4096.
+export function defaultOutputTokens(capabilities) {
+  if (capabilities.maxOutputTokens === undefined) return 4096;
+  return Math.max(capabilities.minOutputTokens, Math.min(32768, capabilities.maxOutputTokens, Math.floor(capabilities.contextWindow / 4)));
+}
+
 export function prepareModelRequest(receiver, input, config = {}, { signal } = {}) {
   throwIfAborted(signal);
   let request;
@@ -37,12 +46,13 @@ export function prepareModelRequest(receiver, input, config = {}, { signal } = {
   if (request.tools?.length && capabilities.toolCalling === false) throw unsupported("toolCalling");
   if (request.stream === true && capabilities.streaming === false) throw unsupported("streaming");
   const sources = {};
-  const rawMax = request.max_tokens ?? request.max_completion_tokens ?? config.maxTokens ?? 4096;
+  const rawMax = request.max_tokens ?? request.max_completion_tokens ?? config.maxTokens ?? defaultOutputTokens(capabilities);
   if (request.max_tokens !== undefined && request.max_completion_tokens !== undefined && request.max_tokens !== request.max_completion_tokens) throw failure("OUTPUT_LIMIT_CONFLICT", "Conflicting output-token limits");
   if (!Number.isSafeInteger(rawMax) || rawMax < capabilities.minOutputTokens) throw failure("OUTPUT_LIMIT_INVALID", "Output-token limit must be an integer at least the route minimum");
   const effectiveMax = Math.min(rawMax, capabilities.maxOutputTokens ?? rawMax, capabilities.contextWindow - 1);
   if (effectiveMax < capabilities.minOutputTokens) throw failure("OUTPUT_LIMIT_INVALID", "Context window cannot accommodate the route output minimum");
-  sources.maxTokens = effectiveMax !== rawMax ? "route-limit" : request.max_tokens !== undefined || request.max_completion_tokens !== undefined ? "request" : config.maxTokens !== undefined ? "configured" : "adapter-compatible-default";
+  sources.maxTokens = effectiveMax !== rawMax ? "route-limit" : request.max_tokens !== undefined || request.max_completion_tokens !== undefined ? "request" : config.maxTokens !== undefined ? "configured"
+    : capabilities.maxOutputTokens !== undefined ? "route-default" : "adapter-compatible-default";
   delete request.max_completion_tokens;
   request.max_tokens = effectiveMax;
   const reasoning = request.reasoning_effort ?? config.reasoningEffort;
