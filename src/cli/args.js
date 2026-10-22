@@ -15,6 +15,7 @@ export function parseArgs(argv) {
     yes: false,
     yesFiles: false,
     help: false,
+    version: false,
     taskParts: [],
   };
 
@@ -41,6 +42,8 @@ export function parseArgs(argv) {
     else if (arg === "--hunk") { args.hunkIds ??= []; args.hunkIds.push(requiredOptionValue(argv, i, arg)); i += 1; }
     else if (arg === "--help" || arg === "-h") {
       args.help = true;
+    } else if (arg === "--version" || arg === "-v") {
+      args.version = true;
     } else if (arg === "--cwd") {
       args.cwd = requiredOptionValue(argv, i, arg); i += 1;
     } else if (arg === "--task-mode") {
@@ -149,5 +152,6 @@ export function printHelp() {
     "  --retention-days N --storage-max-bytes N --durable-tool-events",
     "  --                  Treat all following values as literal task/command arguments.",
     "  --help, -h          Show help.",
+    "  --version, -v       Show installed version and available source revision.",
   ].join("\n"));
 }

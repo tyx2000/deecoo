@@ -29,6 +29,7 @@ import { loadDotEnvIfPresent } from "./cli/dotenv.js";
 import { sessionPromptHistory, shortSessionId } from "./cli/sessionView.js";
 import { buildInputPrompt, clearTerminal, createTerminalTitleManager, printStartupInfo } from "./cli/terminalUi.js";
 import { filterWorkspacePathOptions, listWorkspacePathOptions } from "./cli/workspacePaths.js";
+import { formatVersion, getVersionInfo } from "./version.js";
 
 export async function main(argv) {
   let args;
@@ -43,9 +44,14 @@ export async function main(argv) {
 }
 
 async function mainInner(args) {
+  if (args.version) {
+    const info = await getVersionInfo();
+    console.log(args.outputFormat ? JSON.stringify({ schemaVersion: 1, type: "version", ...info }) : info.name + " " + formatVersion(info));
+    return;
+  }
   await applyPositionalCwd(args);
   if (args.help) {
-    if (args.outputFormat) { console.log(JSON.stringify({ schemaVersion: 1, type: "help", usage: "deecoo [options] <task>", commands: [...APP_COMMANDS, "jobs", "memory", "storage", "changes"], machineOptions: ["--json", "--jsonl", "--non-interactive", "--sandbox", "--sandbox-network", "--acceptance", "--context-window", "--output-reserve", "--privacy", "--retention-days"] })); return; }
+    if (args.outputFormat) { console.log(JSON.stringify({ schemaVersion: 1, type: "help", usage: "deecoo [options] <task>", commands: [...APP_COMMANDS, "jobs", "memory", "storage", "changes"], machineOptions: ["--version", "--json", "--jsonl", "--non-interactive", "--sandbox", "--sandbox-network", "--acceptance", "--context-window", "--output-reserve", "--privacy", "--retention-days"] })); return; }
     printHelp();
     return;
   }
@@ -140,6 +146,7 @@ async function mainInner(args) {
   }
 
   if (!args.nonInteractive) printStartupInfo([
+    ["Version", formatVersion(await getVersionInfo())],
     ["Workspace", cwd],
     ["Provider", config.provider],
     ["Model", config.model],

@@ -48,6 +48,7 @@ test("SCOR-004 actual single-task CLI returns failure after a provider error", a
 test("SCOR-004 actual single-task CLI succeeds with a completed task", async () => {
   const result = await runFixture("success");
   assert.equal(result.status, 0, result.stderr + result.stdout);
+  assert.match(result.stdout, /Version\s*:\s*\d+\.\d+\.\d+/);
 });
 
 test("SCOR-004 actual single-task CLI returns a distinct timeout status", async () => {
