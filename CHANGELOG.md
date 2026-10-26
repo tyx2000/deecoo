@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.1.8 — 2026-10-26
+
+- 发给模型的结构化任务说明恢复为目标在前的字段顺序（`schemaVersion`、`goal`、`cwd`、`requestType`），`acceptance` 和 `requiredChecks` 放在最后；字段值不变。
+- 终端中断回归测试只有在确实无法打开 PTY 时才跳过。
+
 ## 0.1.7 — 2026-10-26
 
 - `deecoo --version` 在版本号后显示该版本的发布时间（本地时间，年月日时分秒），JSON 输出新增 `releasedAt`。发布时间写在 `package.json`，`npm version` 递增版本时自动写入。
