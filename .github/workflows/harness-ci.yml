@@ -7,6 +7,8 @@ permissions:
 jobs:
   checks:
     strategy:
+      # Report every OS/Node combination instead of cancelling the rest on the first failure.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
         node: [20, 22]
@@ -18,6 +20,12 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      # search_text shells out to ripgrep; hosted runners do not all ship it.
+      - name: Install ripgrep
+        run: |
+          if command -v rg >/dev/null; then rg --version | head -1; exit 0; fi
+          if [ "$RUNNER_OS" = "Linux" ]; then sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep; else brew install ripgrep; fi
+          rg --version | head -1
       - run: npm ci
       - run: npm run check
       - run: npm test
