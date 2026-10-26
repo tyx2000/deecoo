@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createExecutionBackend } from "../src/execution/backend.js";
-import { detectSandbox, executionCommand, executionEnv, normalizeSandboxPolicy, seatbeltProfile } from "../src/execution/sandbox.js";
+import { detectSandbox, executionCommand, executionEnv, nodeRuntimeRoot, normalizeSandboxPolicy, seatbeltProfile } from "../src/execution/sandbox.js";
 import { classifyShellCommand } from "../src/permissions/shellPolicy.js";
 import { createToolRuntime } from "../src/tools/runtime.js";
 
@@ -131,3 +131,22 @@ test("R2-P1-3 edit_file and propose_patch write replacement text literally", asy
     assert.equal(await readFile(join(cwd, "file.sh"), "utf8"), `before\n${replacement}\nafter\n`, replacement);
   }
 });
+
+test("R2-CI the sandbox reads a standard Node install whatever its directories are called", async (t) => {
+  const root = await scratch(t, "deecoo-r2-runtime-");
+  // GitHub's toolcache: <version>/<arch>/bin/node beside lib/node_modules (where npm lives).
+  const toolcache = join(root, "node", "22.23.3", "arm64");
+  await mkdir(join(toolcache, "bin"), { recursive: true });
+  await mkdir(join(toolcache, "lib", "node_modules", "npm"), { recursive: true });
+  assert.equal(nodeRuntimeRoot(join(toolcache, "bin", "node")), toolcache);
+  // nvm-style version directories keep working without inspecting the disk.
+  assert.equal(nodeRuntimeRoot(join(root, "versions", "node", "v24.1.0", "bin", "node")), join(root, "versions", "node", "v24.1.0"));
+  // An unrecognised layout exposes only the executable's directory.
+  assert.equal(nodeRuntimeRoot(join(root, "tools", "bin", "node")), join(root, "tools", "bin"));
+  // Node directly in /bin or ~/bin never widens reads to / or the home directory.
+  assert.equal(nodeRuntimeRoot("/bin/node"), "/bin");
+  assert.equal(nodeRuntimeRoot(join(homedir(), "bin", "node")), join(homedir(), "bin"));
+  const policy = normalizeSandboxPolicy({ mode: "required" }, root, join(root, ".state"), join(root, ".tmp"));
+  assert.ok(policy.readRoots.includes(await realpath(nodeRuntimeRoot(process.execPath))), "the running Node installation is readable");
+});
+

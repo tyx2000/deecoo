@@ -44,9 +44,7 @@ export function normalizeSandboxPolicy(policy = {}, cwd, stateDir, tempDir) {
   const canonical = (value) => { const path = resolve(value); try { return realpathSync(path); } catch { return path; } };
   const roots = (values) => [...new Set(values.map(canonical))];
   const home = homedir();
-  const executableDirectory = dirname(process.execPath);
-  const installation = dirname(executableDirectory);
-  const runtimeRoot = basename(executableDirectory) === "bin" && /^(v?\d+\.\d+|node|runtime)/.test(basename(installation)) ? installation : executableDirectory;
+  const runtimeRoot = nodeRuntimeRoot(process.execPath);
   const credentialRoots = [...[".ssh", ".aws", ".gnupg", ".config/gcloud", ".azure", ".kube", ".deecoo", ".npmrc", ".netrc", ".pypirc", ".git-credentials", ".docker/config.json", ".cargo/credentials.toml", "Library/Keychains"].map((item) => resolve(home, item)), "/Library/Keychains", "/etc/shadow", "/etc/master.passwd", "/etc/ssh", "/etc/ssl/private", "/etc/pki/private"];
   const gitDirectories = roots(policy.writeRoots ?? [cwd]).map((root) => join(root, ".git"));
   return {
@@ -58,6 +56,18 @@ export function normalizeSandboxPolicy(policy = {}, cwd, stateDir, tempDir) {
     denyWriteLiterals: gitDirectories,
     resources: validateResources(policy.resources ?? {}),
   };
+}
+
+// Jobs may read the Node installation that runs them, including the npm and npx that live in its
+// lib/node_modules. A standard install is bin/node beside lib/node_modules whatever its directories
+// are called (nvm's v24.1.0, GitHub's toolcache 22.23.3/arm64, asdf's 20.1.0). Node sitting directly
+// in ~/bin or /bin never widens the read root to the home directory or the filesystem root.
+export function nodeRuntimeRoot(execPath = process.execPath) {
+  const executableDirectory = dirname(execPath);
+  const installation = dirname(executableDirectory);
+  const standardLayout = basename(executableDirectory) === "bin"
+    && (existsSync(join(installation, "lib", "node_modules")) || /^(v?\d+\.\d+|node|runtime)/.test(basename(installation)));
+  return standardLayout && installation !== homedir() && installation !== dirname(installation) ? installation : executableDirectory;
 }
 
 export function developerToolRoots() {
