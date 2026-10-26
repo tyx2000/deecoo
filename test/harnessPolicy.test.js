@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { analyzeTaskCoordination } from "../src/agent/coordination.js";
 import { addApprovedShellCommand, loadSettingsEnv, resolveShellPermissions, setAutoApproveAllShellCommands } from "../src/config/settings.js";
 import { inferTaskIntent } from "../src/harness/taskIntent.js";
-import { buildTaskSpec } from "../src/harness/taskSpec.js";
+import { buildTaskSpec, taskSpecMessage } from "../src/harness/taskSpec.js";
 import { classifyShellCommand, normalizeShellCommand } from "../src/permissions/shellPolicy.js";
 import { buildTaskToolPolicy, effectiveToolNames, taskToolPolicyViolation } from "../src/permissions/taskPolicy.js";
 import { isSensitivePath } from "../src/tools/pathPolicy.js";
@@ -38,6 +38,28 @@ test("negative review instructions produce a read-only contract even when they m
   assert.equal(inferTaskIntent("Modify worker-result.txt with synthetic data").requiresCodeChange, true);
   assert.equal(buildTaskSpec({ task: "custom script", mode: "command" }).mayWrite, true);
   assert.equal(buildTaskSpec({ task: "fix the bug", mode: "read-only" }).mayWrite, false);
+});
+
+// The task spec is rendered as pretty JSON in the run conversation, so its key order is the
+// format users and the model read. It regressed to leading with the nested acceptance block,
+// burying goal/cwd/requestType, so pin the original goal-first shape here.
+test("task spec message keeps the original goal-first JSON layout", () => {
+  const task = "修复登录重定向问题并运行相关测试";
+  const message = taskSpecMessage(buildTaskSpec({ task, cwd: "/workspace", coordination: analyzeTaskCoordination(task) }));
+  assert.equal(message.role, "system");
+  const header = "Structured task spec:";
+  assert.ok(message.content.startsWith(`${header}\n{`), "spec JSON must follow the header");
+  const footer = "\nUse this as the execution contract.";
+  assert.ok(message.content.includes(footer), "the execution-contract reminder must stay after the JSON");
+  const spec = JSON.parse(message.content.slice(header.length + 1, message.content.lastIndexOf(footer)));
+  const keys = Object.keys(spec);
+  assert.deepEqual(keys.slice(0, 4), ["schemaVersion", "goal", "cwd", "requestType"]);
+  assert.deepEqual(keys.slice(keys.indexOf("complexity")), [
+    "complexity", "constraints", "phases", "riskDomains", "successCriteria", "acceptance", "requiredChecks"
+  ]);
+  assert.equal(spec.goal, task);
+  assert.equal(spec.acceptance.schemaVersion, 1);
+  assert.deepEqual(spec.requiredChecks, spec.acceptance.requiredChecks);
 });
 
 test("effective policy intersects user, task, and worker capabilities", () => {

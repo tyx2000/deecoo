@@ -5,12 +5,14 @@ export function buildTaskSpec({ task, cwd, coordination, activeSkills = [], mode
   const text = String(task ?? "").trim();
   const contract = inferTaskIntent(text, { mode });
   const outcome = buildAcceptance({ task: text, intent: contract, acceptance, requiredChecks });
+  // The task spec is shown to the model (and in a run's conversation) as pretty JSON, so key
+  // order is the visible format. Keep the original reading order - schemaVersion, goal, cwd,
+  // requestType - and append the v2 additions after it instead of leading with them.
   return {
     schemaVersion: 2,
-    acceptance: outcome,
-    requiredChecks: outcome.requiredChecks,
     goal: text,
     cwd,
+    requestType: contract.requestType,
     ...contract,
     complexity: coordination?.complex ? "complex" : "simple",
     constraints: {
@@ -20,6 +22,8 @@ export function buildTaskSpec({ task, cwd, coordination, activeSkills = [], mode
     phases: (coordination?.phases ?? []).map((phase) => phase.name),
     riskDomains: (coordination?.riskDomains ?? []).map((domain) => domain.name),
     successCriteria: successCriteria(contract),
+    acceptance: outcome,
+    requiredChecks: outcome.requiredChecks,
   };
 }
 

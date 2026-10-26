@@ -7,8 +7,11 @@ import { test } from "node:test";
 
 const cli = new URL("../bin/deecoo.js", import.meta.url).pathname;
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
-const ptyAvailable = process.platform !== "win32" && spawnSync("python3", ["-c", "import pty, termios"], { stdio: "ignore" }).status === 0;
-const ptyTestOptions = { skip: ptyAvailable ? false : "A real PTY probe requires the optional Python 3 standard library." };
+// Importing the module is not enough: a sandboxed host can import pty and still fail to
+// allocate a device ("out of pty devices"), so probe an actual openpty/close pair.
+const ptyAvailable = process.platform !== "win32" && spawnSync("python3",
+  ["-c", "import os, pty, termios; m, s = pty.openpty(); os.close(m); os.close(s)"], { stdio: "ignore" }).status === 0;
+const ptyTestOptions = { skip: ptyAvailable ? false : "This host cannot allocate a real PTY device for the Python 3 bridge." };
 // A real PTY, not isTTY/setRawMode substitutions. Python only transports bytes;
 // Node's actual terminal detection, raw mode and keypress decoder run unchanged.
 const ptyBridge = `
