@@ -19,6 +19,7 @@ import {
   serializeProcessController,
   snapshotProcessMetrics,
   synchronizeWorkspaceRevision,
+  toolSignature,
 } from "../harness/processController.js";
 import { advanceWorkflowState, createWorkflowState } from "../harness/workflow.js";
 import { createVerificationStateMachine } from "../verification/state.js";
@@ -31,7 +32,7 @@ import { compactToolResult } from "../tools/projection.js";
 export { compactToolResult } from "../tools/projection.js";
 import { appendEffects } from "../harness/effects.js";
 import { buildBudgetedContext, buildContextBudget, contextWindowHint, estimateTokens, measureContextMessages } from "../context/builder.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { redact } from "../observability/audit.js";
 import { applyContextCompaction, contextFingerprint, createContextState, isBalancedContextBoundary, planContextCompaction, snapshotContextState, syncContextState } from "../context/compaction.js";
 import { projectModelRequest } from "../llm/requestSnapshot.js";
@@ -66,6 +67,7 @@ export async function runAgent({
   reportTaskUsage = true,
   trustToolOutput = true,
   resume,
+  confirmStepBudget,
   onModelStart,
   onModelEnd,
   onToolStart,
@@ -108,6 +110,7 @@ export async function runAgent({
     : advanceWorkflowState(createWorkflowState({ requestType }), { type: "planned" });
   let finalValidationAttempt = 0;
   let noProgressSteps = 0;
+  const outcomeLedger = new Map();
   let acceptance;
   let contextBudget = buildContextBudget({ contextWindow: contextWindow ?? client.capabilities?.contextWindow ?? 128000,
     outputReserve: Math.max(outputReserve ?? 0, maxTokens ?? outputReserve ?? client.capabilities?.outputReserve ?? 4096) });
@@ -172,19 +175,33 @@ export async function runAgent({
   };
 
   let step = Number.isFinite(resume?.step) ? resume.step + 1 : 1;
+  // The step budget belongs to this run, not the task's lifetime: a resumed or continued run gets
+  // a full budget instead of stopping at once on the step count it inherited.
+  const firstStep = step;
+  let stepLimit = maxSteps ? firstStep - 1 + maxSteps : undefined;
   try {
     while (true) {
       syncUsage();
       const sharedStop = taskBudget?.stopped();
-      const budgetStop = sharedStop ?? evaluateBudgets({
+      const budgets = () => evaluateBudgets({
         step,
+        stepLimit,
         maxSteps,
+        stepsThisRun: step - firstStep,
         tokens: usage.totalTokens,
         tokenBudget,
         deadline,
         cost: costBudgetUsd ? estimateCostUsd(usage, model, priceOverrides) : 0,
         costBudgetUsd,
       });
+      let budgetStop = sharedStop ?? budgets();
+      // An interactive user may extend the run by another budget; scripted runs stop here.
+      if (budgetStop?.reason === TERMINAL_TRANSITIONS.STEP_BUDGET_EXCEEDED && confirmStepBudget
+        && await confirmStepBudget({ stepsThisRun: step - firstStep, limit: maxSteps, signal })) {
+        throwIfAborted(signal);
+        stepLimit += maxSteps;
+        budgetStop = budgets();
+      }
       if (budgetStop) {
         return finishRun({ finalText: budgetStop.message, stoppedReason: budgetStop.reason, workflowType: "failed", extra: { budget: budgetStop } });
       }
@@ -458,7 +475,9 @@ export async function runAgent({
 
       // Repeated calls are answered from earlier observations, but each still costs a model
       // request. Several consecutive steps that only repeat themselves mean the run has stalled.
-      noProgressSteps = evaluated.every((item) => repeatsEarlierObservation(executedById.get(item.call.id).result)) ? noProgressSteps + 1 : 0;
+      const fileRevision = effects.filter((event) => event.type === "file-change" || event.type === "workspace-uncertain").length;
+      const repeated = evaluated.map((item) => repeatsEarlierObservation(outcomeLedger, item, executedById.get(item.call.id).result, fileRevision));
+      noProgressSteps = repeated.every(Boolean) ? noProgressSteps + 1 : 0;
       if (noProgressSteps >= MAX_NO_PROGRESS_STEPS) {
         const stop = { reason: TERMINAL_TRANSITIONS.NO_PROGRESS, limit: MAX_NO_PROGRESS_STEPS, observed: noProgressSteps,
           message: `Stopped after ${noProgressSteps} consecutive steps whose tool calls only repeated earlier observations. The task did not converge; narrow the request or inspect a different target.` };
@@ -512,13 +531,13 @@ export async function runAgent({
   }
 }
 
-function evaluateBudgets({ step, maxSteps, tokens, tokenBudget, deadline, cost = 0, costBudgetUsd }) {
-  if (maxSteps && step > maxSteps) {
+function evaluateBudgets({ step, stepLimit, maxSteps, stepsThisRun, tokens, tokenBudget, deadline, cost = 0, costBudgetUsd }) {
+  if (stepLimit !== undefined && step > stepLimit) {
     return {
       reason: TERMINAL_TRANSITIONS.STEP_BUDGET_EXCEEDED,
       limit: maxSteps,
-      observed: step,
-      message: `Stopped after reaching the step budget (${maxSteps} steps). The task did not converge; narrow the request or raise DEECOO_MAX_STEPS.`,
+      observed: stepsThisRun,
+      message: `Stopped after ${stepsThisRun} steps in this run without finishing. Use /continue to run another ${maxSteps} steps, narrow the request, or raise DEECOO_MAX_STEPS.`,
     };
   }
   if (tokenBudget && tokens >= tokenBudget) {
@@ -684,8 +703,25 @@ function compactionSummaryBodies(agentState, processController, source) {
   return [full.join("\n"), compact.join("\n")];
 }
 
-function repeatsEarlierObservation(result) {
-  return result?.alreadyAvailable === true || result?.code === "ALREADY_AVAILABLE" || result?.code === "DUPLICATE_FAILURE_LOOP";
+// A call makes no progress when it is answered from an earlier result, carries arguments the
+// harness could not use, or returns the same outcome as the last identical call with no file change
+// in between (rerunning a failing test, re-reading an unchanged file after a command). Every command
+// bumps the workspace revision, so the process controller's own dedup cannot see these repeats.
+function repeatsEarlierObservation(ledger, { name, args }, result, fileRevision) {
+  if (result?.alreadyAvailable === true || ["ALREADY_AVAILABLE", "DUPLICATE_FAILURE_LOOP", "INVALID_TOOL_ARGUMENTS"].includes(result?.code)) return true;
+  const key = toolSignature(name, args) + (typeof args?.cwd === "string" ? "@" + args.cwd : "");
+  const outcome = observationOutcome(name, result);
+  const prior = ledger.get(key);
+  ledger.set(key, { fileRevision, outcome });
+  return Boolean(prior) && prior.fileRevision === fileRevision && prior.outcome === outcome;
+}
+
+function observationOutcome(name, result) {
+  // Command output carries timings and temporary paths that differ between identical runs; the
+  // exit status is what the model learns from a rerun.
+  if (name === "run_shell") return JSON.stringify([result?.ok !== false, result?.exitCode ?? null, result?.signal ?? null, result?.code ?? null]);
+  const { activity: _activity, effects: _effects, workspaceRevision: _revision, cached: _cached, cacheValidatedBy: _validatedBy, ...stable } = result ?? {};
+  return createHash("sha256").update(JSON.stringify(stable) ?? "").digest("hex");
 }
 
 async function requestChatCompletion({

@@ -322,7 +322,7 @@ API key: 平台环境变量 > settings.providers.<provider>.apiKey
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `DEECOO_MAX_STEPS` | `150` | 主 Agent 循环最大步骤数。连续 4 步只重复已有观察的工具调用时，任务以 `no_progress` 提前停止。 |
+| `DEECOO_MAX_STEPS` | `150` | 主 Agent 每次运行的最大步骤数，从本次运行（含 `/continue` 恢复）开始计算。交互式终端中到达上限时会询问是否再继续同样步数；非交互模式和非 TTY 运行到上限即停止，之后可用 `/continue` 获得新的额度。连续 4 步的工具调用都只是重复（命中已有结果、参数无法使用，或在没有文件改动的情况下得到与上次相同的结果，例如反复运行同一个失败的命令）时，任务以 `no_progress` 提前停止。 |
 | `DEECOO_TOKEN_BUDGET` | 关闭 | 整个任务累计 token 预算，包含主 Agent 和所有 Worker。 |
 | `DEECOO_WORKER_TOKEN_BUDGET` | 关闭 | 每次 Worker 执行的局部 token 上限，仍受任务总预算约束。 |
 | `DEECOO_COST_BUDGET_USD` | 关闭 | 估算费用预算，单位 USD。模型没有内置价格时必须同时设置 `DEECOO_PRICE_PROMPT_PER_M` 和 `DEECOO_PRICE_COMPLETION_PER_M`，否则任务拒绝启动（`COST_BUDGET_UNPRICED`），不会静默忽略预算。 |

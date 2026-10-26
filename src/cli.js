@@ -130,6 +130,14 @@ async function mainInner(args) {
   config.modelMetadata ??= await modelMetadata;
   const client = createModelClient(config);
   const prompter = args.nonInteractive ? async () => "deny" : createPrompter(args.yes);
+  // At the step limit an interactive user decides whether the run keeps going; scripted and
+  // non-TTY runs keep the hard stop, so nothing can wait on input that never comes.
+  if (!args.nonInteractive && process.stdin.isTTY && process.stdout.isTTY) {
+    config.confirmStepBudget = async ({ stepsThisRun, limit, signal }) => {
+      const answer = await prompter(`Ran ${stepsThisRun} steps without finishing. Continue for another ${limit} steps?`, { kind: "step-budget-continue", limit, signal });
+      return answer === "approve" || answer === true;
+    };
+  }
   const tools = createToolRuntime({
     cwd,
     prompter,

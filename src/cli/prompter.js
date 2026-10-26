@@ -5,6 +5,16 @@ export function createPrompter(autoApproveShell) {
   return async (question, options = {}) => {
     throwIfAborted(options.signal);
     if (autoApproveShell && options.kind === "shell-command-approval") return true;
+    if (options.kind === "step-budget-continue" && process.stdin.isTTY && process.stdout.isTTY) {
+      const selected = await selectOption({
+        title: question,
+        options: [{ label: `Continue ${options.limit} more steps`, value: "approve" }, { label: "Stop here (resume later with /continue)", value: "deny" }],
+        filterable: false,
+        signal: options.signal,
+      });
+      throwIfAborted(options.signal);
+      return selected?.value ?? "deny";
+    }
     if (
       (options.kind === "file-write-approval" || options.kind === "shell-command-approval") &&
       process.stdin.isTTY &&

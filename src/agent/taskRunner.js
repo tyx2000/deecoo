@@ -315,6 +315,7 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
       stream: coordination.requestType === "review" ? false : config.stream,
       coordination,
       maxSteps: config.maxSteps,
+      confirmStepBudget: config.confirmStepBudget,
       tokenBudget: config.tokenBudget,
       costBudgetUsd: config.costBudgetUsd,
       priceOverrides,

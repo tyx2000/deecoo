@@ -1,5 +1,5 @@
 import { httpStatusError, retryAttempts, withRetries } from "./retry.js";
-import { assertCompleteToolCalls, incompleteResponse } from "./streamCompletion.js";
+import { assertCompleteResponse, assertCompleteToolCalls, incompleteResponse } from "./streamCompletion.js";
 
 export function createDeepSeekClient(config) {
   return createOpenAICompatibleClient(config, { provider: "DeepSeek", supportsBalance: true });
@@ -8,10 +8,10 @@ export function createDeepSeekClient(config) {
 export function createOpenAICompatibleClient(config, { provider = "Provider", supportsBalance = false, transformRequest = identity } = {}) {
   return {
     async chatCompletion(request, options = {}) {
-      return requestJson(config, "/chat/completions", {
+      return assertCompleteResponse(await requestJson(config, "/chat/completions", {
         method: "POST",
         body: JSON.stringify(transformRequest(request)),
-      }, options);
+      }, options));
     },
     async chatCompletionStream(request, handlers = {}) {
       return requestChatCompletionStream(config, transformRequest({

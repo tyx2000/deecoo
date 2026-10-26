@@ -1,5 +1,5 @@
 import { httpStatusError, retryAttempts, withRetries } from "./retry.js";
-import { assertCompleteToolCalls, incompleteResponse } from "./streamCompletion.js";
+import { assertCompleteResponse, assertCompleteToolCalls, incompleteResponse } from "./streamCompletion.js";
 
 export function createAnthropicClient(config) {
   return {
@@ -8,7 +8,7 @@ export function createAnthropicClient(config) {
         method: "POST",
         body: JSON.stringify(toAnthropicRequest(request)),
       }, options);
-      return fromAnthropicResponse(response);
+      return assertCompleteResponse(fromAnthropicResponse(response), { lengthTruncatesToolCalls: true });
     },
     async chatCompletionStream(request, handlers = {}) {
       return requestAnthropicStream(config, { ...toAnthropicRequest(request), stream: true }, handlers);
