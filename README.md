@@ -64,9 +64,9 @@ deecoo --help
 node ./bin/deecoo.js --help
 ```
 
-用 `deecoo --version`（或 `-v`）查看安装版本；`deecoo --json --version` 提供结构化版本信息，无需配置 API key。源码安装还会显示安装目录的 Git 提交号，未提交修改显示 `dirty`；独立包没有 Git 信息时只显示包版本。启动栏也显示同一版本标识。
+用 `deecoo --version`（或 `-v`）查看安装版本，输出为版本号加该版本的发布时间（本地时间，精确到秒），例如 `deecoo 0.1.7 2026-10-26 10:58:29`；`deecoo --json --version` 提供结构化版本信息（`releasedAt` 为带时区的 ISO 时间），无需配置 API key。发布时间记录在 `package.json` 的 `releasedAt` 中，独立包同样可见。源码安装还会显示安装目录的 Git 提交号，未提交修改显示 `dirty`。启动栏也显示同一版本标识。
 
-`npm link` 指向本地源码，新启动的命令会使用当前代码；已运行的交互会话需要退出后重新打开才能加载更新。发布修复时递增补丁版本，新增兼容功能递增次版本，并同步 `package.json` 与锁文件。以 `deecoo --version` 的实际输出核对版本，版本改动见 [更新记录](CHANGELOG.md)。
+`npm link` 指向本地源码，新启动的命令会使用当前代码；已运行的交互会话需要退出后重新打开才能加载更新。发布修复时递增补丁版本，新增兼容功能递增次版本，并同步 `package.json` 与锁文件。用 `npm version <版本号> --no-git-tag-version` 递增版本时，`version` 脚本会同时写入 `releasedAt`。以 `deecoo --version` 的实际输出核对版本，版本改动见 [更新记录](CHANGELOG.md)。
 
 ## 快速开始
 
@@ -383,7 +383,7 @@ deecoo config <config-command>
 | `--retention-days N` / `--storage-max-bytes N` | 覆盖项目保留期限与容量；`--durable-tool-events` 保存工具事件。 |
 | `--` | 后续参数按原样作为任务或本地命令位置参数处理。 |
 | `--help`、`-h` | 显示帮助。 |
-| `--version`、`-v` | 显示安装版本及可用的源码提交号；支持 JSON 输出，无需 API key。 |
+| `--version`、`-v` | 显示安装版本、发布时间（年月日时分秒）及可用的源码提交号；支持 JSON 输出，无需 API key。 |
 
 ### 常用任务示例
 

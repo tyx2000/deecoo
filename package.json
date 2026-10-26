@@ -1,6 +1,6 @@
 {
   "name": "deecoo",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "type": "module",
   "bin": {
@@ -13,7 +13,8 @@
     "test:sandbox": "node ./scripts/verify-sandbox.mjs",
     "eval": "node ./eval/runner.js --execute",
     "eval:e2e": "node ./eval/runner.js --execute",
-    "eval:trace": "node ./eval/runner.js --trace"
+    "eval:trace": "node ./eval/runner.js --trace",
+    "version": "node ./scripts/stamp-release.mjs"
   },
   "engines": {
     "node": ">=20"
@@ -21,5 +22,6 @@
   "dependencies": {
     "highlight.js": "^11.11.1",
     "markdown-it": "^14.2.0"
-  }
+  },
+  "releasedAt": "2026-10-26T10:58:29+08:00"
 }

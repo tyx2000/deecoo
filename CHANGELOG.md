@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.1.7 — 2026-10-26
+
+- `deecoo --version` 在版本号后显示该版本的发布时间（本地时间，年月日时分秒），JSON 输出新增 `releasedAt`。发布时间写在 `package.json`，`npm version` 递增版本时自动写入。
+- 合并代码审查各轮修复：Shell 分类与 git 加固、沙箱保护 `.git` 配置与钩子、项目 `.env` 不能改安全设置、`edit_file` 按字面替换、步数预算按每次运行计算并在交互模式询问、无进展自动停止、存储脱敏与审计哈希链、Eval 默认端到端执行等。详见 `claude-code-review.md`。
+- CI 安装 ripgrep 并关闭 fail-fast；沙箱可读取标准 Node 安装目录（修复 macOS CI）。
+
 ## 0.1.1 — 2026-10-22
 
 - 初始上下文按完整请求预留预算，保留强制指令，并覆盖子代理和 checkpoint 恢复。

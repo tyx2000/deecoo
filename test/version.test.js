@@ -67,7 +67,7 @@ test("a packaged install inside another Git repository does not inherit the pare
   const installed = join(root, "node_modules", "deecoo");
   await installVersionFixture(installed);
   const info = await inspect(installed, root, envFor(root, { GIT_DIR: join(root, ".git"), GIT_WORK_TREE: root }));
-  assert.deepEqual(info, { name: "deecoo-fixture", version: "9.8.7", revision: null, dirty: null });
+  assert.deepEqual(info, { name: "deecoo-fixture", version: "9.8.7", releasedAt: null, revision: null, dirty: null });
 }));
 
 test("source identity belongs to the installation, detects edits, and tolerates missing Git", async () => fixture(async (root) => {
@@ -85,5 +85,35 @@ test("source identity belongs to the installation, detects edits, and tolerates 
   await writeFile(join(installed, "untracked-change.txt"), "Local changes\n");
   assert.equal((await inspect(installed, workspace, env)).dirty, true);
   const withoutGit = await inspect(installed, workspace, envFor(root, { PATH: join(root, "no-git") }));
-  assert.deepEqual(withoutGit, { name: "deecoo-fixture", version: "9.8.7", revision: null, dirty: null });
+  assert.deepEqual(withoutGit, { name: "deecoo-fixture", version: "9.8.7", releasedAt: null, revision: null, dirty: null });
 }));
+
+test("version output follows the version with its release time to the second, also for packaged installs", async () => fixture(async (root) => {
+  const installed = join(root, "node_modules", "deecoo");
+  await installVersionFixture(installed);
+  const manifestPath = join(installed, "package.json");
+  await writeFile(manifestPath, JSON.stringify({ name: "deecoo-fixture", version: "9.8.7", type: "module", releasedAt: "2026-10-26T10:58:29+08:00" }));
+  await writeFile(join(installed, "format.mjs"), 'import { formatVersion, getVersionInfo } from "./src/version.js"; console.log(formatVersion(await getVersionInfo()));\n');
+  const run = async (file, timezone) => (await exec(process.execPath, [join(installed, file)], { cwd: root, env: envFor(root, { TZ: timezone }), timeout: 8000 })).stdout.trim();
+  assert.equal(JSON.parse(await run("inspect.mjs", "Asia/Shanghai")).releasedAt, "2026-10-26T10:58:29+08:00");
+  assert.equal(await run("format.mjs", "Asia/Shanghai"), "9.8.7 2026-10-26 10:58:29");
+  assert.equal(await run("format.mjs", "UTC"), "9.8.7 2026-10-26 02:58:29", "shown in the viewer's local time");
+  await writeFile(manifestPath, JSON.stringify({ name: "deecoo-fixture", version: "9.8.7", type: "module", releasedAt: "yesterday" }));
+  assert.equal(await run("format.mjs", "UTC"), "9.8.7");
+  // The shipped manifest always carries a release time for its version.
+  assert.match(manifest.releasedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/);
+  assert.equal(manifest.scripts.version, "node ./scripts/stamp-release.mjs");
+}));
+
+test("the release stamp script records the current time with its offset and keeps the version", async () => fixture(async (root) => {
+  await mkdir(join(root, "scripts"), { recursive: true });
+  await copyFile(new URL("../scripts/stamp-release.mjs", import.meta.url), join(root, "scripts", "stamp-release.mjs"));
+  await writeFile(join(root, "package.json"), JSON.stringify({ name: "deecoo-fixture", version: "1.0.0", type: "module", scripts: { version: "node ./scripts/stamp-release.mjs" } }, null, 2));
+  const before = Date.now() - 1000;
+  await exec(process.execPath, [join(root, "scripts", "stamp-release.mjs")], { cwd: root, env: envFor(root), timeout: 8000 });
+  const stamped = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+  assert.equal(stamped.version, "1.0.0");
+  assert.match(stamped.releasedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/);
+  assert.ok(Date.parse(stamped.releasedAt) >= before && Date.parse(stamped.releasedAt) <= Date.now() + 1000);
+}));
+

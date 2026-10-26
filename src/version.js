@@ -8,8 +8,9 @@ const exec = promisify(execFile);
 const installationRoot = fileURLToPath(new URL("../", import.meta.url));
 
 export async function getVersionInfo() {
-  const { name, version } = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-  const info = { name, version, revision: null, dirty: null };
+  const { name, version, releasedAt } = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  // The release time travels inside package.json, so a copied or published install reports it too.
+  const info = { name, version, releasedAt: validTimestamp(releasedAt) ? releasedAt : null, revision: null, dirty: null };
   try {
     // A package installed inside another repository must not inherit its HEAD.
     await lstat(join(installationRoot, ".git"));
@@ -26,5 +27,18 @@ export async function getVersionInfo() {
 }
 
 export function formatVersion(info) {
-  return info.version + (info.revision ? " (" + info.revision + (info.dirty ? ", dirty" : "") + ")" : "");
+  const released = info.releasedAt ? " " + formatReleaseTime(info.releasedAt) : "";
+  return info.version + released + (info.revision ? " (" + info.revision + (info.dirty ? ", dirty" : "") + ")" : "");
+}
+
+// Local wall-clock time, year to second: 2026-10-26 11:20:33.
+export function formatReleaseTime(timestamp) {
+  const date = new Date(timestamp);
+  if (!validTimestamp(timestamp)) return "";
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function validTimestamp(value) {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(value) && !Number.isNaN(Date.parse(value));
 }
