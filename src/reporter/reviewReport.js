@@ -63,16 +63,86 @@ export function createReviewFinalValidator({ maxRepairAttempts = 2, task: reques
 
 export function reviewCoverage({ task, effects } = {}) {
   const events = effects?.events ?? [];
-  const files = [...new Set(events.flatMap((event) => event.type === "file-read" ? [event.path] : event.type === "diff-read" ? event.paths ?? [event.path] : []).filter(Boolean))];
-  const inlineSource = /```(?!json\b)[^\n]*\n[\s\S]*?\S[\s\S]*?```/i.test(String(task ?? ""));
-  const requestedFiles = [...String(task ?? "").matchAll(/(?:^|\s)@([A-Za-z0-9_./-]+\.[A-Za-z0-9_./-]+)/g)].map((match) => match[1]);
+  const text = String(task ?? "");
+  const observations = fileCoverage(events);
+  const files = [...new Set([...observations.keys(), ...events.filter((event) => event.type === "diff-read").flatMap((event) => event.paths ?? [event.path])].filter(Boolean))];
+  const inlineSource = hasInlineSource(text);
+  const requested = [...text.matchAll(/(?:^|[\s(])@([\w./-]+\.[\w.-]+)(?::(\d+)(?:-(\d+))?|#L(\d+)(?:-L?(\d+))?)?/g)]
+    .map((match) => ({ path: match[1].replace(/^\.\//, "").replace(/[.,]+$/, ""), startLine: Number(match[2] ?? match[4]) || undefined,
+      endLine: Number(match[3] ?? match[5] ?? match[2] ?? match[4]) || undefined }));
+  const requestedFiles = [...new Set(requested.map((item) => item.path))];
   const missingFiles = requestedFiles.filter((path) => !files.includes(path));
+  const scopeText = text.replace(/```[^\n]*\n[\s\S]*?```/g, "");
+  const fullRequested = /\b(?:full|entire|whole)\b|\bcomplete\s+(?:review|source|code|files?|contents?)\b|\bcompletely\b|\ball\s+(?:code|lines|contents?|files)\b|完整|全文|全部|所有代码|所有行/i.test(scopeText);
+  const incompleteFiles = [...new Set(requested.filter(({ path, startLine, endLine }) => {
+    const observed = observations.get(path);
+    if (startLine) return !observed || !coversLines(observed, startLine, endLine);
+    return fullRequested && !observed?.complete;
+  }).map((item) => item.path))];
   const errors = [];
   if (!files.length && !inlineSource) errors.push("Review has no runtime source evidence. Read relevant source files or a non-empty diff before concluding, including when findings are empty.");
   if (missingFiles.length) errors.push("Requested review files have not been inspected: " + missingFiles.join(", "));
-  const partialFiles = [...new Set(events.filter((event) => event.type === "file-read" && event.truncated).map((event) => event.path))];
-  return { files, inlineSource, requestedFiles, missingFiles, partialFiles, revision: effects?.revision,
+  if (incompleteFiles.length) errors.push("Requested review scope lacks complete same-version source coverage: " + incompleteFiles.join(", ") + ". Read the full files or all requested line ranges before concluding.");
+  const partialFiles = [...observations].filter(([, value]) => !value.complete).map(([path]) => path);
+  return { files, inlineSource, requestedFiles, missingFiles, partialFiles, incompleteFiles,
+    scope: fullRequested ? "full-requested-files" : requested.some((item) => item.startLine) ? "requested-lines" : "sampled", revision: effects?.revision,
     status: errors.length || partialFiles.length ? "partial" : "inspected", errors };
+}
+
+function fileCoverage(events) {
+  const files = new Map();
+  for (const event of events) {
+    if (event.type === "file-change" || event.type === "workspace-uncertain") {
+      for (const path of event.paths ?? []) files.delete(path.replace(/^\.\//, ""));
+    }
+    if (event.type !== "file-read" || !event.path) continue;
+    const path = event.path.replace(/^\.\//, "");
+    const version = event.version ?? event.contentHash;
+    let observed = files.get(path);
+    if (!observed || !version || observed.version !== version) {
+      observed = { version, complete: false, ranges: [], totalLines: undefined };
+      files.set(path, observed);
+    }
+    if (Number.isSafeInteger(event.totalLines) && event.totalLines >= 0) observed.totalLines = event.totalLines;
+    if (!event.truncated) observed.complete = true;
+    if (event.rangeComplete === true && Number.isSafeInteger(event.startLine) && event.startLine >= 1 &&
+      Number.isSafeInteger(event.endLine) && event.endLine >= event.startLine) {
+      observed.ranges.push([event.startLine, event.endLine]);
+    }
+    if (version && observed.totalLines !== undefined && coversLines(observed, 1, observed.totalLines)) observed.complete = true;
+  }
+  return files;
+}
+
+function coversLines(observed, start, end) {
+  if (observed.complete) return observed.totalLines === undefined || end <= observed.totalLines;
+  if (end < start) return observed.totalLines === 0;
+  let next = start;
+  for (const [first, last] of observed.ranges.toSorted((a, b) => a[0] - b[0])) {
+    if (first > next) break;
+    if (last >= next) next = last + 1;
+    if (next > end) return true;
+  }
+  return false;
+}
+
+function hasInlineSource(task) {
+  // Evidence depends on the supplied body and its declared subject, not on a
+  // programming-language tag allowlist. Configs (including JSON/YAML), diffs,
+  // and unknown-language snippets remain valid; an arbitrary log fence is not.
+  for (const match of task.matchAll(/```([^\n]*)\n([\s\S]*?)```/g)) {
+    const body = match[2].trim();
+    if (!body) continue;
+    const info = match[1].trim();
+    const context = task.slice(Math.max(0, match.index - 160), match.index);
+    const logSubject = /\b(?:logs?|stdout|stderr|console|output|stacktrace)\b|日志|输出|堆栈/i.test(info + " " + context);
+    const sourceSubject = /\b(?:code|source|snippet|config(?:uration)?|diff|patch|query|script)\b|代码|源码|片段|配置|补丁|查询|脚本/i.test(context);
+    if (logSubject && !sourceSubject) continue;
+    if (/^(?:diff --git |@@\s+-\d|---\s+[^\n]+\n\+\+\+\s+)/m.test(body)) return true;
+    if (/\{[\s\S]*\}|=>|<\/?[\w:-]+(?:\s|>)/.test(body) || /^\s*(?:\w+\s+){0,3}[\w.$"'\[\]-]+\s*(?:=|:)\s*\S/m.test(body)) return true;
+    if (sourceSubject && !/^(?:text|logs?|console|output|stdout|stderr)$/i.test(info)) return true;
+  }
+  return false;
 }
 
 export function validateReviewReportText(text) {

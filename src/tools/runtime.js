@@ -6,7 +6,7 @@ import { prepareModelToolResult } from "./modelOutput.js";
 import { EXTRA_TOOL_DEFINITIONS } from "./extraDefinitions.js";
 import { createExecutionBackend } from "../execution/backend.js";
 import { realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, dirname, relative, resolve } from "node:path";
 import { buildToolSchemas, normalizeWorkerMode, TOOL_CAPABILITIES, WORKER_TOOL_PROFILES } from "./definitions.js";
 import { getFileReadMetrics, applyJsonPatch, applyStructuredPatch, applyStructuredPatchSet, editFile, listFiles, proposePatch, proposeStructuredPatchSet, readWorkspaceFile, writeWorkspaceFile } from "./files.js";
 import { gitDiff, gitStatus } from "./git.js";
@@ -14,7 +14,7 @@ import { normalizeShellCommand } from "../permissions/shellPolicy.js";
 import { toolExceptionResult } from "./results.js";
 import { searchText } from "./search.js";
 import { runShell } from "./shell.js";
-import { effectiveToolNames, taskToolPolicyViolation } from "../permissions/taskPolicy.js";
+import { taskToolPolicyViolation, taskWritePathViolation, taskWriteTargets } from "../permissions/taskPolicy.js";
 import { createEffectLedger } from "../harness/effects.js";
 import { createPluginScope as createResourceScope } from "../harness/pluginScope.js";
 
@@ -189,8 +189,7 @@ export function createToolRuntime({
       !policyViolation(entry.name, {}, workerMode));
     const agent = schemas.find((schema) => schema.function.name === "agent");
     if (agent) {
-      const modes = ["research", "verify", "implement"].filter((mode) => !taskToolPolicyViolation("agent", { mode }, {
-        permissionMode: permissionState.mode, taskPolicy: permissionState.taskToolPolicy }));
+      const modes = ["research", "verify", "implement"].filter((mode) => !taskToolPolicyViolation("agent", { mode }, policyContext()));
       agent.function.parameters.properties.mode.enum = modes;
       agent.function.parameters.properties.subagent_type.enum = modes;
       const readOnly = permissionState.mode === "read-only" || permissionState.taskToolPolicy?.mayWrite === false;
@@ -208,6 +207,8 @@ export function createToolRuntime({
           throwIfAborted(options.signal);
           const decision = await abortableApproval(() => prompter(question, { ...promptOptions, signal: options.signal }), options.signal);
           throwIfAborted(options.signal);
+          const blocked = policyViolation(name, args) ?? await canonicalWriteViolation(name, args);
+          if (blocked) throw Object.assign(new Error(blocked.error), { code: blocked.code });
           return decision;
         };
         const violation = policyViolation(name, { ...args, mode: name === "agent" ? normalizeWorkerMode(args?.mode ?? args?.subagent_type) : args?.mode });
@@ -222,6 +223,8 @@ export function createToolRuntime({
         if (registry.get(name) !== entry) return { ok: false, code: "TOOL_REGISTRATION_CHANGED", executionState: "not-started", error: "Tool registration changed before dispatch; inspect the current tool schema and issue a new call." };
         const finalViolation = policyViolation(name, { ...args, mode: name === "agent" ? normalizeWorkerMode(args?.mode ?? args?.subagent_type) : args?.mode });
         if (finalViolation) return { ...finalViolation, executionState: "not-started" };
+        const pathViolation = await canonicalWriteViolation(name, args);
+        if (pathViolation) return { ...pathViolation, executionState: "not-started" };
         onDispatch?.(entry);
         const normalized = name === "send_message" && args.task_id ? { to: args.to ?? args.task_id, message: args.message } : args;
         return await registry.execute(name, normalized, { ...options, prompter: guardedPrompter });
@@ -233,12 +236,32 @@ export function createToolRuntime({
   function policyViolation(name, args, workerMode) {
     const entry = registry.get(name);
     const readOnly = permissionState.mode === "read-only" || permissionState.taskToolPolicy?.mayWrite === false;
-    const violation = taskToolPolicyViolation(name, args, { permissionMode: permissionState.mode, taskPolicy: permissionState.taskToolPolicy });
+    const violation = taskToolPolicyViolation(name, args, policyContext());
     if (violation) return violation;
+    if (entry?.mutates && permissionState.taskToolPolicy?.writeRestrictions?.length && !Object.hasOwn(handlers, name)) return { ok: false, code: "TASK_SCOPED_TOOL_BLOCKED", error: "This mutating extension cannot enforce the task's restricted write paths." };
     if (entry?.mutates && readOnly) return { ok: false, code: "TOOL_READ_ONLY", error: "The effective task permissions are read-only." };
     if (entry?.mutates && workerMode === "research") return { ok: false, code: "WORKER_TOOL_BLOCKED", error: "Research workers cannot execute mutating extensions." };
     if (entry?.mutates && workerMode === "verify" && entry.category !== "execution" && name !== "run_shell") return { ok: false, code: "WORKER_TOOL_BLOCKED", error: "Verify workers cannot edit files through extensions." };
     if (workerMode && entry && !entry.workerModes.includes(workerMode)) return { ok: false, code: "WORKER_TOOL_BLOCKED", error: "Tool is unavailable to this Worker profile." };
+    return null;
+  }
+  function policyContext() {
+    return { workspace, permissionMode: permissionState.mode, taskPolicy: permissionState.taskToolPolicy,
+      scopedWriteRestrictions: permissionState.taskToolPolicy?.writeRestrictions?.length
+        ? permissionState.executionBackend?.capabilities?.().scopedWriteRestrictions === true : false };
+  }
+  async function canonicalWriteViolation(name, args) {
+    const policy = permissionState.taskToolPolicy;
+    const targets = taskWriteTargets(name, args);
+    if (!policy?.writeRestrictions?.length || !targets.length) return null;
+    const root = await getRealWorkspace();
+    const rules = await Promise.all(policy.writeRestrictions.map(async (rule) => rule.kind === "path"
+      ? { ...rule, path: relative(root, await canonicalWriteTarget(resolve(workspace, rule.path))) } : rule));
+    for (const target of targets) {
+      const path = await canonicalWriteTarget(resolve(workspace, target));
+      const blocked = taskWritePathViolation(path, { ...policy, writeRestrictions: rules }, { workspace: root });
+      if (blocked) return blocked;
+    }
     return null;
   }
   const handlers = {
@@ -290,10 +313,24 @@ export function createToolRuntime({
   return runtime;
 }
 
+async function canonicalWriteTarget(path) {
+  const suffix = [];
+  while (true) {
+    try { return resolve(await realpath(path), ...suffix); }
+    catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      const parent = dirname(path);
+      if (parent === path) throw error;
+      suffix.unshift(basename(path)); path = parent;
+    }
+  }
+}
+
 function normalizeTaskToolPolicy(policy) {
   if (!policy) return undefined;
   return {
     ...policy,
+    writeRestrictions: structuredClone(policy.writeRestrictions ?? []),
     blockedTools: new Set(policy.blockedTools ?? []),
     allowedWorkerModes: policy.allowedWorkerModes ? new Set(policy.allowedWorkerModes.map(normalizeWorkerMode)) : undefined,
   };

@@ -10,6 +10,7 @@ import { createSessionStore } from "../src/session/store.js";
 import { createToolRuntime } from "../src/tools/runtime.js";
 import { createReplayClient } from "../src/llm/replay.js";
 import { isModelPriceKnown } from "../src/harness/cost.js";
+import { countLineChanges } from "../src/tools/textDiff.js";
 import { summarizeEvalResults } from "./scoring.js";
 
 const execFileAsync = promisify(execFile);
@@ -189,10 +190,27 @@ function gradeRun(definition, run) {
   if (expected.verificationStatus) checks.push(requiredCheck("verification-status", run.verification?.status === expected.verificationStatus, `Verification: ${run.verification?.status}`));
   if (expected.completionType) checks.push(requiredCheck("completion-type", (run.acceptance ?? run.reviewValidation?.acceptance)?.completionType === expected.completionType, `Completion type: ${(run.acceptance ?? run.reviewValidation?.acceptance)?.completionType}`));
   if (expected.validationError) checks.push(requiredCheck("validation-error", (run.reviewValidation?.errors ?? []).some((error) => String(error).includes(expected.validationError)), JSON.stringify(run.reviewValidation?.errors)));
+  // Context-pressure scenarios prove compaction ran and that the goal survived it in the
+  // context the model saw last.
+  if (expected.minCompactions) checks.push(requiredCheck("context-compaction", (run.agentState?.contextCompactions?.length ?? 0) >= expected.minCompactions, `Compactions: ${run.agentState?.contextCompactions?.length ?? 0}`));
+  const finalContext = (run.messages ?? []).map((message) => typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? "")).join("\n");
+  for (const text of expected.contextIncludes ?? []) checks.push(requiredCheck("context-includes:" + text.slice(0, 40), finalContext.includes(text), "Final model context retained the expected text"));
   const findings = run.reviewReport?.findings ?? [];
   if (expected.findingCount !== undefined) checks.push(requiredCheck("review-finding-count", findings.length === expected.findingCount, `Findings: ${findings.length}`));
-  for (const finding of expected.findings ?? []) checks.push(requiredCheck("review-finding:" + finding.id, findings.some((item) => item.id === finding.id && item.file === finding.file && (!finding.evidenceIncludes || item.evidence.includes(finding.evidenceIncludes))), "Review finding matched independent authored expectation"));
+  for (const finding of expected.findings ?? []) checks.push(requiredCheck("review-finding:" + finding.id, findings.some((item) => sameReviewFinding(item, finding)), "Review finding matched independent authored expectation"));
   return checks;
+}
+
+// The same issue is the same file (and line, when the expectation names one) with matching
+// evidence and, if given, severity. The reviewer's own id is not part of correctness unless an
+// expectation explicitly requires it.
+function sameReviewFinding(item, finding) {
+  const [path, line] = String(finding.file ?? "").split(":");
+  const [itemPath, itemLine] = String(item.file ?? "").split(":");
+  return itemPath === path && (!line || itemLine === line)
+    && (!finding.evidenceIncludes || String(item.evidence ?? "").includes(finding.evidenceIncludes))
+    && (!finding.severity || item.severity === finding.severity)
+    && (!finding.requireId || item.id === finding.id);
 }
 
 async function gradeWorkspace(definition, workspace, before, after) {
@@ -200,6 +218,16 @@ async function gradeWorkspace(definition, workspace, before, after) {
   const changed = changedFiles(before, after);
   const unauthorized = changed.filter((path) => !execution.allowedChanges.some((scope) => pathMatches(path, scope)));
   const checks = [requiredCheck("change-scope", unauthorized.length === 0, unauthorized.length ? `Unexpected changes: ${unauthorized.join(", ")}` : `Allowed changes: ${changed.join(", ") || "none"}`)];
+  // Paths alone cannot tell a one-line fix from a whole-file rewrite; a line budget can.
+  if (execution.maxChangedLines !== undefined) {
+    let changedLines = 0;
+    for (const path of changed.filter((item) => !item.endsWith("/"))) {
+      const current = after[path]?.kind === "file" ? await readGraderFile(workspace, path) : undefined;
+      const { additions, deletions } = countLineChanges(execution.files[path] ?? "", current ?? "");
+      changedLines += additions + deletions;
+    }
+    checks.push(requiredCheck("change-size", changedLines <= execution.maxChangedLines, `Changed lines: ${changedLines} (limit ${execution.maxChangedLines})`));
+  }
   for (const spec of execution.checks.files ?? []) {
     let passed = false;
     let detail;
@@ -314,6 +342,7 @@ function validateDefinition(definition) {
   if (!Array.isArray(execution.allowedChanges)) throw new Error("E2E eval requires explicit execution.allowedChanges (use [] for read-only)");
   for (const path of [...execution.allowedChanges, ...(execution.checks?.unchanged ?? [])]) workspacePath("/eval-workspace", path.endsWith("/") ? path.slice(0, -1) : path);
   const checks = execution.checks ?? {};
+  if (execution.maxChangedLines !== undefined && (!Number.isSafeInteger(execution.maxChangedLines) || execution.maxChangedLines < 0)) throw new Error("execution.maxChangedLines must be a nonnegative integer");
   if (execution.expectedCheckFailures && (!Array.isArray(execution.expectedCheckFailures) || execution.expectedCheckFailures.some((name) => typeof name !== "string"))) throw new Error("expectedCheckFailures must be check names");
   if (execution.expectedRun?.status && !["completed", "failed"].includes(execution.expectedRun.status)) throw new Error("expectedRun.status must be completed or failed");
   if (!(checks.files?.length || checks.commands?.length)) throw new Error("E2E eval requires independent file or command checks");

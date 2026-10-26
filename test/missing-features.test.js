@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { projectUntrustedContent, createQuarantine } from "../src/harness/quarantine.js";
 import { extractNetworkTargets, egressViolations, isHostAllowed, parseEgressAllowlist } from "../src/permissions/egress.js";
 import { classifyShellCommand } from "../src/permissions/shellPolicy.js";
@@ -155,9 +158,13 @@ test("withIsolatedEnv stays concurrent with no overlay but serializes conflictin
 
 test("withIsolatedCwd restores the working directory", async () => {
   const start = process.cwd();
-  const seen = await withIsolatedCwd("/tmp", async () => process.cwd());
-  assert.ok(seen.endsWith("/tmp") || seen === "/private/tmp");
-  assert.equal(process.cwd(), start);
+  // A scratch directory rather than /tmp, which a sandboxed run may not be allowed to enter.
+  const target = await realpath(await mkdtemp(join(tmpdir(), "deecoo-isolated-cwd-")));
+  try {
+    const seen = await withIsolatedCwd(target, async () => process.cwd());
+    assert.equal(await realpath(seen), target);
+    assert.equal(process.cwd(), start);
+  } finally { await rm(target, { recursive: true, force: true }); }
 });
 
 // 6. Cycle / oscillation detection

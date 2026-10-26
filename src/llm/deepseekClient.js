@@ -1,3 +1,4 @@
+import { httpStatusError, retryAttempts, withRetries } from "./retry.js";
 import { assertCompleteToolCalls, incompleteResponse } from "./streamCompletion.js";
 
 export function createDeepSeekClient(config) {
@@ -34,60 +35,32 @@ function identity(value) {
 }
 
 async function requestChatCompletionStream(config, request, handlers) {
-  const attempts = Math.min(5, Math.max(1, config.retryAttempts ?? 5));
-  let lastError;
-  let emittedContent = false;
+  return withRetries({ attempts: retryAttempts(config), signal: handlers.signal, timeoutMs: config.timeoutMs, onRuntimeEvent: handlers.onRuntimeEvent,
+    beforeAttempt: handlers.beforeAttempt, onAttemptError: handlers.onAttemptError }, async ({ signal, progress }) => {
+    const response = await fetch(`${config.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify(request),
+      signal,
+    });
 
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    throwIfAborted(handlers.signal);
-    const controller = new AbortController();
-    const removeAbortListener = linkAbortSignal(handlers.signal, controller);
-    const timeout = setTimeout(() => controller.abort(new Error("Request timed out.")), config.timeoutMs);
-
-    try {
-      const response = await fetch(`${config.baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${config.apiKey}`,
-          "Content-Type": "application/json",
-          Accept: "text/event-stream",
-        },
-        body: JSON.stringify(request),
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        const text = await response.text();
-        const error = new Error(`API error ${response.status}: ${text}`);
-        error.status = response.status;
-        throw error;
-      }
-
-      if (!response.body) {
-        throw new Error("API returned no stream body.");
-      }
-
-      const result = await readChatCompletionSse(response.body, {
-        ...handlers,
-        onContent(content) {
-          emittedContent = true;
-          handlers.onContent?.(content);
-        },
-      });
-      return result;
-    } catch (error) {
-      lastError = error;
-      if (isExternalAbort(handlers.signal) || emittedContent || attempt >= attempts || !shouldRetry(error)) break;
-      const delayMs = backoffMs(attempt);
-      (typeof handlers !== "undefined" ? handlers : options).onRuntimeEvent?.({ type: "model-retry", attempt, delayMs, status: error.status });
-      await delay(delayMs);
-    } finally {
-      clearTimeout(timeout);
-      removeAbortListener();
+    if (!response.ok) throw httpStatusError(response, `API error ${response.status}: ${await response.text()}`);
+    if (!response.body) {
+      throw new Error("API returned no stream body.");
     }
-  }
 
-  throw lastError;
+    return readChatCompletionSse(response.body, {
+      ...handlers,
+      onContent(content) {
+        progress.emitted = true;
+        handlers.onContent?.(content);
+      },
+    });
+  });
 }
 
 async function readChatCompletionSse(body, handlers) {
@@ -191,83 +164,20 @@ function applyChatDelta(message, delta, handlers) {
 }
 
 async function requestJson(config, path, init, options = {}) {
-  const attempts = Math.min(5, Math.max(1, config.retryAttempts ?? 5));
-  let lastError;
+  return withRetries({ attempts: retryAttempts(config), signal: options.signal, timeoutMs: config.timeoutMs, onRuntimeEvent: options.onRuntimeEvent,
+    beforeAttempt: options.beforeAttempt, onAttemptError: options.onAttemptError }, async ({ signal }) => {
+    const response = await fetch(`${config.baseUrl}${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        "Content-Type": "application/json",
+        ...init.headers,
+      },
+      signal,
+    });
 
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    throwIfAborted(options.signal);
-    const controller = new AbortController();
-    const removeAbortListener = linkAbortSignal(options.signal, controller);
-    const timeout = setTimeout(() => controller.abort(new Error("Request timed out.")), config.timeoutMs);
-
-    try {
-      const response = await fetch(`${config.baseUrl}${path}`, {
-        ...init,
-        headers: {
-          Authorization: `Bearer ${config.apiKey}`,
-          "Content-Type": "application/json",
-          ...init.headers,
-        },
-        signal: controller.signal,
-      });
-
-      const text = await response.text();
-      if (!response.ok) {
-        const error = new Error(`API error ${response.status}: ${text}`);
-        error.status = response.status;
-        throw error;
-      }
-
-      return text ? JSON.parse(text) : {};
-    } catch (error) {
-      lastError = error;
-      if (isExternalAbort(options.signal) || attempt >= attempts || !shouldRetry(error)) break;
-      const delayMs = backoffMs(attempt);
-      (typeof handlers !== "undefined" ? handlers : options).onRuntimeEvent?.({ type: "model-retry", attempt, delayMs, status: error.status });
-      await delay(delayMs);
-    } finally {
-      clearTimeout(timeout);
-      removeAbortListener();
-    }
-  }
-
-  throw lastError;
-}
-
-function linkAbortSignal(signal, controller) {
-  if (!signal) return () => {};
-  const onAbort = () => controller.abort(signal.reason ?? new Error("Task interrupted."));
-  if (signal.aborted) {
-    onAbort();
-    return () => {};
-  }
-  signal.addEventListener("abort", onAbort, { once: true });
-  return () => signal.removeEventListener("abort", onAbort);
-}
-
-function throwIfAborted(signal) {
-  if (!signal?.aborted) return;
-  const error = signal.reason instanceof Error ? signal.reason : new Error("Task interrupted.");
-  error.name = "AbortError";
-  throw error;
-}
-
-function isExternalAbort(signal) {
-  return Boolean(signal?.aborted);
-}
-
-function shouldRetry(error) {
-  if (error.code === "INCOMPLETE_RESPONSE") return false;
-  if (error.name === "AbortError") return true;
-  if (/Request timed out/i.test(error.message ?? "")) return true;
-  if (error.status === 429 || (error.status >= 500 && error.status <= 599)) return true;
-  return /fetch failed|network|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i.test(error.message ?? "");
-}
-
-function backoffMs(attempt) {
-  return Math.min(500 * 2 ** (attempt - 1), 4000);
-}
-
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+    const text = await response.text();
+    if (!response.ok) throw httpStatusError(response, `API error ${response.status}: ${text}`);
+    return text ? JSON.parse(text) : {};
+  });
 }

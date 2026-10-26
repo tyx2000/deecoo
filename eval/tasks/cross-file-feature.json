@@ -79,6 +79,7 @@
         "package.json",
         "test.js"
       ]
-    }
+    },
+    "maxChangedLines": 4
   }
 }

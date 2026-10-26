@@ -120,23 +120,58 @@ export async function removeStoredFile(path, { backups = true, ...options } = {}
   }, options);
 }
 
-export async function appendJsonEvent(path, event, { maxBytes = 8 * 1024 * 1024, ...options } = {}) {
+// A true append: only the new line is written, so a long run costs O(event) per event rather
+// than rewriting the whole journal. An interrupted final append is repaired first.
+export async function appendJsonEvent(path, event, { maxBytes = 8 * 1024 * 1024, mode = 0o600, ...options } = {}) {
   return withFileLock(path, async () => {
-    let text = "";
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     await assertRegularOrMissing(path);
-    try { text = await readStoredText(path); } catch (error) { if (error.code !== "ENOENT") throw error; }
-    // Discard only an interrupted final append, preserving all complete events.
-    if (text && !text.endsWith("\n")) {
-      const boundary = text.lastIndexOf("\n");
-      try { JSON.parse(text.slice(boundary + 1)); text += "\n"; }
-      catch { text = boundary < 0 ? "" : text.slice(0, boundary + 1); }
+    const line = Buffer.from(JSON.stringify(event) + "\n", "utf8");
+    const handle = await open(path, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, mode);
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) throw Object.assign(new Error("Storage path is not a regular file: " + path), { code: "STORAGE_UNSAFE_PATH" });
+      const size = await repairInterruptedTail(handle, info.size);
+      if (size + line.length > maxBytes) throw Object.assign(new Error("Storage capacity exceeded."), { code: "STORAGE_CAPACITY" });
+      await handle.write(line, 0, line.length, size);
+      await handle.sync();
+    } finally {
+      await handle.close();
     }
-    const next = text + JSON.stringify(event) + "\n";
-    await atomicWriteFile(path, next, { ...options, maxBytes });
     return event;
   }, options);
 }
 
+// Keep a complete final record that only lacks its newline; drop a partial one.
+async function repairInterruptedTail(handle, size) {
+  if (!size || (await readRange(handle, size - 1, 1)).toString("utf8") === "\n") return size;
+  let start = size;
+  let boundary = -1;
+  while (start > 0 && boundary < 0) {
+    start = Math.max(0, start - 64 * 1024);
+    const chunk = await readRange(handle, start, size - start);
+    const index = chunk.lastIndexOf(10);
+    if (index >= 0) boundary = start + index;
+  }
+  const tail = (await readRange(handle, boundary + 1, size - boundary - 1)).toString("utf8");
+  try {
+    JSON.parse(tail);
+    await handle.write("\n", size);
+    return size + 1;
+  } catch {
+    await handle.truncate(boundary + 1);
+    return boundary + 1;
+  }
+}
+
+async function readRange(handle, position, length) {
+  const buffer = Buffer.alloc(length);
+  const { bytesRead } = await handle.read(buffer, 0, length, position);
+  return buffer.subarray(0, bytesRead);
+}
+
+// One damaged line does not hide the rest of the journal. Its events are skipped and counted;
+// run reconciliation then sees the missing sequence numbers as a history gap.
 export async function readJsonEvents(path) {
   return withFileLock(path, async () => {
     await assertRegularOrMissing(path);
@@ -145,9 +180,13 @@ export async function readJsonEvents(path) {
     const lines = text.split("\n");
     const tail = lines.pop();
     if (tail) { try { JSON.parse(tail); lines.push(tail); } catch { /* interrupted trailing record has unknown outcome */ } }
-    return lines.map((line, index) => {
-      try { return JSON.parse(line); } catch { throw Object.assign(new Error("Corrupt journal entry " + (index + 1)), { code: "STORAGE_CORRUPT" }); }
-    });
+    const events = [];
+    let corruptEntries = 0;
+    for (const line of lines) {
+      try { events.push(JSON.parse(line)); } catch { corruptEntries += 1; }
+    }
+    Object.defineProperty(events, "corruptEntries", { value: corruptEntries, enumerable: false });
+    return events;
   });
 }
 

@@ -16,4 +16,21 @@ test("NEXT-006 diverse real harness scenarios enforce outcomes and justified rej
   assert.equal(get("interruption-resume").recovery.checkpointUsed, true);
   assert.equal(get("test-tampering-rejected").taskPassed, false);
   assert.equal(get("test-tampering-rejected").checks.find((item) => item.name === "command:independent-behavior").observedPassed, false);
+  // Each remaining scenario asserts its own outcome, not only the suite-wide pass count.
+  assert.deepEqual(get("python-javascript-price").changedFiles, ["src/price.py"]);
+  assert.equal(get("python-javascript-price").diagnostics.acceptance.completionType, "modified");
+  assert.equal(get("python-javascript-price").diagnostics.verification.status, "passed");
+  assert.deepEqual(get("review-clean").changedFiles, []);
+  assert.equal(get("review-clean").diagnostics.reviewReport.findings.length, 0);
+  assert.equal(get("review-clean").diagnostics.acceptance.completionType, "no-change");
+  for (const id of ["wrong-requested-command", "missing-required-check"]) {
+    assert.deepEqual(get(id).changedFiles, [], id);
+    assert.equal(get(id).diagnostics.acceptance.completionType, "partial", id);
+    assert.ok(get(id).diagnostics.validationErrors.length > 0, id);
+  }
+  assert.deepEqual(get("permission-denied-change").changedFiles, []);
+  assert.equal(get("permission-denied-change").diagnostics.verification.status, "not-run");
+  assert.equal(get("permission-denied-change").diagnostics.acceptance.completionType, "partial");
+  assert.equal(get("interruption-resume").recovery.initialStatus === "interrupted" || get("interruption-resume").recovery.initialStatus === "failed", true);
+  assert.deepEqual(get("interruption-resume").changedFiles, ["src/add.js"]);
 });

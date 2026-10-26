@@ -3,7 +3,19 @@ import { adapterProtocol, deepFreeze, providerCapabilities, endpointFingerprint 
 import { linkSignals } from "../harness/budget.js";
 export { endpointFingerprint } from "./capabilities.js";
 
-export function schemaFingerprint(tools = []) { return stableFingerprint(tools); }
+// A run sends the same tool schemas on every step; canonicalizing and hashing them each time is
+// avoidable work. Equal serialized schemas always have equal canonical fingerprints.
+const schemaFingerprintCache = new Map();
+export function schemaFingerprint(tools = []) {
+  const key = JSON.stringify(tools);
+  let fingerprint = schemaFingerprintCache.get(key);
+  if (fingerprint === undefined) {
+    fingerprint = stableFingerprint(tools);
+    schemaFingerprintCache.set(key, fingerprint);
+    if (schemaFingerprintCache.size > 16) schemaFingerprintCache.delete(schemaFingerprintCache.keys().next().value);
+  }
+  return fingerprint;
+}
 export function stableFingerprint(value) {
   const canonical = (input) => Array.isArray(input) ? input.map(canonical) : input && typeof input === "object"
     ? Object.fromEntries(Object.keys(input).sort().filter((key) => input[key] !== undefined).map((key) => [key, canonical(input[key])])) : input;
@@ -82,7 +94,9 @@ export function prepareModelRequest(receiver, input, config = {}, { signal } = {
     reasoningEffort: request.reasoning_effort,
     thinking: request.thinking ?? (routeIdentity.provider === "anthropic" ? { type: "disabled" } : undefined), sources });
   const immutableRequest = deepFreeze(request);
-  const requestFingerprint = stableFingerprint({ request: immutableRequest, effectiveConfig, capabilities, route: routeIdentity.hash });
+  // The route hash already covers the tool schemas, so the request body is fingerprinted without them.
+  const { tools: _schemas, ...requestBody } = immutableRequest;
+  const requestFingerprint = stableFingerprint({ request: requestBody, effectiveConfig, capabilities, route: routeIdentity.hash });
   // Capture the OUTER receiver's methods. Object-spread budget and rate-limit
   // wrappers therefore stay on the actual dispatch path, including streaming.
   const complete = receiver?.chatCompletion;

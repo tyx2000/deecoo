@@ -1,5 +1,5 @@
 
-import readline from "node:readline";
+import { installTaskInterrupt } from "./cli/taskInterrupt.js";
 import { readFile, stat } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { handleConfigCommand } from "./commands/config.js";
@@ -26,7 +26,7 @@ import { createToolRuntime } from "./tools/runtime.js";
 import { runManagementCommand } from "./cli/management.js";
 import { redact } from "./observability/audit.js";
 import { structuredRunResult } from "./reporter/outputs.js";
-import { loadDotEnvIfPresent } from "./cli/dotenv.js";
+import { formatIgnoredDotEnvKeys, loadDotEnvIfPresent } from "./cli/dotenv.js";
 import { sessionPromptHistory, shortSessionId } from "./cli/sessionView.js";
 import { buildInputPrompt, clearTerminal, createTerminalTitleManager, printStartupInfo } from "./cli/terminalUi.js";
 import { filterWorkspacePathOptions, listWorkspacePathOptions } from "./cli/workspacePaths.js";
@@ -66,13 +66,14 @@ async function mainInner(args) {
   const settings = await loadSettingsEnv({ settingsPath: args.settings });
   applySettingsEnv(settings.env, { overrideKeys: ["DEECOO_MODEL", "DEECOO_THEME"] });
 
-  await loadDotEnvIfPresent(process.cwd());
+  const dotEnvResults = [await loadDotEnvIfPresent(process.cwd())];
   if (args.cwd) {
-    await loadDotEnvIfPresent(resolve(args.cwd));
+    dotEnvResults.push(await loadDotEnvIfPresent(resolve(args.cwd)));
   }
   if (!args.cwd && process.env.DEECOO_CWD) {
-    await loadDotEnvIfPresent(resolve(process.env.DEECOO_CWD));
+    dotEnvResults.push(await loadDotEnvIfPresent(resolve(process.env.DEECOO_CWD)));
   }
+  for (const notice of dotEnvResults.map(formatIgnoredDotEnvKeys).filter(Boolean)) console.error(notice);
 
   if (args.command === "config") {
     if (args.outputFormat) {
@@ -335,50 +336,4 @@ async function runInterruptibleTask(params) {
   } finally {
     interrupt.dispose();
   }
-}
-
-function installTaskInterrupt(nonInteractive = false) {
-  const controller = new AbortController();
-  let terminationSignal;
-  const onSignal = (name) => {
-    terminationSignal ??= name;
-    if (!controller.signal.aborted) controller.abort(Object.assign(new Error(`Task interrupted by ${name}.`), { code: "ABORT_ERR" }));
-  };
-  const onSigint = () => onSignal("SIGINT");
-  const onSigterm = () => onSignal("SIGTERM");
-  process.on("SIGINT", onSigint); process.on("SIGTERM", onSigterm);
-  const disposeSignals = () => { process.off("SIGINT", onSigint); process.off("SIGTERM", onSigterm); };
-  if (nonInteractive || !process.stdin.isTTY) {
-    return { signal: controller.signal, get terminationSignal() { return terminationSignal; }, dispose: disposeSignals };
-  }
-
-  const wasFlowing = process.stdin.readableFlowing;
-  readline.emitKeypressEvents(process.stdin);
-  const wasRaw = process.stdin.isRaw;
-  process.stdin.setRawMode(true);
-  let reported = false;
-  const onKeypress = (_str, key = {}) => {
-    if (key.name !== "escape" || controller.signal.aborted) return;
-    reported = true;
-    controller.abort(new Error("Task interrupted by Esc."));
-    process.stdout.write("\n" + formatToolLine("interrupted: Esc") + "\n");
-  };
-  process.stdin.on("keypress", onKeypress);
-  // emitKeypressEvents reuses its decoder and may leave a previously paused
-  // stream paused; explicitly acquire input for Esc handling on every task.
-  process.stdin.resume();
-
-  return {
-    signal: controller.signal,
-    get terminationSignal() { return terminationSignal; },
-    dispose() {
-      disposeSignals();
-      process.stdin.off("keypress", onKeypress);
-      process.stdin.setRawMode(wasRaw);
-      // The keypress listener resumes stdin even when no prompt was opened. A
-      // one-shot task must release that read handle so Node can exit naturally.
-      if (wasFlowing !== true) process.stdin.pause();
-      if (reported) process.stdout.write("\n");
-    },
-  };
 }

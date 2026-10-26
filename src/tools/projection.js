@@ -31,17 +31,30 @@ export function compactToolResult(name, result, { truncate = true } = {}) {
   }
   if (result.activity) compact.activity = result.activity;
   if (result.usage) compact.usage = result.usage;
-  if (result.files) compact.files = array(result.files, 120);
-  if (result.matches) compact.matches = array(result.matches, 80);
-  if (result.symbols) compact.symbols = array(result.symbols, 80);
-  if (result.references) compact.references = array(result.references, 80);
-  if (truncate && ([result.matches, result.symbols, result.references].some((items) => Array.isArray(items) && items.length > 80) || Array.isArray(result.files) && result.files.length > 120)) compact.truncated = true;
+  // Arrays keep their element type; how many items were cut is reported beside them.
+  const omittedItems = {};
+  for (const [key, limit] of [["files", 120], ["matches", 80], ["symbols", 80], ["references", 80]]) {
+    if (!result[key]) continue;
+    compact[key] = array(result[key], limit);
+    if (Array.isArray(result[key]) && compact[key].length < result[key].length) omittedItems[key] = result[key].length - compact[key].length;
+  }
+  if (Object.keys(omittedItems).length) {
+    compact.truncated = true;
+    compact.sourceComplete = false;
+    compact.omittedItems = omittedItems;
+  }
   if (result.text !== undefined) compact.text = text(result.text, 30000);
   if (result.content !== undefined) compact.content = text(result.content, 30000);
   if (truncate && typeof result.content === "string" && result.content.length > 30000) {
     compact.truncated = true;
     compact.sourceComplete = false;
     compact.projectionTruncated = true;
+    // Point a line-addressed read at the first line this projection did not show in full.
+    if (Number.isSafeInteger(result.startLine)) {
+      const completeLines = result.content.slice(0, 30000).split("\n").length - 1;
+      compact.endLine = result.startLine + Math.max(1, completeLines) - 1;
+      compact.nextStartLine = result.startLine + Math.max(1, completeLines);
+    }
   }
   if (result.failureSummary !== undefined) compact.failureSummary = text(result.failureSummary, 12000);
   if (result.stdout !== undefined) compact.stdout = text(result.stdout, 12000);
@@ -55,10 +68,7 @@ export function compactToolResult(name, result, { truncate = true } = {}) {
 
 function compactArray(values, maxItems) {
   if (!Array.isArray(values) || values.length <= maxItems) return values;
-  return [
-    ...values.slice(0, maxItems),
-    `... truncated ${values.length - maxItems} additional item${values.length - maxItems === 1 ? "" : "s"}`,
-  ];
+  return values.slice(0, maxItems);
 }
 
 function truncateText(value, maxChars) {

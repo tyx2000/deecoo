@@ -4,6 +4,7 @@ export const TERMINAL_TRANSITIONS = Object.freeze({
   REVIEW_SCHEMA_INVALID: "review_schema_invalid",
   TASK_CONTRACT_INVALID: "task_contract_invalid",
   STEP_BUDGET_EXCEEDED: "step_budget_exceeded",
+  NO_PROGRESS: "no_progress",
   TOKEN_BUDGET_EXCEEDED: "token_budget_exceeded",
   COST_BUDGET_EXCEEDED: "cost_budget_exceeded",
   TASK_DEADLINE_EXCEEDED: "task_deadline_exceeded",

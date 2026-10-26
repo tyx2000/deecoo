@@ -7,6 +7,7 @@ export function toolExceptionResult(error) {
   };
   if (error?.code) result.code = error.code;
   if (error?.effects) result.effects = error.effects;
+  if (error?.uncertainPaths) result.uncertainPaths = error.uncertainPaths;
   if (isPathNotFoundError(error)) {
     result.recoverable = true;
     result.suggestion =

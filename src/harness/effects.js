@@ -48,7 +48,9 @@ export function createEffectLedger({ revision = 0, workspace } = {}) {
         versions.set(path, contentHash);
         const complete = result.truncated !== true && result.sourceComplete !== false;
         events.push({ id: randomUUID(), type: "file-read", path, chars: result.content.length, truncated: !complete,
-          contentHash, ...(complete && result.content.length <= 32768 ? { content: result.content } : {}), revision: current });
+          contentHash, ...(typeof result.version === "string" ? { version: result.version } : {}),
+          ...Object.fromEntries(["startLine", "endLine", "totalLines", "rangeComplete"].filter((key) => result[key] !== undefined).map((key) => [key, result[key]])),
+          ...(complete && result.content.length <= 32768 ? { content: result.content } : {}), revision: current });
       } else if (name === "git_diff" && result?.ok !== false && String(result?.diff ?? "").trim()) {
         events.push({ id: randomUUID(), type: "diff-read", path: args.path,
           paths: [...String(result.diff).matchAll(/^\+\+\+ b\/(.+)$/gm)].map((match) => match[1]), revision: current });

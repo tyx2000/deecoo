@@ -1,7 +1,8 @@
-import { classifyShellCommand, normalizeShellCommand } from "../permissions/shellPolicy.js";
+import { classifyShellCommand, gitInvocationDirectories, normalizeShellCommand } from "../permissions/shellPolicy.js";
+import { repositoryProgramConfigKeys } from "../permissions/gitPolicy.js";
 import { createExecutionBackend } from "../execution/backend.js";
 import { realpath } from "node:fs/promises";
-import { relative } from "node:path";
+import { relative, resolve } from "node:path";
 import { assertExistingWorkspacePath, assertSafePath, isExcludedWorkspacePath } from "./pathPolicy.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -25,7 +26,8 @@ export async function runShell(workspace, args, prompter, allowShellWithoutPromp
   catch (error) { return { ok: false, code: "SHELL_CWD_BLOCKED", error: error.message }; }
   const command = String(args.command);
   const approvedCommandKey = normalizeShellCommand(command);
-  const policy = classifyShellCommand(command, { egressAllowlist: permissionState.egressAllowlist });
+  let policy = classifyShellCommand(command, { egressAllowlist: permissionState.egressAllowlist });
+  if (policy.level === "allow") policy = await withRepositoryGitPrograms(policy, command, executionCwd);
   if (policy.level === "block") {
     return {
       ok: false,
@@ -52,13 +54,15 @@ export async function runShell(workspace, args, prompter, allowShellWithoutPromp
   try {
     executionCwd = await validateExecutionCwd(workspace, args.cwd);
     const backend = permissionState.executionBackend ?? createExecutionBackend({ cwd: workspace });
+    const writeRestrictions = structuredClone(permissionState.taskToolPolicy?.writeRestrictions ?? []);
+    if (writeRestrictions.length && backend.capabilities?.().scopedWriteRestrictions !== true) throw Object.assign(new Error("This execution backend cannot enforce the task's restricted write paths."), { code: "TASK_SCOPED_SHELL_UNAVAILABLE" });
     const environment = permissionState.executionEnv ? { env: permissionState.executionEnv, replaceEnv: true } : {};
     if (args.background === true) {
-      const job = await backend.startJob({ command, cwd: executionCwd, timeoutMs: args.timeoutMs, signal, ...environment });
+      const job = await backend.startJob({ command, cwd: executionCwd, timeoutMs: args.timeoutMs, signal, writeRestrictions, ...environment });
       const ok = ["starting", "running"].includes(job.status) || (job.status === "exited" && job.exitCode === 0 && job.treeCleanup?.confirmed);
       return { ...job, ok: Boolean(ok), shellPolicy: policy, activity: { kind: "command", label: "Started job", target: command, detail: job.jobId } };
     }
-    const result = await backend.run({ command, cwd: executionCwd, timeoutMs: Number(args.timeoutMs ?? DEFAULT_TIMEOUT_MS), signal, ...environment });
+    const result = await backend.run({ command, cwd: executionCwd, timeoutMs: Number(args.timeoutMs ?? DEFAULT_TIMEOUT_MS), signal, writeRestrictions, ...environment });
     const stdoutResult = truncateOutput(result.stdout);
     const stderrResult = truncateOutput(result.stderr);
     if (result.stdoutTruncated && !stdoutResult.truncated) { stdoutResult.truncated = true; stdoutResult.text += "\n... output truncated to 20KB"; }
@@ -112,6 +116,17 @@ function throwIfAborted(signal) {
   error.name = "AbortError";
   error.code = "ABORT_ERR";
   throw error;
+}
+
+// A read-only git command still runs whatever filters, diff drivers, or signature programs the
+// repository configures, so such a repository turns the command into one that needs approval.
+async function withRepositoryGitPrograms(policy, command, cwd) {
+  const keys = new Set();
+  for (const chain of gitInvocationDirectories(command)) {
+    for (const key of await repositoryProgramConfigKeys(resolve(cwd, ...chain))) keys.add(key);
+  }
+  if (!keys.size) return policy;
+  return { level: "warn", reasons: [`repository git config defines programs git would run: ${[...keys].join(", ")}`], promptLabel: "Risky shell command" };
 }
 
 function shellPrompt(command, policy) {

@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { reviewSchemaInstructions } from "../reporter/reviewReport.js";
 
+const POST_COR_HANDOFF = "- For post-cor follow-up work, first use the latest S-COR handoff artifact when present. Do not rerun code review unless the user explicitly asks for a fresh review.";
+
 export function buildSystemPrompt(cwd, requestType, activeSkills = [], coordination) {
   return [
     renderPrompt("base.md", {
@@ -9,6 +11,9 @@ export function buildSystemPrompt(cwd, requestType, activeSkills = [], coordinat
       activeSkills: formatActiveSkills(activeSkills),
     }),
     renderPrompt(taskPromptFile(requestType)),
+    // Skill-specific routing stays out of the generic prompts; it is added only for its skill.
+    hasSkill(activeSkills, "s-cor") ? renderPrompt("scor-review.md") : "",
+    hasSkill(activeSkills, "post-cor") ? POST_COR_HANDOFF : "",
     requestType === "review" ? reviewSchemaInstructions() : "",
     coordination?.complex
       ? renderPrompt("coordination.md", {
@@ -19,6 +24,10 @@ export function buildSystemPrompt(cwd, requestType, activeSkills = [], coordinat
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+function hasSkill(activeSkills, name) {
+  return activeSkills.some((skill) => (skill.name || skill.id) === name);
 }
 
 function taskPromptFile(requestType) {

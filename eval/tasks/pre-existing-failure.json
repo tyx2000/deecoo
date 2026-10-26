@@ -70,6 +70,7 @@
       "stoppedReason": "task_contract_invalid",
       "verificationStatus": "failed",
       "completionType": "blocked"
-    }
+    },
+    "maxChangedLines": 2
   }
 }

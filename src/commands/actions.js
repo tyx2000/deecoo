@@ -1,7 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { writeProviderModel, writeSettingsEnv } from "../config/settings.js";
-import { listRunAudits, readRunAudit } from "../observability/audit.js";
+import { listRunAudits, readRunAudit, verifyRunAuditChain } from "../observability/audit.js";
 import { buildTraceEvalResultLines, buildTraceEvalSuggestionLines } from "./evalTrace.js";
 import { listCodexSkills, loadCodexSkill } from "../skills/install.js";
 import { createSpinner } from "../terminal/spinner.js";
@@ -231,8 +231,10 @@ export async function showTrace({ sessionStore, session }) {
   }
   const audit = await readRunAudit(audits[0].path);
   const evalLines = await safeTraceEvalSuggestionLines({ audit, auditPath: audits[0].path });
+  const integrity = await verifyRunAuditChain(sessionStore, session);
   console.log([
     "Latest trace: " + audits[0].path,
+    "integrity: " + (integrity.ok ? `chain verified (${integrity.records} records${integrity.legacyRecords ? `, ${integrity.legacyRecords} unchained legacy` : ""})` : `BROKEN (${integrity.reason}${integrity.fileName ? " at " + integrity.fileName : ""})`),
     "task: " + truncateOneLine(audit.task, 100),
     "requestType: " + (audit.requestType ?? "-"),
     "workflow: " + (audit.workflow?.status ?? "-") + " / " + (audit.workflow?.phase ?? "-"),

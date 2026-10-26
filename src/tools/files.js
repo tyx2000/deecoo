@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { link, lstat, mkdir, open, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import { lstat, open, readdir, readFile } from "node:fs/promises";
+import { join, relative } from "node:path";
 import {
   assertExistingWorkspacePath,
   assertSafePath,
@@ -12,6 +12,8 @@ import {
   pathNotFoundResult,
 } from "./pathPolicy.js";
 import { countLineChanges, countOccurrences, unifiedDiff } from "./textDiff.js";
+import { secureMove, secureUnlink, secureWrite, workspaceIdentity } from "./secureFs.js";
+import { taskWritePathViolation } from "../permissions/taskPolicy.js";
 
 export async function listFiles(workspace, getRealWorkspace, args) {
   const directory = args.directory ?? ".";
@@ -120,6 +122,7 @@ export function normalizeReadRange(args = {}) {
 
 export async function editFile(workspace, getRealWorkspace, args, prompter, permissionState, signal) {
   throwIfAborted(signal);
+  workspaceIdentity(workspace, permissionState);
   if (!args.path) return { ok: false, error: "path is required" };
   if (typeof args.search !== "string") return { ok: false, error: "search is required" };
   if (typeof args.replace !== "string") return { ok: false, error: "replace is required" };
@@ -141,7 +144,7 @@ export async function editFile(workspace, getRealWorkspace, args, prompter, perm
     return { ok: false, error: `search must match exactly once; matched ${count} times` };
   }
 
-  const next = original.replace(args.search, args.replace);
+  const next = replaceLiteral(original, args.search, args.replace);
   const rel = relative(workspace, path);
   if (permissionState.mode === "read-only") {
     return { ok: false, error: "File edits are blocked by read-only permission mode." };
@@ -165,11 +168,11 @@ export async function editFile(workspace, getRealWorkspace, args, prompter, perm
       code: "FILE_CHANGED_BEFORE_WRITE",
     };
   }
-  const finalContent = current.content.replace(args.search, args.replace);
+  const finalContent = replaceLiteral(current.content, args.search, args.replace);
   const finalStats = countLineChanges(current.content, finalContent);
 
   throwIfAborted(signal);
-  await writeFile(path, finalContent, "utf8");
+  await writeWorkspaceText(workspace, getRealWorkspace, path, finalContent, { original: current.content, permissionState, signal });
   updateReadCache(permissionState, rel, finalContent);
   return {
     ok: true,
@@ -215,7 +218,7 @@ export async function proposePatch(workspace, getRealWorkspace, args) {
     if (count !== 1) {
       return { ok: false, error: `search must match exactly once; matched ${count} times` };
     }
-    next = original.replace(args.search, args.replace);
+    next = replaceLiteral(original, args.search, args.replace);
   }
 
   const rel = relative(workspace, path);
@@ -265,6 +268,7 @@ export async function proposeStructuredPatchSet(workspace, getRealWorkspace, arg
 
 export async function applyStructuredPatch(workspace, getRealWorkspace, args, prompter, permissionState, signal) {
   throwIfAborted(signal);
+  workspaceIdentity(workspace, permissionState);
   if (!args.path) return { ok: false, error: "path is required" };
   if (!Array.isArray(args.hunks) || args.hunks.length === 0) return { ok: false, error: "hunks must be a non-empty array" };
 
@@ -310,7 +314,7 @@ export async function applyStructuredPatch(workspace, getRealWorkspace, args, pr
   const finalStats = countLineChanges(current.content, finalPlan.content);
 
   throwIfAborted(signal);
-  await writeFile(path, finalPlan.content, "utf8");
+  await writeWorkspaceText(workspace, getRealWorkspace, path, finalPlan.content, { original: current.content, permissionState, signal });
   updateReadCache(permissionState, rel, finalPlan.content);
   return {
     ok: true,
@@ -331,6 +335,7 @@ export async function applyStructuredPatch(workspace, getRealWorkspace, args, pr
 
 export async function applyStructuredPatchSet(workspace, getRealWorkspace, args, prompter, permissionState, signal) {
   throwIfAborted(signal);
+  workspaceIdentity(workspace, permissionState);
   const planned = await planPatchSet(workspace, getRealWorkspace, args);
   if (!planned.ok) return planned;
   const { plans } = planned;
@@ -360,12 +365,13 @@ export async function applyStructuredPatchSet(workspace, getRealWorkspace, args,
   for (const plan of freshPlans) {
     try {
       throwIfAborted(signal);
-      await applyPatchSetPlan(plan, signal);
+      await applyPatchSetPlan(workspace, getRealWorkspace, plan, permissionState, signal);
       written.push(plan);
       throwIfAborted(signal);
       updateCacheForPatchSetPlan(permissionState, plan);
     } catch (error) {
-      return await rollbackPatchSetWrites({ written, permissionState, cause: error });
+      return await rollbackPatchSetWrites({ workspace, getRealWorkspace, written, permissionState, cause: error,
+        uncertainPlan: error.workspaceMutationUncertain ? plan : undefined });
     }
   }
   const totals = patchSetTotals(freshPlans);
@@ -432,6 +438,7 @@ function patchSetPlanPreview(plan) {
 
 export async function applyJsonPatch(workspace, getRealWorkspace, args, prompter, permissionState, signal) {
   throwIfAborted(signal);
+  workspaceIdentity(workspace, permissionState);
   if (!args.path) return { ok: false, error: "path is required" };
   if (!Array.isArray(args.operations) || args.operations.length === 0) {
     return { ok: false, error: "operations must be a non-empty array" };
@@ -478,7 +485,7 @@ export async function applyJsonPatch(workspace, getRealWorkspace, args, prompter
   const finalStats = countLineChanges(current.content, finalPlan.content);
 
   throwIfAborted(signal);
-  await writeFile(path, finalPlan.content, "utf8");
+  await writeWorkspaceText(workspace, getRealWorkspace, path, finalPlan.content, { original: current.content, permissionState, signal });
   updateReadCache(permissionState, rel, finalPlan.content);
   return {
     ok: true,
@@ -497,6 +504,24 @@ export async function applyJsonPatch(workspace, getRealWorkspace, args, prompter
   };
 }
 
+async function assertWriteTarget(workspace, getRealWorkspace, path, permissionState) {
+  const violation = taskWritePathViolation(path, permissionState?.taskToolPolicy, { workspace });
+  if (violation) throw Object.assign(new Error(violation.error), { code: violation.code });
+  await assertWorkspaceWriteParent(workspace, getRealWorkspace, path);
+}
+
+// Recheck after approval, then mutate relative to a held workspace directory descriptor.
+// The helper refuses every symlink component and compares old content before truncating.
+async function writeWorkspaceText(workspace, getRealWorkspace, path, content, { create = false, original = "", permissionState, signal } = {}) {
+  await assertWriteTarget(workspace, getRealWorkspace, path, permissionState);
+  try {
+    await secureWrite(workspace, path, content, { create, original, signal, identity: workspaceIdentity(workspace, permissionState) });
+  } catch (error) {
+    if (error.workspaceMutationUncertain) error.uncertainPaths = [relative(workspace, path)];
+    throw error;
+  }
+}
+
 async function readCurrentFileForWrite(workspace, getRealWorkspace, path, requestedPath) {
   try {
     const info = await assertExistingWorkspacePath(workspace, getRealWorkspace, path);
@@ -510,17 +535,18 @@ async function readCurrentFileForWrite(workspace, getRealWorkspace, path, reques
   }
 }
 
-async function rollbackPatchSetWrites({ written, permissionState, cause }) {
+async function rollbackPatchSetWrites({ workspace, getRealWorkspace, written, permissionState, cause, uncertainPlan }) {
   const rollbackErrors = [];
   for (const plan of [...written].reverse()) {
     try {
-      await rollbackPatchSetPlan(plan);
+      await rollbackPatchSetPlan(workspace, getRealWorkspace, plan, permissionState);
       restoreCacheForPatchSetPlan(permissionState, plan);
     } catch (error) {
       rollbackErrors.push(`${plan.rel}: ${error.message}`);
     }
   }
-  const rolledBack = rollbackErrors.length === 0;
+  const rolledBack = rollbackErrors.length === 0 && !uncertainPlan;
+  if (uncertainPlan) rollbackErrors.push(`${uncertainPlan.rel}: the failed filesystem mutation may have changed content; re-read before recovery`);
   return {
     ok: false,
     error: rolledBack
@@ -529,7 +555,7 @@ async function rollbackPatchSetWrites({ written, permissionState, cause }) {
     code: rolledBack ? "PATCH_SET_WRITE_FAILED" : "PATCH_SET_ROLLBACK_FAILED",
     rolledBack,
     filesRolledBack: rolledBack ? written.map((plan) => plan.rel) : [],
-    uncertainPaths: rolledBack ? [] : [...new Set(written.flatMap((plan) => [plan.fromRel, plan.rel].filter(Boolean)))],
+    uncertainPaths: rolledBack ? [] : [...new Set([...written, ...(uncertainPlan ? [uncertainPlan] : [])].flatMap((plan) => [plan.fromRel, plan.rel].filter(Boolean)))],
     rollbackErrors,
   };
 }
@@ -649,29 +675,21 @@ async function planPatchSetMove({ workspace, getRealWorkspace, file, index, seen
   };
 }
 
-async function applyPatchSetPlan(plan, signal) {
+async function applyPatchSetPlan(workspace, getRealWorkspace, plan, permissionState, signal) {
   throwIfAborted(signal);
   if (plan.action === "update") {
     await assertPatchSetUpdateStillCurrent(plan);
     throwIfAborted(signal);
-    await writeFile(plan.path, plan.content, "utf8");
+    await writeWorkspaceText(workspace, getRealWorkspace, plan.path, plan.content, { original: plan.original, permissionState, signal });
   } else if (plan.action === "create") {
     throwIfAborted(signal);
-    await mkdir(dirname(plan.path), { recursive: true });
-    throwIfAborted(signal);
-    await writeFile(plan.path, plan.content, { encoding: "utf8", flag: "wx" });
+    await writeWorkspaceText(workspace, getRealWorkspace, plan.path, plan.content, { create: true, permissionState, signal });
   } else if (plan.action === "move") {
     await assertPatchSetMoveStillCurrent(plan);
     throwIfAborted(signal);
-    await mkdir(dirname(plan.path), { recursive: true });
-    throwIfAborted(signal);
-    await link(plan.fromPath, plan.path);
-    try {
-      await unlink(plan.fromPath);
-    } catch (error) {
-      await unlink(plan.path).catch(() => {});
-      throw error;
-    }
+    await assertWriteTarget(workspace, getRealWorkspace, plan.fromPath, permissionState);
+    await assertWriteTarget(workspace, getRealWorkspace, plan.path, permissionState);
+    await secureMove(workspace, plan.fromPath, plan.path, { signal, identity: workspaceIdentity(workspace, permissionState) });
   }
 }
 
@@ -693,13 +711,16 @@ async function assertPatchSetMoveStillCurrent(plan) {
   }
 }
 
-async function rollbackPatchSetPlan(plan) {
+async function rollbackPatchSetPlan(workspace, getRealWorkspace, plan, permissionState) {
   if (plan.action === "update") {
-    await writeFile(plan.path, plan.original, "utf8");
+    await writeWorkspaceText(workspace, getRealWorkspace, plan.path, plan.original, { original: plan.content, permissionState });
   } else if (plan.action === "create") {
-    await unlink(plan.path);
+    await assertWriteTarget(workspace, getRealWorkspace, plan.path, permissionState);
+    await secureUnlink(workspace, plan.path, { identity: workspaceIdentity(workspace, permissionState) });
   } else if (plan.action === "move") {
-    await rename(plan.path, plan.fromPath);
+    await assertWriteTarget(workspace, getRealWorkspace, plan.path, permissionState);
+    await assertWriteTarget(workspace, getRealWorkspace, plan.fromPath, permissionState);
+    await secureMove(workspace, plan.path, plan.fromPath, { identity: workspaceIdentity(workspace, permissionState) });
   }
 }
 
@@ -735,6 +756,7 @@ function restoreCacheForPatchSetPlan(permissionState, plan) {
 
 export async function writeWorkspaceFile(workspace, getRealWorkspace, args, prompter, permissionState, signal) {
   throwIfAborted(signal);
+  workspaceIdentity(workspace, permissionState);
   if (!args.path) return { ok: false, error: "path is required" };
   if (typeof args.content !== "string") return { ok: false, error: "content is required" };
   if (args.expectedContent !== undefined && typeof args.expectedContent !== "string") {
@@ -794,10 +816,9 @@ export async function writeWorkspaceFile(workspace, getRealWorkspace, args, prom
   const finalStats = countLineChanges(finalOriginal, args.content);
 
   throwIfAborted(signal);
-  await mkdir(dirname(path), { recursive: true });
   try {
     throwIfAborted(signal);
-    await writeFile(path, args.content, { encoding: "utf8", flag: existed ? "w" : "wx" });
+    await writeWorkspaceText(workspace, getRealWorkspace, path, args.content, { create: !existed, original: finalOriginal, permissionState, signal });
   } catch (error) {
     if (!existed && error?.code === "EEXIST") {
       return {
@@ -1112,6 +1133,13 @@ function cachedReadResult(rel, content, options, actualHash) {
     readRange: options,
     activity: { kind: "read", label: "Read a file", target: rel,
       detail: `${returnedLines} of ${lines.length} lines${options.rangeRequested ? " (range)" : ""}` } };
+}
+
+// The replacement is literal text. String.prototype.replace would expand `$$`, `$&`, `$\``
+// and `$'` in it, silently rewriting Makefiles, shell scripts, and regular expressions.
+function replaceLiteral(text, search, replacement) {
+  const index = text.indexOf(search);
+  return index < 0 ? text : text.slice(0, index) + replacement + text.slice(index + search.length);
 }
 
 function throwIfAborted(signal) {

@@ -175,7 +175,10 @@ test("required sandbox fails closed when the OS backend cannot launch", async (t
 
 test("OS sandbox blocks script filesystem/network access and preserves permitted work", async (t) => {
   const f = await fixture(t, { sandboxPolicy: { mode: "required" } });
-  if (!f.backend.capabilities().sandbox.available) return t.skip(f.backend.capabilities().sandbox.reason);
+  if (!f.backend.capabilities().sandbox.available) {
+    assert.notEqual(process.env.DEECOO_REQUIRE_SANDBOX_TESTS, "1", f.backend.capabilities().sandbox.reason);
+    return t.skip(f.backend.capabilities().sandbox.reason);
+  }
   const outside = join(f.root, "outside-secret");
   await writeFile(outside, "synthetic-secret");
   const listener = createServer((socket) => socket.end("fixture"));
@@ -248,7 +251,7 @@ test("real shell cwd creates scoped check evidence and refuses unsafe cwd before
     assert.equal(denied.ok, false);
     assert.equal(denied.code, "SHELL_CWD_BLOCKED", unsafeCwd);
   }
-  assert.equal(prompts, 0, "safe command needs no prompt; invalid cwd must be rejected before risky-command approval");
+  assert.equal(prompts, 1, "npm test runs workspace-defined code and needs one approval; invalid cwd must be rejected before risky-command approval");
 });
 
 test("dispose stops and removes only this backend instance's jobs", async (t) => {
@@ -270,7 +273,7 @@ test("dispose stops and removes only this backend instance's jobs", async (t) =>
 
 test("environment injection is removed and sandbox profiles deny credentials and network", () => {
   const env = executionEnv({ PATH: "/bin", LD_PRELOAD: "bad", BASH_ENV: "bad", TASK: "ok", AUTH_TOKEN: "bad", NODE_TEST_CONTEXT: "child", npm_config_ignore_scripts: "true" }, "/private/tmp/job");
-  assert.deepEqual(env, { PATH: "/bin", TASK: "ok", HOME: "/private/tmp/job", TMPDIR: "/private/tmp/job", TMP: "/private/tmp/job", TEMP: "/private/tmp/job", XDG_CACHE_HOME: "/private/tmp/job", XDG_CONFIG_HOME: "/private/tmp/job" });
+  assert.deepEqual(env, { PATH: "/bin", TASK: "ok", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.fsmonitor", GIT_CONFIG_VALUE_0: "false", GIT_PAGER: "cat", HOME: "/private/tmp/job", TMPDIR: "/private/tmp/job", TMP: "/private/tmp/job", TEMP: "/private/tmp/job", XDG_CACHE_HOME: "/private/tmp/job", XDG_CONFIG_HOME: "/private/tmp/job" });
   const policy = normalizeSandboxPolicy({ mode: "required", denyReadRoots: ["/private/tmp/synthetic-credential"] }, "/private/tmp/work", "/private/tmp/jobs", "/private/tmp/temp");
   const profile = seatbeltProfile(policy);
   assert.match(profile, /\(deny default\)/);

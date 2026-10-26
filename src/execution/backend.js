@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { delay, processIdentity, sameIdentity, processExists } from "./processTree.js";
 import { detectSandbox, executionCommand, executionEnv, normalizeSandboxPolicy } from "./sandbox.js";
 import { atomicWriteFile } from "../storage/atomic.js";
+import { compileWriteRestrictions } from "./writeRestrictions.js";
 
 const TERMINAL = new Set(["exited", "stopped", "timed_out", "failed", "cleanup_unconfirmed"]);
 const JOB_ID = /^[a-f0-9-]{36}$/;
@@ -83,6 +84,11 @@ export function createExecutionBackend(options = {}) {
     let policy, launch;
     try {
       policy = normalizeSandboxPolicy(options.sandboxPolicy, realRoot, stateDir, tempDir);
+      if (args.writeRestrictions?.length) {
+        if (policy.mode === "off" || !probe().available || probe().kind !== "seatbelt") throw Object.assign(new Error("Scoped shell writes require an available macOS seatbelt backend; this platform/configuration cannot enforce future protected filenames."), { code: "TASK_SCOPED_SHELL_UNAVAILABLE" });
+        Object.assign(policy, await compileWriteRestrictions(realRoot, args.writeRestrictions, { signal: args.signal }));
+      }
+      if (args.signal?.aborted) throw Object.assign(new Error(args.signal.reason?.message ?? "Task interrupted."), { code: "ABORT_ERR", name: "AbortError" });
       launch = executionCommand({ command: String(args.command), cwd: jobCwd, policy, sandbox: probe() });
     } catch (error) { await rm(tempDir, { recursive: true, force: true }); throw error; }
     await mkdir(jobDir, { recursive: true, mode: 0o700 });
@@ -93,6 +99,11 @@ export function createExecutionBackend(options = {}) {
     await Promise.all([writeFile(join(jobDir, "stdout.log"), "", { mode: 0o600 }), writeFile(join(jobDir, "stderr.log"), "", { mode: 0o600 })]);
     const config = { job, launch, tempDir, env: executionEnv(args.replaceEnv ? { ...(args.env ?? {}) } : { ...defaultEnv, ...(args.env ?? {}) }, tempDir), timeoutMs, termGraceMs: options.termGraceMs ?? 200, killGraceMs: options.killGraceMs ?? 2000 };
     await writeAtomic(join(jobDir, "config.json"), config);
+    if (args.signal?.aborted) {
+      ownedJobs.delete(jobId);
+      await Promise.all([rm(jobDir, { recursive: true, force: true }), rm(tempDir, { recursive: true, force: true })]);
+      throw Object.assign(new Error(args.signal.reason?.message ?? "Task interrupted."), { code: "ABORT_ERR", name: "AbortError" });
+    }
     const supervisor = spawn(process.execPath, [workerPath, join(jobDir, "config.json"), nonce], { cwd: jobCwd, env: executionEnv(defaultEnv, tempDir), detached: process.platform !== "win32", stdio: "ignore", windowsHide: true });
     let spawnError;
     supervisor.on("error", (error) => { spawnError = error; });
@@ -152,7 +163,7 @@ export function createExecutionBackend(options = {}) {
   function capabilities() {
     const configuredMode = typeof options.sandboxPolicy === "string" ? options.sandboxPolicy : options.sandboxPolicy?.mode ?? "auto";
     const enforced = configuredMode !== "off" && probe().available;
-    return { platform: process.platform, durableJobs: true, diskOutput: true, explicitEnvironment: true, processTree: process.platform === "win32" ? "direct-process-only" : "owned-process-group", detachedEscapeContainment: process.platform === "linux" && enforced, sandbox: { ...probe(), configuredMode, enforced }, resources: { cpuSeconds: "per-process-hard-rlimit", fileSizeBytes: "per-file-hard-rlimit", openFiles: "per-process-hard-rlimit", maxProcesses: process.platform === "linux" ? "per-user-hard-rlimit" : false }, stateDir };
+    return { platform: process.platform, durableJobs: true, diskOutput: true, explicitEnvironment: true, processTree: process.platform === "win32" ? "direct-process-only" : "owned-process-group", detachedEscapeContainment: process.platform === "linux" && enforced, scopedWriteRestrictions: enforced && probe().kind === "seatbelt", sandbox: { ...probe(), configuredMode, enforced }, resources: { cpuSeconds: "per-process-hard-rlimit", fileSizeBytes: "per-file-hard-rlimit", openFiles: "per-process-hard-rlimit", maxProcesses: process.platform === "linux" ? "per-user-hard-rlimit" : false }, stateDir };
   }
 
   async function dispose({ stopRunning = false, removeState = false } = {}) {

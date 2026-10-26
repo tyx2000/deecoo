@@ -554,11 +554,14 @@ function updateWorkingSet(controller, entry, result) {
     if (!path) return;
     const original = String(result.content);
     const content = truncateText(original, controller.config.maxPinnedFileChars);
+    const partial = Boolean(result.truncated) || result.sourceComplete === false || original.length > controller.config.maxPinnedFileChars;
+    // A later range read must not replace a complete pin of the same file.
+    if (partial && controller.workingSet.files.get(path)?.truncated === false) return;
     controller.workingSet.files.set(path, {
       path,
       step: entry.step,
       content,
-      truncated: Boolean(result.truncated) || original.length > controller.config.maxPinnedFileChars,
+      truncated: partial,
       shaHint: simpleHash(original).slice(0, 8),
     });
     trimMap(controller.workingSet.files, controller.config.maxPinnedFiles);
@@ -660,6 +663,15 @@ function freshObservation(controller, signature, baseline = controller.lastMutat
   return prior;
 }
 
+function readRangeKey(args) {
+  if (args.offset !== undefined || args.limit !== undefined) {
+    const startLine = Number(args.offset ?? 0) + 1;
+    return { startLine, endLine: args.limit === undefined ? null : startLine + Number(args.limit) - 1 };
+  }
+  if (args.startLine !== undefined || args.endLine !== undefined) return { startLine: Number(args.startLine ?? 1), endLine: args.endLine === undefined ? null : Number(args.endLine) };
+  return null;
+}
+
 function reusableFullRead(controller, args, baseline = controller.lastMutationStep, lane) {
   const path = String(args?.path ?? "");
   if (!path) return undefined;
@@ -667,7 +679,7 @@ function reusableFullRead(controller, args, baseline = controller.lastMutationSt
   for (const observation of controller.observations.values()) {
     if (observation.name !== "read_file" || observation.target !== path) continue;
     if (lane && observation.lane !== lane) continue;
-    if (!observation.ok || observation.pinned?.truncated) continue;
+    if (!observation.ok || observation.pinned?.truncated || readRangeKey(observation.args ?? {})) continue;
     if (observation.step < baseline) continue;
     if (!best || observation.step > best.step) best = observation;
   }
@@ -714,7 +726,8 @@ function pinPayload(name, args, result) {
     const original = String(result.content ?? "");
     return {
       content: truncateText(original, DEFAULTS.maxPinnedFileChars),
-      truncated: Boolean(result.truncated) || original.length > DEFAULTS.maxPinnedFileChars,
+      // A range read is partial evidence, never a capture of the whole file.
+      truncated: Boolean(result.truncated) || result.sourceComplete === false || original.length > DEFAULTS.maxPinnedFileChars,
     };
   }
   if (name === "list_files") {
@@ -748,7 +761,8 @@ function observationSummary(name, target, ok, result) {
 function normalizeArgs(name, args = {}) {
   if (!args || typeof args !== "object") return {};
   if (name === "read_file") {
-    return { path: String(args.path ?? ""), maxBytes: args.maxBytes ?? null };
+    // Different line ranges of one file are different observations.
+    return { path: String(args.path ?? ""), maxBytes: args.maxBytes ?? null, range: readRangeKey(args) };
   }
   if (name === "list_files") {
     return { directory: String(args.directory ?? "."), maxDepth: args.maxDepth ?? null };

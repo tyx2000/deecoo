@@ -1,13 +1,27 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readlinkSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { sanitizeShellEnv } from "../permissions/shellPolicy.js";
 
 const SYSTEM_ROOTS = process.platform === "darwin"
   ? ["/System", "/usr", "/bin", "/sbin", "/Library/Apple", "/Library/Developer", "/Library/Frameworks", "/opt/homebrew", "/private/etc", "/dev", "/private/var/db/dyld"]
   : ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/dev"];
-const INJECT_ENV = /^(BASH_ENV|ENV|SHELLOPTS|BASHOPTS|POSIXLY_CORRECT|CDPATH|GLOBIGNORE|NODE_OPTIONS|NODE_PATH|NODE_TEST_CONTEXT|NODE_V8_COVERAGE|NODE_COMPILE_CACHE|NODE_REPL_.*|PYTHONPATH|PYTHONHOME|PERL5OPT|RUBYOPT|LD_.*|DYLD_.*|GIT_CONFIG.*|GIT_ASKPASS|SSH_ASKPASS|SSH_AUTH_SOCK|GPG_AGENT_INFO)$/;
+// macOS `/usr/bin/git` and friends are xcrun shims: they load libxcrun from the selected
+// developer directory, check the Xcode license preference, and keep a lookup cache in the
+// per-user temp directory. Without these reads the shim fails before the real tool starts.
+const XCODE_SELECT_LINK = "/var/db/xcode_select_link";
+const XCODE_LICENSE_PREFERENCE = "/Library/Preferences/com.apple.dt.Xcode.plist";
+const XCRUN_CACHE_RULE = '(allow file-read* file-write* (regex #"^/private/var/folders/[^/]+/[^/]+/T/xcrun_db"))';
+// A job may change the workspace but not the repository's own configuration. Git reads
+// .git/config and runs .git/hooks later, outside any sandbox, whenever the user runs git there,
+// so a write to these paths would turn one sandboxed command into code that runs unsandboxed.
+// The .git entry itself is protected too, so it cannot be renamed away, edited, and moved back.
+const GIT_PROTECTED_ENTRIES = ["config", "config.lock", "config.worktree", "hooks", "info", "modules"];
+// Every job gets these in place of repository settings: an fsmonitor or pager configured by
+// the repository must not run just because a command invoked git.
+const GIT_HARDENING_ENV = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.fsmonitor", GIT_CONFIG_VALUE_0: "false", GIT_PAGER: "cat" };
+const INJECT_ENV =/^(BASH_ENV|ENV|SHELLOPTS|BASHOPTS|POSIXLY_CORRECT|CDPATH|GLOBIGNORE|NODE_OPTIONS|NODE_PATH|NODE_TEST_CONTEXT|NODE_V8_COVERAGE|NODE_COMPILE_CACHE|NODE_REPL_.*|PYTHONPATH|PYTHONHOME|PERL5OPT|RUBYOPT|LD_.*|DYLD_.*|GIT_CONFIG.*|GIT_ASKPASS|SSH_ASKPASS|SSH_AUTH_SOCK|GPG_AGENT_INFO)$/;
 const CREDENTIAL_ENV = /(^|_)(ACCESS[_-]?KEY|CREDENTIALS|COOKIE|SESSION)($|_)/i;
 
 export function executionEnv(source, tempDir) {
@@ -18,7 +32,7 @@ export function executionEnv(source, tempDir) {
   }
   clean.PATH ||= "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
   // Runtime caches and shell startup files belong to the job, not the real home.
-  return { ...clean, HOME: tempDir, TMPDIR: tempDir, TMP: tempDir, TEMP: tempDir, XDG_CACHE_HOME: tempDir, XDG_CONFIG_HOME: tempDir };
+  return { ...clean, ...GIT_HARDENING_ENV, HOME: tempDir, TMPDIR: tempDir, TMP: tempDir, TEMP: tempDir, XDG_CACHE_HOME: tempDir, XDG_CONFIG_HOME: tempDir };
 }
 
 export function normalizeSandboxPolicy(policy = {}, cwd, stateDir, tempDir) {
@@ -34,14 +48,26 @@ export function normalizeSandboxPolicy(policy = {}, cwd, stateDir, tempDir) {
   const installation = dirname(executableDirectory);
   const runtimeRoot = basename(executableDirectory) === "bin" && /^(v?\d+\.\d+|node|runtime)/.test(basename(installation)) ? installation : executableDirectory;
   const credentialRoots = [...[".ssh", ".aws", ".gnupg", ".config/gcloud", ".azure", ".kube", ".deecoo", ".npmrc", ".netrc", ".pypirc", ".git-credentials", ".docker/config.json", ".cargo/credentials.toml", "Library/Keychains"].map((item) => resolve(home, item)), "/Library/Keychains", "/etc/shadow", "/etc/master.passwd", "/etc/ssh", "/etc/ssl/private", "/etc/pki/private"];
+  const gitDirectories = roots(policy.writeRoots ?? [cwd]).map((root) => join(root, ".git"));
   return {
     mode, network,
-    readRoots: roots([...SYSTEM_ROOTS.filter(existsSync), runtimeRoot, cwd, tempDir, ...(policy.readRoots ?? []), ...(policy.writeRoots ?? [])]),
+    readRoots: roots([...SYSTEM_ROOTS.filter(existsSync), ...developerToolRoots(), runtimeRoot, cwd, tempDir, ...(policy.readRoots ?? []), ...(policy.writeRoots ?? [])]),
     writeRoots: roots(policy.writeRoots ?? [cwd]).concat(canonical(tempDir)),
     denyReadRoots: roots([stateDir, ...credentialRoots, ...(policy.denyReadRoots ?? [])]),
-    denyWriteRoots: roots([stateDir, ...credentialRoots, ...(policy.denyWriteRoots ?? [])]),
+    denyWriteRoots: roots([stateDir, ...credentialRoots, ...gitDirectories.flatMap((gitDir) => GIT_PROTECTED_ENTRIES.map((entry) => join(gitDir, entry))), ...(policy.denyWriteRoots ?? [])]),
+    denyWriteLiterals: gitDirectories,
     resources: validateResources(policy.resources ?? {}),
   };
+}
+
+export function developerToolRoots() {
+  if (process.platform !== "darwin") return [];
+  let developer;
+  try { developer = realpathSync(XCODE_SELECT_LINK); } catch { return []; }
+  // A full Xcode keeps the shim's libraries beside Developer (SharedFrameworks, Frameworks);
+  // Command Line Tools under /Library/Developer is already a system root.
+  const bundle = developer.match(/^(.+\.app\/Contents)\/Developer$/)?.[1];
+  return [bundle ?? developer, XCODE_LICENSE_PREFERENCE].filter(existsSync);
 }
 
 function validateResources(resources) {
@@ -54,6 +80,9 @@ function validateResources(resources) {
 }
 
 const quote = (text) => JSON.stringify(String(text));
+// #"..." is a regex literal, not a Scheme string: doubling its backslashes
+// changes e.g. \. into a match for a backslash followed by any character.
+const regexQuote = (pattern) => "#" + quote(pattern).replaceAll("\\\\", "\\");
 export function seatbeltProfile(policy) {
   const rules = [
     "(version 1)", "(deny default)", "(allow process-exec)", "(allow process-fork)",
@@ -61,11 +90,16 @@ export function seatbeltProfile(policy) {
     '(allow sysctl-read (sysctl-name-prefix "hw.") (sysctl-name-prefix "kern.os") (sysctl-name "kern.version") (sysctl-name "machdep.cpu.brand_string") (sysctl-name "kern.argmax") (sysctl-name "kern.hostname") (sysctl-name "kern.maxfilesperproc") (sysctl-name "kern.maxproc") (sysctl-name "kern.usrstack64") (sysctl-name "kern.secure_kernel") (sysctl-name "sysctl.proc_cputype") (sysctl-name "vm.loadavg"))',
     '(allow mach-lookup (global-name "com.apple.bsd.dirhelper") (global-name "com.apple.system.opendirectoryd.libinfo") (global-name "com.apple.system.opendirectoryd.membership"))',
     "(allow file-read-metadata)", '(allow file-read* (literal "/"))', '(allow file-write* (literal "/dev/null"))',
+    XCRUN_CACHE_RULE,
   ];
   for (const path of policy.readRoots) rules.push(`(allow file-read* (subpath ${quote(path)}))`);
   for (const path of policy.writeRoots) rules.push(`(allow file-write* (subpath ${quote(path)}))`);
   for (const path of policy.denyReadRoots) rules.push(`(deny file-read* (subpath ${quote(path)}))`);
   for (const path of policy.denyWriteRoots) rules.push(`(deny file-write* (subpath ${quote(path)}))`);
+  for (const path of policy.denyWriteLiterals ?? []) rules.push(`(deny file-write* (literal ${quote(path)}))`);
+  for (const pattern of policy.denyWriteRegexes ?? []) rules.push(`(deny file-write* (regex ${regexQuote(pattern)}))`);
+  for (const path of policy.denyUnlinkPaths ?? []) rules.push(`(deny file-write-unlink (literal ${quote(path)}))`);
+  if (policy.denyHardLinks) rules.push("(deny file-link)");
   if (policy.network === "allow") rules.push("(allow network*)");
   return rules.join("\n");
 }
@@ -87,6 +121,7 @@ export function detectSandbox() {
 }
 
 export function executionCommand({ command, cwd, policy, sandbox, shell = "/bin/bash" }) {
+  if (policy.scopedWriteRestrictions?.length && (policy.mode === "off" || !sandbox.available || sandbox.kind !== "seatbelt")) throw Object.assign(new Error("This OS backend cannot enforce scoped task write restrictions."), { code: "TASK_SCOPED_SHELL_UNAVAILABLE" });
   if (policy.mode === "required" && !sandbox.available) {
     const error = new Error(`Required OS sandbox unavailable: ${sandbox.reason}`); error.code = "SANDBOX_UNAVAILABLE"; throw error;
   }
@@ -100,7 +135,7 @@ export function executionCommand({ command, cwd, policy, sandbox, shell = "/bin/
   add("u", policy.resources.maxProcesses);
   const shellArgs = ["--noprofile", "--norc", "-c", `${limits.length ? `${limits.join(" && ")} && ` : ""}exec /bin/bash --noprofile --norc -c "$1"`, "deecoo-exec", command];
   if (policy.mode === "off" || !sandbox.available) return { executable: shell, args: shellArgs, sandbox: { ...sandbox, enforced: false } };
-  if (sandbox.kind === "seatbelt") return { executable: sandbox.executable, args: ["-p", seatbeltProfile(policy), shell, ...shellArgs], sandbox: { ...sandbox, enforced: true } };
+  if (sandbox.kind === "seatbelt") return { executable: sandbox.executable, args: ["-p", seatbeltProfile(policy), shell, ...shellArgs], sandbox: { ...sandbox, enforced: true, ...(policy.scopedWriteRestrictions?.length ? { writeRestrictions: policy.scopedWriteRestrictions, scopeEvidence: policy.scopeEvidence } : {}) } };
   const args = ["--die-with-parent", "--new-session", "--unshare-all"];
   if (policy.network === "allow") args.push("--share-net");
   // Start from an empty mount namespace; explicit roots are the only host reads.

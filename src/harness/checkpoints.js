@@ -71,6 +71,11 @@ export function prepareCheckpointResume(checkpoint) {
   next.effects = { ...(next.effects ?? { version: 1, events: [] }), revision };
   if (next.verification) next.verification = { ...next.verification, workspaceRevision: revision,
     status: next.verification.evidence?.length ? "pending" : "not-run" };
+  // The interrupted phase (often "verifying") and any acceptance verdict describe a workspace
+  // that may no longer exist; a resumed run starts over from inspection.
+  if (next.workflow) next.workflow = { ...next.workflow, status: "executing", phase: "resumed",
+    transitions: [...(next.workflow.transitions ?? []), { from: next.workflow.status, to: "executing", phase: "resumed", type: "resumed", at: new Date().toISOString() }] };
+  delete next.acceptance;
   next.messages.push({ role: "user", content: "Continue the interrupted task from current workspace state. Prior verification is stale; inspect before editing. Do not automatically repeat pending calls." });
   return next;
 }

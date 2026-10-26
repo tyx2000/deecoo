@@ -1371,7 +1371,8 @@ test("shell guardrails block interactive commands", async () => {
   assert.equal(classifyShellCommand("vim src/index.js").level, "block");
   assert.equal(classifyShellCommand("python").level, "block");
   assert.equal(classifyShellCommand("python -c \"print(1)\"").level, "warn");
-  assert.equal(classifyShellCommand("node --test").level, "allow");
+  // Running the project's own tests is not interactive, but it executes workspace code.
+  assert.equal(classifyShellCommand("node --test").level, "warn");
   const result = await runtime.execute("run_shell", { command: "node" });
 
   assert.equal(result.ok, false);

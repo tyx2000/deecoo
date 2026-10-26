@@ -57,7 +57,7 @@ globalThis.fetch = async (_url, init) => {
   ], {
     cwd,
     env: {
-      PATH: process.env.PATH,
+      PATH: process.env.PATH, TMPDIR: tmpdir(),
       DEECOO_HOME: join(root, "home"), DEEPSEEK_API_KEY: "synthetic-tty-key",
       DEECOO_STREAM: "false", DEECOO_API_RETRIES: "1", DEECOO_MAX_STEPS: "4",
       DEECOO_TASK_TIMEOUT_MS: mode === "timeout" ? "1000" : "5000",

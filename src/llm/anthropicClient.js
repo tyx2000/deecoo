@@ -1,3 +1,4 @@
+import { httpStatusError, retryAttempts, withRetries } from "./retry.js";
 import { assertCompleteToolCalls, incompleteResponse } from "./streamCompletion.js";
 
 export function createAnthropicClient(config) {
@@ -46,6 +47,9 @@ export function toAnthropicRequest(request) {
     max_tokens: request.max_tokens ?? 4096,
     messages,
     thinking: { type: "disabled" },
+    // Automatic prompt caching: the breakpoint moves to the last cacheable block, so each agent
+    // step reuses the tools + system + earlier-turn prefix written by the step before.
+    cache_control: { type: "ephemeral" },
   };
   if (system.length) body.system = system.join("\n\n");
   if (request.tools?.length) {
@@ -157,47 +161,27 @@ function textContent(content) {
 }
 
 async function requestAnthropicStream(config, request, handlers) {
-  const attempts = Math.min(5, Math.max(1, config.retryAttempts ?? 5));
-  let lastError;
-  let emitted = false;
-
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    throwIfAborted(handlers.signal);
-    const controller = new AbortController();
-    const removeAbortListener = linkAbortSignal(handlers.signal, controller);
-    const timeout = setTimeout(() => controller.abort(new Error("Request timed out.")), config.timeoutMs);
-    try {
-      const response = await fetch(`${config.baseUrl}/v1/messages`, {
-        method: "POST",
-        headers: anthropicHeaders(config, { Accept: "text/event-stream" }),
-        body: JSON.stringify(request),
-        signal: controller.signal,
-      });
-      if (!response.ok) throw await apiError(response);
-      if (!response.body) throw new Error("Anthropic API returned no stream body.");
-      const result = await readAnthropicSse(response.body, {
-        ...handlers,
-        onContent(content) {
-          emitted = true;
-          handlers.onContent?.(content);
-        },
-        onToolUse() {
-          emitted = true;
-        },
-      });
-      return result;
-    } catch (error) {
-      lastError = error;
-      if (handlers.signal?.aborted || emitted || attempt >= attempts || !shouldRetry(error)) break;
-      const delayMs = backoffMs(attempt);
-      (typeof handlers !== "undefined" ? handlers : options).onRuntimeEvent?.({ type: "model-retry", attempt, delayMs, status: error.status });
-      await delay(delayMs);
-    } finally {
-      clearTimeout(timeout);
-      removeAbortListener();
-    }
-  }
-  throw lastError;
+  return withRetries({ attempts: retryAttempts(config), signal: handlers.signal, timeoutMs: config.timeoutMs, onRuntimeEvent: handlers.onRuntimeEvent,
+    beforeAttempt: handlers.beforeAttempt, onAttemptError: handlers.onAttemptError }, async ({ signal, progress }) => {
+    const response = await fetch(`${config.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: anthropicHeaders(config, { Accept: "text/event-stream" }),
+      body: JSON.stringify(request),
+      signal,
+    });
+    if (!response.ok) throw await apiError(response);
+    if (!response.body) throw new Error("Anthropic API returned no stream body.");
+    return readAnthropicSse(response.body, {
+      ...handlers,
+      onContent(content) {
+        progress.emitted = true;
+        handlers.onContent?.(content);
+      },
+      onToolUse() {
+        progress.emitted = true;
+      },
+    });
+  });
 }
 
 async function readAnthropicSse(body, handlers) {
@@ -207,6 +191,7 @@ async function readAnthropicSse(body, handlers) {
   const blocks = new Map();
   let inputTokens = 0;
   let outputTokens = 0;
+  let startUsage = {};
   let finishReason;
   let sawMessageStop = false;
   let buffer = "";
@@ -218,7 +203,8 @@ async function readAnthropicSse(body, handlers) {
       throw error;
     }
     if (event.type === "message_start") {
-      inputTokens = Number(event.message?.usage?.input_tokens ?? 0);
+      startUsage = event.message?.usage ?? {};
+      inputTokens = Number(startUsage.input_tokens ?? 0);
       outputTokens = Number(event.message?.usage?.output_tokens ?? 0);
     } else if (event.type === "content_block_start") {
       const block = event.content_block ?? {};
@@ -262,7 +248,7 @@ async function readAnthropicSse(body, handlers) {
   buffer += decoder.decode();
   for (const event of consumeSseEvents(`${buffer}\n\n`).items) applyEvent(event);
 
-  const usage = normalizeUsage({ input_tokens: inputTokens, output_tokens: outputTokens });
+  const usage = normalizeUsage({ ...startUsage, input_tokens: inputTokens, output_tokens: outputTokens });
   if (!sawMessageStop || !finishReason) {
     throw incompleteResponse("Anthropic stream ended before message_stop and its stop reason.", usage);
   }
@@ -307,34 +293,17 @@ function consumeSseEvents(buffer) {
 }
 
 async function requestJson(config, path, init, options = {}) {
-  const attempts = Math.min(5, Math.max(1, config.retryAttempts ?? 5));
-  let lastError;
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    throwIfAborted(options.signal);
-    const controller = new AbortController();
-    const removeAbortListener = linkAbortSignal(options.signal, controller);
-    const timeout = setTimeout(() => controller.abort(new Error("Request timed out.")), config.timeoutMs);
-    try {
-      const response = await fetch(`${config.baseUrl}${path}`, {
-        ...init,
-        headers: { ...anthropicHeaders(config), ...init.headers },
-        signal: controller.signal,
-      });
-      if (!response.ok) throw await apiError(response);
-      const text = await response.text();
-      return text ? JSON.parse(text) : {};
-    } catch (error) {
-      lastError = error;
-      if (options.signal?.aborted || attempt >= attempts || !shouldRetry(error)) break;
-      const delayMs = backoffMs(attempt);
-      (typeof handlers !== "undefined" ? handlers : options).onRuntimeEvent?.({ type: "model-retry", attempt, delayMs, status: error.status });
-      await delay(delayMs);
-    } finally {
-      clearTimeout(timeout);
-      removeAbortListener();
-    }
-  }
-  throw lastError;
+  return withRetries({ attempts: retryAttempts(config), signal: options.signal, timeoutMs: config.timeoutMs, onRuntimeEvent: options.onRuntimeEvent,
+    beforeAttempt: options.beforeAttempt, onAttemptError: options.onAttemptError }, async ({ signal }) => {
+    const response = await fetch(`${config.baseUrl}${path}`, {
+      ...init,
+      headers: { ...anthropicHeaders(config), ...init.headers },
+      signal,
+    });
+    if (!response.ok) throw await apiError(response);
+    const text = await response.text();
+    return text ? JSON.parse(text) : {};
+  });
 }
 
 function anthropicHeaders(config, additional = {}) {
@@ -347,19 +316,20 @@ function anthropicHeaders(config, additional = {}) {
 }
 
 async function apiError(response) {
-  const text = await response.text();
-  const error = new Error(`Anthropic API error ${response.status}: ${text}`);
-  error.status = response.status;
-  return error;
+  return httpStatusError(response, `Anthropic API error ${response.status}: ${await response.text()}`);
 }
 
 function normalizeUsage(usage = {}) {
-  const promptTokens = Number(usage.input_tokens ?? 0);
+  // input_tokens excludes cached prefix tokens; budgets must still see every prompt token.
+  const cacheRead = Number(usage.cache_read_input_tokens ?? 0);
+  const cacheWrite = Number(usage.cache_creation_input_tokens ?? 0);
+  const promptTokens = Number(usage.input_tokens ?? 0) + cacheRead + cacheWrite;
   const completionTokens = Number(usage.output_tokens ?? 0);
   return {
     prompt_tokens: promptTokens,
     completion_tokens: completionTokens,
     total_tokens: promptTokens + completionTokens,
+    ...(cacheRead || cacheWrite ? { cache_read_input_tokens: cacheRead, cache_creation_input_tokens: cacheWrite } : {}),
   };
 }
 
@@ -368,35 +338,4 @@ function mapStopReason(reason) {
   if (reason === "max_tokens") return "length";
   if (reason === "end_turn" || reason === "stop_sequence" || reason === "refusal") return "stop";
   return reason;
-}
-
-function linkAbortSignal(signal, controller) {
-  if (!signal) return () => {};
-  const onAbort = () => controller.abort(signal.reason ?? new Error("Task interrupted."));
-  if (signal.aborted) onAbort();
-  else signal.addEventListener("abort", onAbort, { once: true });
-  return () => signal.removeEventListener("abort", onAbort);
-}
-
-function throwIfAborted(signal) {
-  if (!signal?.aborted) return;
-  const error = signal.reason instanceof Error ? signal.reason : new Error("Task interrupted.");
-  error.name = "AbortError";
-  throw error;
-}
-
-function shouldRetry(error) {
-  if (error.code === "INCOMPLETE_RESPONSE") return false;
-  if (error.name === "AbortError") return true;
-  if (/Request timed out/i.test(error.message ?? "")) return true;
-  if (error.status === 429 || error.status === 529 || (error.status >= 500 && error.status <= 599)) return true;
-  return /fetch failed|network|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i.test(error.message ?? "");
-}
-
-function backoffMs(attempt) {
-  return Math.min(500 * 2 ** (attempt - 1), 4000);
-}
-
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

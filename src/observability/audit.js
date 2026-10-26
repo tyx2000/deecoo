@@ -1,11 +1,13 @@
 import { readdir } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
-import { readJsonFile, writeJsonFile } from "../storage/atomic.js";
+import { createHash, randomUUID } from "node:crypto";
+import { readJsonFile, withFileLock, writeJsonFile } from "../storage/atomic.js";
 import { canPersist, safeStorageId } from "../storage/governance.js";
 import { join } from "node:path";
 import { projectModelRequest } from "../llm/requestSnapshot.js";
 
 const MAX_AUDIT_TEXT = 40000;
+// Kept beside the per-session directory so that directory holds only audit records.
+export const auditChainHeadPath = (projectDir, sessionId) => join(projectDir, "audit", sessionId + ".chain-head");
 const TOKEN_METRIC_KEYS = new Set([
   "prompttokens", "completiontokens", "totaltokens", "inputtokens", "outputtokens",
   "cachedtokens", "reasoningtokens", "cachereadinputtokens", "cachecreationinputtokens",
@@ -19,9 +21,11 @@ const SECRET_PATTERNS = [
   /(OPENAI_API_KEY\s*[:=]\s*)[^\s"']+/gi,
   /(ANTHROPIC_API_KEY\s*[:=]\s*)[^\s"']+/gi,
   /(Authorization:\s*Bearer\s+)[^\s"']+/gi,
-  /\b([A-Za-z0-9_]*TOKEN[A-Za-z0-9_]*\s*[:=]\s*)[^\s"']+/gi,
-  /\b([A-Za-z0-9_]*SECRET[A-Za-z0-9_]*\s*[:=]\s*)[^\s"']+/gi,
 ];
+// Credential-named assignments in free text are redacted by the shape of the assigned value, not
+// the name alone, so source such as `promptTokens = Number(...)` or `max_tokens: 4096` stays readable.
+const CREDENTIAL_ASSIGNMENT = /\b([A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|CREDENTIAL)[A-Za-z0-9_]*["']?\s*[:=]\s*["']?)([^\s"'`,;)}\]]+)/gi;
+const KNOWN_SECRET_PREFIX = /^(?:sk-|sk_|pk_|rk_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[abprs]-|AKIA|ASIA|AIza|eyJ|npm_)/;
 
 export async function saveRunAudit(store, session, audit, options = {}) {
   if (!store?.projectDir || !session?.id || !audit || !canPersist(store)) return undefined;
@@ -37,8 +41,44 @@ export async function saveRunAudit(store, session, audit, options = {}) {
     createdAt: now,
     ...safe,
   };
-  await writeJsonFile(path, body, { maxBytes: store.storagePolicy?.maxFileBytes });
-  return { path, createdAt: now };
+  // Each record links to the previous one by digest and the chain head records the newest, so
+  // an edited, removed, or reordered record is detectable (a hash chain, not a signature).
+  const headPath = auditChainHeadPath(store.projectDir, session.id);
+  await withFileLock(headPath + ".chain", async () => {
+    const head = await readJsonFile(headPath);
+    body.integrity = { algorithm: "sha256", sequence: (head?.sequence ?? 0) + 1, previousDigest: head?.digest ?? null };
+    body.integrity.digest = auditDigest(body);
+    await writeJsonFile(path, body, { maxBytes: store.storagePolicy?.maxFileBytes });
+    await writeJsonFile(headPath, { schemaVersion: 1, sequence: body.integrity.sequence, digest: body.integrity.digest, fileName });
+  });
+  return { path, createdAt: now, integrity: body.integrity };
+}
+
+export async function verifyRunAuditChain(store, session) {
+  const records = [];
+  for (const entry of (await listRunAudits(store, session)).reverse()) {
+    const audit = await readRunAudit(entry.path).catch(() => undefined);
+    if (!audit) return { ok: false, reason: "unreadable-record", fileName: entry.fileName };
+    records.push({ fileName: entry.fileName, audit });
+  }
+  const chained = records.filter((record) => record.audit.integrity).sort((a, b) => a.audit.integrity.sequence - b.audit.integrity.sequence);
+  let previous;
+  for (const { fileName, audit } of chained) {
+    if (auditDigest(audit) !== audit.integrity.digest) return { ok: false, reason: "digest-mismatch", fileName };
+    if (previous && (audit.integrity.sequence !== previous.sequence + 1 || audit.integrity.previousDigest !== previous.digest)) return { ok: false, reason: "chain-gap", fileName };
+    previous = audit.integrity;
+  }
+  const head = await readJsonFile(auditChainHeadPath(store.projectDir, session.id)).catch(() => undefined);
+  if (head && (!previous || head.sequence !== previous.sequence || head.digest !== previous.digest)) return { ok: false, reason: "head-mismatch", fileName: head.fileName };
+  // Retention pruning removes the oldest records; the chain is verified from the first one kept.
+  return { ok: true, records: chained.length, legacyRecords: records.length - chained.length, firstSequence: chained[0]?.audit.integrity.sequence };
+}
+
+function auditDigest(body) {
+  const { integrity: { digest: _digest, ...integrity } = {}, ...rest } = JSON.parse(JSON.stringify(body));
+  const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object"
+    ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;
+  return createHash("sha256").update(JSON.stringify(canonical({ ...rest, integrity }))).digest("hex");
 }
 
 // Stored privacy projections preserve historical hashes as provenance, but
@@ -106,5 +146,22 @@ function redactString(value, secretRegistry, maxTextChars = MAX_AUDIT_TEXT) {
   for (const pattern of SECRET_PATTERNS) {
     text = text.replace(pattern, (_match, prefix) => (prefix ? prefix + "[REDACTED]" : "[REDACTED]"));
   }
+  text = text.replace(CREDENTIAL_ASSIGNMENT, (match, prefix, value) => looksLikeSecretValue(value) ? prefix + "[REDACTED]" : match);
   return text.length > maxTextChars ? text.slice(0, maxTextChars) + "\n... truncated for audit" : text;
+}
+
+function looksLikeSecretValue(value) {
+  if (KNOWN_SECRET_PREFIX.test(value)) return value.length >= 8;
+  if (value.length < 12 || /^\d+$/.test(value) || !/^[A-Za-z0-9+/=_.~-]+$/.test(value)) return false;
+  // Identifiers and member paths (`config.tokenBudget`) are code, not credentials.
+  return /\d/.test(value) || !/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/.test(value);
+}
+
+// Value-only filtering for durable state that must keep its structure (sessions, checkpoints):
+// known secret values and credential-shaped strings are replaced; keys and numbers are untouched.
+export function redactSecretValues(value, { secretRegistry } = {}) {
+  if (typeof value === "string") return redactString(value, secretRegistry, Infinity);
+  if (Array.isArray(value)) return value.map((item) => redactSecretValues(item, { secretRegistry }));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactSecretValues(item, { secretRegistry })]));
 }

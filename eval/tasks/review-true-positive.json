@@ -49,7 +49,8 @@
         {
           "id": "SCOR-PRICE",
           "file": "src/value.js:1",
-          "evidenceIncludes": "quantity + price"
+          "evidenceIncludes": "quantity + price",
+          "severity": "P2"
         }
       ]
     }

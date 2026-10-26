@@ -23,14 +23,6 @@
           }
         },
         {
-          "tool": "edit_file",
-          "arguments": {
-            "path": "src/add.js",
-            "search": "a - b",
-            "replace": "a + b"
-          }
-        },
-        {
           "interrupt": true
         }
       ]
@@ -61,15 +53,24 @@
           }
         },
         {
+          "tool": "edit_file",
+          "arguments": {
+            "path": "src/add.js",
+            "search": "a - b",
+            "replace": "a + b"
+          }
+        },
+        {
           "tool": "run_shell",
           "arguments": {
             "command": "npm test"
           }
         },
         {
-          "text": "Fixed src/add.js before interruption; inspected it after resuming. npm test passed."
+          "text": "Inspected src/add.js after resuming, fixed the subtraction, and npm test passed."
         }
       ]
-    }
+    },
+    "maxChangedLines": 2
   }
 }

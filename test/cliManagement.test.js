@@ -15,7 +15,8 @@ import { createExecutionBackend } from "../src/execution/backend.js";
 const exec = promisify(execFile);
 const cli = new URL("../bin/deecoo.js", import.meta.url).pathname;
 async function workspace(fn) { const root = await mkdtemp(join(tmpdir(), "deecoo-management-")); try { return await fn(root); } finally { await rm(root, { recursive: true, force: true }); } }
-const environment = (root, extra = {}) => ({ PATH: process.env.PATH, DEECOO_HOME: join(root, "home"), ...extra });
+// Children inherit this process's temp directory; without it they fall back to /tmp, which a sandbox may forbid.
+const environment = (root, extra = {}) => ({ PATH: process.env.PATH, TMPDIR: tmpdir(), DEECOO_HOME: join(root, "home"), ...extra });
 async function invoke(root, args, extra = {}) {
   const options = { cwd: root, env: environment(root, extra), timeout: 15000, maxBuffer: 1024 * 1024 };
   try { const result = await exec(process.execPath, [cli, "--cwd", root, "--settings", join(root, "settings.json"), "--json", ...args], options); return { ...result, status: 0, value: JSON.parse(result.stdout) }; }

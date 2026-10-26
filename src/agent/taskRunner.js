@@ -286,8 +286,10 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
   const initialPhase = phaseProgress.start();
   if (initialPhase) log(initialPhase + "\n");
 
+  // A budget the ledger cannot price would silently never trip, so refuse to start rather than
+  // let the user believe spend is capped.
   if (config.costBudgetUsd && !isModelPriceKnown(config.model, priceOverrides)) {
-    log(formatToolLine(`cost budget set but no price is known for model "${config.model}"; the budget is inactive. Set DEECOO_PRICE_PROMPT_PER_M and DEECOO_PRICE_COMPLETION_PER_M.`));
+    throw Object.assign(new Error(`A cost budget is set but no price is known for model "${config.model}". Set DEECOO_PRICE_PROMPT_PER_M and DEECOO_PRICE_COMPLETION_PER_M, or remove DEECOO_COST_BUDGET_USD.`), { code: "COST_BUDGET_UNPRICED" });
   }
   const taskValidator = createTaskFinalValidator({ taskSpec, verificationPlan });
   const reviewValidator = coordination.requestType === "review" ? createReviewFinalValidator({ task: contractTask }) : undefined;
@@ -424,11 +426,18 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
         await recordProjectMemory(sessionStore, entry);
       }
       await maybeSaveSkillArtifacts({ sessionStore, session, activeSkills, task, result });
-      await recordTurn(sessionStore, session, {
-        user: task,
-        assistant: result.finalText,
-        model: config.model,
-      });
+      // The task's work is already done; a session that cannot be saved is reported, not turned
+      // into a failed task.
+      try {
+        await recordTurn(sessionStore, session, {
+          user: task,
+          assistant: result.finalText,
+          model: config.model,
+        });
+      } catch (persistError) {
+        result.sessionPersistenceFailure = { code: persistError.code ?? "SESSION_SAVE_FAILED", error: secretRegistry.redact(persistError.message) };
+        if (!config.quiet) console.error("Session history could not be saved: " + result.sessionPersistenceFailure.error);
+      }
       if (result.workflow?.status === "completed") {
         await checkpointWriter?.clear();
       }
@@ -500,7 +509,8 @@ function reportTaskFailure({ error, startedAt, taskDeadline, signal, secretRegis
   const message = secretRegistry ? secretRegistry.redact(error?.message ?? String(error)) : error?.message ?? String(error);
   if (!quiet && timedOut) console.log(formatToolLine("task stopped: time budget exceeded"));
   else if (!quiet && interrupted) console.log(formatToolLine("task interrupted"));
-  else if (!quiet) console.error("Request failed after retries: " + message);
+  // Only provider requests are retried; a local error (EPERM, a corrupt file) failed once.
+  else if (!quiet) console.error((Number(error?.attempts) > 1 ? `Request failed after ${error.attempts} attempts: ` : "Task failed: ") + message);
   return {
     ...(error?.runSnapshot ? { agentState: error.runSnapshot.agentState, verification: error.runSnapshot.verification,
       effects: error.runSnapshot.effects, messages: error.runSnapshot.messages, contextState: error.runSnapshot.contextState, trace: error.runSnapshot.trace, acceptance: error.runSnapshot.acceptance,

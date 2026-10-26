@@ -37,6 +37,7 @@ import { applyContextCompaction, contextFingerprint, createContextState, isBalan
 import { projectModelRequest } from "../llm/requestSnapshot.js";
 
 const MAX_LIVE_MESSAGE_CHARS = 180000;
+const MAX_NO_PROGRESS_STEPS = 4;
 const RECENT_LIVE_MESSAGES = 10;
 const MAX_PARALLEL_DISPATCH = 4;
 const LIVE_CONTEXT_STATES = new WeakMap();
@@ -106,6 +107,7 @@ export async function runAgent({
     ? structuredClone(resume.workflow)
     : advanceWorkflowState(createWorkflowState({ requestType }), { type: "planned" });
   let finalValidationAttempt = 0;
+  let noProgressSteps = 0;
   let acceptance;
   let contextBudget = buildContextBudget({ contextWindow: contextWindow ?? client.capabilities?.contextWindow ?? 128000,
     outputReserve: Math.max(outputReserve ?? 0, maxTokens ?? outputReserve ?? client.capabilities?.outputReserve ?? 4096) });
@@ -454,6 +456,14 @@ export async function runAgent({
         });
       }
 
+      // Repeated calls are answered from earlier observations, but each still costs a model
+      // request. Several consecutive steps that only repeat themselves mean the run has stalled.
+      noProgressSteps = evaluated.every((item) => repeatsEarlierObservation(executedById.get(item.call.id).result)) ? noProgressSteps + 1 : 0;
+      if (noProgressSteps >= MAX_NO_PROGRESS_STEPS) {
+        const stop = { reason: TERMINAL_TRANSITIONS.NO_PROGRESS, limit: MAX_NO_PROGRESS_STEPS, observed: noProgressSteps,
+          message: `Stopped after ${noProgressSteps} consecutive steps whose tool calls only repeated earlier observations. The task did not converge; narrow the request or inspect a different target.` };
+        return finishRun({ finalText: stop.message, stoppedReason: stop.reason, workflowType: "failed", extra: { budget: stop } });
+      }
       const processNudge = maybeBuildProcessNudge(processController, { step });
       if (processNudge) {
         messages.push(processNudge);
@@ -632,8 +642,17 @@ function compactionSummaryBodies(agentState, processController, source) {
   const heading = "Run state summary (local context compaction):";
   const full = [heading, agentState ? buildAgentStateSummary(agentState) : "No execution state recorded."];
   if (processController) full.push("", buildWorkingSetSummary(processController));
-  const observations = (agentState?.observations ?? []).filter((entry) => entry.type !== "context-compaction").slice(-3)
-    .map((entry) => String(entry.summary ?? "").slice(0, 120));
+  // Both candidates need the same failure evidence: recent successful reads can push a
+  // still-needed diagnostic out of the full state summary's recent observations/steps.
+  const recent = (agentState?.observations ?? []).filter((entry) => entry.type !== "context-compaction");
+  const failed = (entry) => entry.ok === false;
+  const failures = recent.filter(failed).slice(-2).map((entry) => String(entry.summary ?? "").slice(0, 400));
+  const failureBlock = failures.length ? ["Latest recorded failures:", ...failures] : [];
+  full.push(...failureBlock);
+  const observations = [
+    ...failureBlock,
+    ...recent.filter((entry) => !failed(entry)).slice(-3).map((entry) => String(entry.summary ?? "").slice(0, 120)),
+  ];
   const compact = [heading, ...observations];
   if (processController) {
     compact.push("Working-set observations:");
@@ -642,6 +661,14 @@ function compactionSummaryBodies(agentState, processController, source) {
   }
   const refs = [];
   for (const message of source) {
+    // An earlier compaction summary is itself compacted later; carry its references forward
+    // or a second compaction would orphan large outputs it still pointed to.
+    if (message.role === "user" && typeof message.content === "string" && /^<<<\S+ source="context-compaction"/.test(message.content)) {
+      for (const [, kind, value] of message.content.matchAll(/\b(outputRef|jobId)=([A-Za-z0-9_-]{1,100})/g)) {
+        if (kind === "jobId" || /^out_[A-Za-z0-9_-]{32}$/.test(value)) refs.push(kind + "=" + value);
+      }
+      continue;
+    }
     if (message.role !== "tool") continue;
     try {
       const value = JSON.parse(message.content);
@@ -655,6 +682,10 @@ function compactionSummaryBodies(agentState, processController, source) {
     full.push(line); compact.push(line);
   }
   return [full.join("\n"), compact.join("\n")];
+}
+
+function repeatsEarlierObservation(result) {
+  return result?.alreadyAvailable === true || result?.code === "ALREADY_AVAILABLE" || result?.code === "DUPLICATE_FAILURE_LOOP";
 }
 
 async function requestChatCompletion({

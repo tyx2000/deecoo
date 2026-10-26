@@ -301,7 +301,10 @@ test("NEXT-008 journal tolerates only an interrupted tail and preserves a comple
   await appendJsonEvent(path, { id: 3 });
   assert.equal((await readJsonEvents(path)).length, 3);
   await writeFile(path, '{"id":1}\ncorrupt\n{"id":3}\n');
-  await assert.rejects(readJsonEvents(path), { code: "STORAGE_CORRUPT" });
+  // A damaged middle line is skipped and counted instead of hiding every other event.
+  const tolerant = await readJsonEvents(path);
+  assert.deepEqual(tolerant, [{ id: 1 }, { id: 3 }]);
+  assert.equal(tolerant.corruptEntries, 1);
 }));
 
 test("NEXT-008 checkpoint ownership readiness propagates rejection before a caller can execute", async () => temporary(async (rootDir) => {

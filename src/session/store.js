@@ -5,7 +5,7 @@ import { basename, join, resolve } from "node:path";
 import { dataContextMessage } from "../harness/contentTrust.js";
 import { appendJsonEvent, readJsonEvents, readJsonFile, removeStoredFile, updateJsonFile, withFileLock, writeJsonFile } from "../storage/atomic.js";
 import { canPersist, pruneStorage, storageInventory, storagePolicy } from "../storage/governance.js";
-import { markStoredContextProjection, redact } from "../observability/audit.js";
+import { auditChainHeadPath, markStoredContextProjection, redact, redactSecretValues } from "../observability/audit.js";
 
 const RECENT_TURNS_FOR_CONTEXT = 6;
 const MAX_SUMMARY_CHARS = 6000;
@@ -63,7 +63,9 @@ export async function createSessionStore(cwd, options = {}) {
         const next = current && current.revision !== (session.revision ?? 0) ? mergeSession(current, session) : structuredClone(session);
         next.schemaVersion = 2;
         next.revision = (current?.revision ?? 0) + 1;
-        return policy.privacyMode === "redacted" ? redact(next, { secretRegistry: store.secretRegistry, maxTextChars: Infinity }) : next;
+        const stored = policy.privacyMode === "redacted" ? redact(next, { secretRegistry: store.secretRegistry, maxTextChars: Infinity })
+          : redactSecretValues(next, { secretRegistry: store.secretRegistry });
+        return fitSessionWithinBytes(stored, policy.maxFileBytes);
       }, { ...sessionReadOptions(), maxBytes: policy.maxFileBytes });
       });
       Object.assign(session, value);
@@ -85,6 +87,8 @@ export async function createSessionStore(cwd, options = {}) {
           const path = join(projectDir, kind, id);
           await rm(path, { recursive: true, force: true }); removed.push(path);
         }
+        const chainHead = auditChainHeadPath(projectDir, id);
+        for (const path of [chainHead, chainHead + ".bak"]) { await rm(path, { force: true }); removed.push(path); }
         // Corrupt quarantines may contain the same private session data.
         for (const entry of await readdir(projectDir)) {
           if (entry.startsWith(id + ".") && (entry.includes(".corrupt-") || entry.endsWith(".tmp"))) await rm(join(projectDir, entry), { force: true });
@@ -118,7 +122,11 @@ export async function createSessionStore(cwd, options = {}) {
       if (!isSafeSessionId(id)) return;
       if (!canPersist(store)) { volatileCheckpoints.set(id, structuredClone(checkpoint)); return; }
       await store.assertTaskOwner(id, checkpoint.metadata?.runId);
-      return writeJsonFile(checkpointPath(id), policy.privacyMode === "redacted" ? markStoredContextProjection(checkpoint, redact(checkpoint, { secretRegistry: store.secretRegistry, maxTextChars: Infinity })) : checkpoint, { maxBytes: policy.maxFileBytes });
+      // Standard mode keeps structure but never writes known secret values or credential-shaped
+      // strings to disk; redacted mode also applies key-based redaction.
+      const stored = policy.privacyMode === "redacted" ? redact(checkpoint, { secretRegistry: store.secretRegistry, maxTextChars: Infinity })
+        : redactSecretValues(checkpoint, { secretRegistry: store.secretRegistry });
+      return writeJsonFile(checkpointPath(id), markStoredContextProjection(checkpoint, stored), { maxBytes: policy.maxFileBytes });
     },
     async loadCheckpoint(id) {
       if (!isSafeSessionId(id)) return undefined;
@@ -202,9 +210,9 @@ function compactSession(session) {
     legacy: String(session.summary ?? "").slice(0, MAX_LEGACY_SUMMARY_CHARS),
     // Legacy files may have a full history even when the old rendered summary was truncated.
     // Recover constraints only from previously compacted user turns, not the recent-turn tail.
-    constraints: (session.history ?? [])
+    constraints: [...(session.trimmedHistoryConstraints ?? []), ...(session.history ?? [])
       .slice(0, Math.max(0, (session.history?.length ?? 0) - session.turns.length))
-      .flatMap((turn) => explicitUserConstraints(turn.user)),
+      .flatMap((turn) => explicitUserConstraints(turn.user))],
     recent: [],
     failures: [],
   };
@@ -231,6 +239,32 @@ function compactSession(session) {
   session.summaryState = state;
   session.summary = fixed + separator + recentHeader + state.recent.join("\n\n");
   session.turns = remaining;
+}
+
+// The full history is authoritative but must still fit the per-file storage cap. Older turns are
+// already folded into summaryState, so drop the oldest of them (never the live turns) instead of
+// failing the save and losing the newest turn.
+function fitSessionWithinBytes(session, maxBytes) {
+  if (!Number.isFinite(maxBytes) || !Array.isArray(session.history)) return session;
+  const size = () => Buffer.byteLength(JSON.stringify(session, null, 2) + "\n");
+  const live = new Set((session.turns ?? []).map(turnIdentity));
+  let excess = size() - maxBytes;
+  while (excess > 0) {
+    let freed = 0;
+    let removed = 0;
+    while (freed < excess && removed < session.history.length && !live.has(turnIdentity(session.history[removed]))) {
+      freed += Buffer.byteLength(JSON.stringify(session.history[removed], null, 2)) + 1;
+      removed += 1;
+    }
+    if (!removed) break;
+    // Keep the explicit constraints of dropped turns so a summary rebuilt after a concurrent
+    // save (mergeSession) still sees them.
+    const dropped = session.history.splice(0, removed).flatMap((turn) => explicitUserConstraints(turn.user));
+    session.trimmedHistoryConstraints = recentEntriesWithin([...(session.trimmedHistoryConstraints ?? []), ...dropped], MAX_CONSTRAINT_CHARS);
+    session.historyTrimmedTurns = (session.historyTrimmedTurns ?? 0) + removed;
+    excess = size() - maxBytes;
+  }
+  return session;
 }
 
 function explicitUserConstraints(text) {
@@ -285,6 +319,8 @@ function migrateSession(parsed) {
 function mergeSession(current, incoming) {
   const tombstones = [...new Set([...(current.artifactTombstones ?? []), ...(incoming.artifactTombstones ?? [])])];
   const merged = { ...current, ...incoming, history: mergeEntries(current.history, incoming.history, turnIdentity),
+    trimmedHistoryConstraints: mergeEntries(current.trimmedHistoryConstraints, incoming.trimmedHistoryConstraints, (item) => item),
+    historyTrimmedTurns: Math.max(current.historyTrimmedTurns ?? 0, incoming.historyTrimmedTurns ?? 0),
     artifactTombstones: tombstones,
     artifacts: mergeEntries(current.artifacts, incoming.artifacts, (item) => item.id).filter((item) => !tombstones.includes(item.id)) };
   // Rebuild summaries from authoritative complete history after a concurrent save.

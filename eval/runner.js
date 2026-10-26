@@ -84,6 +84,7 @@ function parseArgs(argv) {
     const arg = argv[index];
     if (arg === "--case") args.caseId = argv[++index] ?? "";
     else if (arg === "--execute") args.mode = "e2e";
+    else if (arg === "--trace") args.mode = "trace";
     else if (arg === "--mode") args.mode = argv[++index];
     else if (arg === "--trials") args.trials = Number(argv[++index]);
     else if (arg === "--keep-workspaces") args.keepWorkspaces = true;
@@ -109,7 +110,7 @@ function parseArgs(argv) {
   if (!["trace", "e2e"].includes(args.mode)) throw new Error("--mode must be trace or e2e");
   if (!Number.isInteger(args.trials) || args.trials < 1 || args.trials > 100) throw new Error("--trials must be an integer between 1 and 100");
   if (args.mode === "trace" && (args.trials !== 1 || args.keepWorkspaces)) throw new Error("--trials and --keep-workspaces require --execute");
-  if (args.mode === "e2e" && (args.runPath || args.suggest || args.autoCase)) throw new Error("--execute cannot be combined with --run, --suggest or --auto-case");
+  if (args.mode === "e2e" && (args.runPath || args.suggest || args.autoCase)) throw new Error("--run, --suggest and --auto-case grade an existing trace; use npm run eval:trace (or pass --trace)");
   args.casesDir ??= resolve(ROOT, "eval", args.mode === "e2e" ? "tasks" : "cases");
   if (args.runPath && !args.caseId && !args.suggest && !args.autoCase) {
     throw new Error("--run requires --case, --suggest, or --auto-case.");
@@ -168,7 +169,8 @@ async function writeReports(reportDir, report) {
 
 function formatTextReport(report, written) {
   const lines = [
-    `${report.evaluationKind === "harness-e2e" ? "Harness E2E" : "Trace grader (not E2E)"}: ${report.summary.passed}/${report.summary.total} passed, average ${report.summary.averageScore}`,
+    // Say what kind of evidence this is and how much of the suite it covered.
+    `${report.evaluationKind === "harness-e2e" ? `Harness E2E (${report.summary.total} executed cases)` : `Trace grader, not E2E (${report.summary.total} recorded traces)`}: ${report.summary.passed}/${report.summary.total} passed, average ${report.summary.averageScore}`,
     ...(report.summary.trials ? [`Trials: ${report.summary.passedTrials}/${report.summary.trials}; tokens ${report.summary.totalTokens}; latency p50 ${report.summary.p50Ms}ms / p95 ${report.summary.p95Ms}ms`] : []),
     ...(report.matchedCases?.length ? [`Auto case: ${report.matchedCases[0].caseId} (${report.matchedCases[0].score})`, ""] : [""]),
     "",
@@ -236,8 +238,9 @@ function printHelp() {
     "  npm run eval -- [options]",
     "",
     "Options:",
-    "  --execute           Execute trusted cases in fresh temporary projects (default: eval/tasks)",
-    "  --mode <trace|e2e>   Default trace grades existing records; it is not E2E execution",
+    "  --execute           Execute trusted cases in fresh temporary projects from eval/tasks (npm run eval)",
+    "  --trace             Grade existing trace records instead; this is not E2E execution (npm run eval:trace)",
+    "  --mode <trace|e2e>   Same as --trace / --execute",
     "  --trials <n>        Repeat each E2E case with fixed configuration (1-100)",
     "  --keep-workspaces   Keep E2E projects and include their paths in the report",
     "  --case <id>          Run a single eval case",

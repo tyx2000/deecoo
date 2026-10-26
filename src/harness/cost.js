@@ -10,19 +10,17 @@ const FALLBACK_PRICE = { prompt: 0, completion: 0 };
 
 export function resolveModelPrice(model, overrides = {}) {
   const key = String(model ?? "").toLowerCase();
+  const base = DEFAULT_PRICES[key] ?? FALLBACK_PRICE;
   const prompt = numeric(overrides.pricePromptPerM);
   const completion = numeric(overrides.priceCompletionPerM);
-  if (prompt !== undefined || completion !== undefined) {
-    return { prompt: prompt ?? 0, completion: completion ?? 0 };
-  }
-  return DEFAULT_PRICES[key] ?? FALLBACK_PRICE;
+  return { prompt: prompt ?? base.prompt, completion: completion ?? base.completion };
 }
 
-// True only when we have a real price for this model (a built-in entry or an explicit
-// override). A cost budget on an unknown model would silently never trip, so callers should
-// warn instead of enforcing a phantom budget.
+// Every side must be priced by either a built-in entry or an explicit override. Missing
+// pricing is different from explicitly free (0); partial known-model overrides inherit
+// the other built-in side. Budget callers refuse an incomplete price before dispatch.
 export function isModelPriceKnown(model, overrides = {}) {
-  if (numeric(overrides.pricePromptPerM) !== undefined || numeric(overrides.priceCompletionPerM) !== undefined) return true;
+  if (numeric(overrides.pricePromptPerM) !== undefined && numeric(overrides.priceCompletionPerM) !== undefined) return true;
   return Boolean(DEFAULT_PRICES[String(model ?? "").toLowerCase()]);
 }
 

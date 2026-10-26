@@ -9,9 +9,11 @@
   "scripts": {
     "start": "node ./bin/deecoo.js",
     "check": "node --check ./bin/deecoo.js && find ./src ./test ./eval -name '*.js' -print0 | xargs -0 -n1 node --check",
-    "test": "node --test",
-    "eval": "node ./eval/runner.js",
-    "eval:e2e": "node ./eval/runner.js --execute"
+    "test": "node ./scripts/run-tests.mjs",
+    "test:sandbox": "node ./scripts/verify-sandbox.mjs",
+    "eval": "node ./eval/runner.js --execute",
+    "eval:e2e": "node ./eval/runner.js --execute",
+    "eval:trace": "node ./eval/runner.js --trace"
   },
   "engines": {
     "node": ">=20"

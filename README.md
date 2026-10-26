@@ -45,6 +45,7 @@ Deecoo 是一个本地 coding-agent harness，面向代码分析、修改、审�
 
 - Node.js 20 或更高版本
 - npm
+- 本地文件编辑需要 POSIX（macOS/Linux）及 `/usr/bin/cc` C 编译器。首次编辑会将随包提供的安全写入辅助程序编译到当前用户的私有临时缓存，之后复用；无需网络下载。macOS 可使用已安装的 Xcode/Command Line Tools，Linux 可使用发行版的 C 编译器包。没有编译器或 Windows 主机将明确返回 `SECURE_FS_UNAVAILABLE`，保留只读及其他可用功能，不回落到不安全的路径写入。
 - 模型任务需要 DeepSeek、OpenAI 或 Anthropic 至少一个平台的 API key；本地管理命令无需 key
 - 需要读取或修改的本地项目目录
 
@@ -65,7 +66,7 @@ node ./bin/deecoo.js --help
 
 用 `deecoo --version`（或 `-v`）查看安装版本；`deecoo --json --version` 提供结构化版本信息，无需配置 API key。源码安装还会显示安装目录的 Git 提交号，未提交修改显示 `dirty`；独立包没有 Git 信息时只显示包版本。启动栏也显示同一版本标识。
 
-`npm link` 指向本地源码，新启动的命令会使用当前代码；已运行的交互会话需要退出后重新打开才能加载更新。发布修复时递增补丁版本（本次 `0.1.1`），新增兼容功能递增次版本，并同步 `package.json` 与锁文件。版本改动见 [更新记录](CHANGELOG.md)。
+`npm link` 指向本地源码，新启动的命令会使用当前代码；已运行的交互会话需要退出后重新打开才能加载更新。发布修复时递增补丁版本，新增兼容功能递增次版本，并同步 `package.json` 与锁文件。以 `deecoo --version` 的实际输出核对版本，版本改动见 [更新记录](CHANGELOG.md)。
 
 ## 快速开始
 
@@ -173,7 +174,7 @@ DEECOO_PROVIDER=openai
 DEECOO_MODEL=gpt-5.1
 ```
 
-`.env` 只读取 provider key 和 `DEECOO_*` 变量，不会覆盖已经存在于进程环境或已加载设置中的同名变量。不要把包含真实 key 的 `.env` 提交到版本库。
+`.env` 只读取 provider key 和以下调优变量：`DEECOO_PROVIDER`、`DEECOO_MODEL`、`DEECOO_THEME`、`DEECOO_REASONING_EFFORT`、`DEECOO_THINKING`、`DEECOO_STREAM`、`DEECOO_MAX_TOKENS`、`DEECOO_TIMEOUT_MS`、`DEECOO_API_RETRIES`、`DEECOO_CONTEXT_WINDOW`、`DEECOO_OUTPUT_RESERVE`。项目 `.env` 由仓库作者控制，因此沙箱、网络、权限模式、出口白名单、`DEECOO_BASE_URL`、工作区（`DEECOO_CWD`/`DEECOO_HOME`）、存储与预算类变量会被忽略并在 stderr 提示；这些设置请放在 Shell 环境或 `settings.json`。`.env` 不会覆盖已经存在于进程环境或已加载设置中的同名变量。不要把包含真实 key 的 `.env` 提交到版本库。
 
 ### 使用间接 secret 引用
 
@@ -321,10 +322,10 @@ API key: 平台环境变量 > settings.providers.<provider>.apiKey
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `DEECOO_MAX_STEPS` | `150` | 主 Agent 循环最大步骤数。 |
+| `DEECOO_MAX_STEPS` | `150` | 主 Agent 循环最大步骤数。连续 4 步只重复已有观察的工具调用时，任务以 `no_progress` 提前停止。 |
 | `DEECOO_TOKEN_BUDGET` | 关闭 | 整个任务累计 token 预算，包含主 Agent 和所有 Worker。 |
 | `DEECOO_WORKER_TOKEN_BUDGET` | 关闭 | 每次 Worker 执行的局部 token 上限，仍受任务总预算约束。 |
-| `DEECOO_COST_BUDGET_USD` | 关闭 | 估算费用预算，单位 USD。 |
+| `DEECOO_COST_BUDGET_USD` | 关闭 | 估算费用预算，单位 USD。模型没有内置价格时必须同时设置 `DEECOO_PRICE_PROMPT_PER_M` 和 `DEECOO_PRICE_COMPLETION_PER_M`，否则任务拒绝启动（`COST_BUDGET_UNPRICED`），不会静默忽略预算。 |
 | `DEECOO_PRICE_PROMPT_PER_M` | 模型价格表或无 | 输入 token 自定义价格，USD/百万 token。 |
 | `DEECOO_PRICE_COMPLETION_PER_M` | 模型价格表或无 | 输出 token 自定义价格，USD/百万 token。 |
 | `DEECOO_TASK_TIMEOUT_MS` | 关闭 | 整个任务墙钟时间预算。 |
@@ -485,7 +486,7 @@ deecoo --json changes export CHANGE_ID --output ./task.patch
 7. **上下文与导航**：按模型窗口预留输出并分层分配 token 预算，支持范围读取、文件版本、词法符号与引用导航。范围读取不能假装完整源码，词法导航不等于编译器/LSP 语义分析。
 8. **存储治理**：原子写入、并发锁、版本迁移、损坏备份恢复、任务所有权及可选工具事件；Memory 可查看/编辑/删除/过期清理，项目存储可查看和按期限/容量清理。
 
-standard 保留正常历史；redacted 对持久历史脱敏，并把包含源码基线的变更集仅留内存；ephemeral 不持久保存会话、审计、Memory、artifact 或源码基线。这两种模式的任务内 job 日志使用临时目录，在任务退出后清理；运行期间日志仍会暂存在本机磁盘。内存中的源码基线不能在进程退出后重连恢复，不能将此模式解释为“没有任何临时磁盘写入”。
+standard 保留正常历史结构，但会话与检查点写盘前替换已知 secret 值和形似凭据的字符串（键名和数值不变）；历史超过单文件上限时裁剪最旧的已摘要轮次并保留其中的明确约束，而不是让保存失败。redacted 对持久历史脱敏，并把包含源码基线的变更集仅留内存；ephemeral 不持久保存会话、审计、Memory、artifact 或源码基线。这两种模式的任务内 job 日志使用临时目录，在任务退出后清理；运行期间日志仍会暂存在本机磁盘。内存中的源码基线不能在进程退出后重连恢复，不能将此模式解释为“没有任何临时磁盘写入”。
 
 旧版 provider 设置、环境变量、普通交互用法和会话读取继续兼容。新增配置可通过环境变量或 CLI 使用；旧 schema 会在受支持的存储入口迁移，损坏记录保留可诊断副本。OS 后端和工具权限是分开的约束：启用 workspace-write 或自动批准不会绕过 required 沙箱；沙箱也不保证任意依赖、编译器或网络服务在限制下都能运行。
 
@@ -564,8 +565,8 @@ Shell 策略分为：
 
 | 级别 | 行为 |
 | --- | --- |
-| `allow` | 直接执行，不提示。 |
-| `warn` | 请求用户批准；例如安装依赖、网络访问、重定向、后台命令、解释器 one-liner。 |
+| `allow` | 直接执行，不提示；例如 `git status`、`ls`、`cat`、`node --version`。 |
+| `warn` | 请求用户批准；例如安装依赖、网络访问、重定向、后台命令、解释器 one-liner，以及运行项目自带代码的命令（`npm test`、`npm run *`、`make`、`node <file>`、`./script.sh`、`npx`、测试运行器等）。 |
 | `block` | 始终拒绝；例如 `sudo`、`git reset --hard`、递归强制删除、下载后直接执行、敏感凭据读取或数据上传。 |
 
 warn 级授权选项包括本次批准、拒绝、永久批准该精确命令、永久批准本项目所有 warn 命令。永久授权写入 `settings.json`，匹配规范化项目路径、完整命令（保留引号内空白）和策略版本。旧未限定范围的授权进入 `legacy`，需要在目标项目重新批准；显式全局范围只可通过配置 API 的 `scope: "global"` 设置，CLI 默认创建项目授权。清除所有新旧 Shell 永久授权：
@@ -575,6 +576,14 @@ deecoo config reset-shell-approvals
 ```
 
 即使启用 `--yes` 或 `autoApproveAll`，block 级命令仍然会被拒绝。
+
+分类会看穿命令真正执行的部分：`bash -c`/`sh -c` 和 `eval` 的载荷、`$(...)`/反引号/进程替换、同一命令内赋值的变量（如 `D=.ss; cat ~/${D}h/key`）、`env`/`timeout`/`xargs` 等包装命令以及换行分隔的多条命令都按其中最严格的级别处理；无法静态判定的命令替换和路径中未解析的变量至少为 warn。非交互模式下的 warn 命令（包括 `npm test`）需要 `--yes`，或先在交互模式中选择“永久批准该命令”。
+
+macOS 上 OS 沙箱允许读取 `xcode-select` 选中的 Xcode/Command Line Tools、Xcode 许可偏好及 xcrun 缓存，因此 `/usr/bin/git` 等 xcrun 工具可在沙箱内运行。
+
+`find -exec` 的载荷按其执行的命令分类；`awk` 的 `system()`/管道、GNU `sed` 的 `e` 命令、`tar --to-command`/`-I`、`zip -TT`、`node --check --require`、`docker run`、`parallel`、`crontab`、`open` 等能启动其他程序的写法至少为 warn。
+
+Shell 中的 git 只有只读子命令（`status`、`diff`、`log`、`show`、`blame`、`grep` 及 `branch`/`tag`/`config`/`stash` 的查看形式）无需审批；改写工作区或历史、联系远端、调用别名或 `submodule foreach` 等的子命令，`-c` 设置会运行程序的键（如 `core.fsmonitor`、`alias.*`、`filter.*`），`--git-dir`/`--work-tree`，以及 `GIT_*`/`PAGER` 环境覆盖都需要审批；`reset --hard`、`clean -f` 即使前面带全局选项也会被拒绝。只读 git 运行前会检查目标仓库配置，定义了过滤器、textconv/外部 diff、签名程序或 include 时改为需要审批。每个 job 的环境都会关闭仓库配置的 fsmonitor 和 pager。OS 沙箱内工作区可写，但 `.git/config`、`.git/hooks`、`.git/info`、`.git/modules` 和 `.git` 本身只读，防止沙箱内写入的配置在用户之后运行 git 时于沙箱外执行；因此需要初始化仓库或修改仓库配置时，请在沙箱外操作。
 
 ## 验证流程
 
@@ -726,26 +735,26 @@ Audit 中的长文本最多保留约 40000 字符，并对 API key、Authorizati
 deecoo trace
 ```
 
-或在会话中运行 `/trace`。输出包括任务类型、workflow、验证状态、Memory 摘要、文件读写、命令、最近工具调用、观察结果和可执行的 Eval 建议。
+或在会话中运行 `/trace`。输出包括任务类型、workflow、验证状态、Memory 摘要、文件读写、命令、最近工具调用、观察结果和可执行的 Eval 建议。每条审计记录带有指向上一条记录的 SHA-256 摘要，`trace` 会显示链校验结果（`chain verified` 或 `BROKEN` 及原因）。这是哈希链而不是签名：能发现单条记录被修改、删除或重排，不能抵御重写整条链的攻击者。
 
 ### Eval
 
 ```bash
-npm run eval
-npm run eval -- --case small-bugfix
-npm run eval -- --case small-bugfix --run /path/to/audit.json
-npm run eval -- --run /path/to/audit.json --suggest
-npm run eval -- --run /path/to/audit.json --auto-case
+npm run eval -- --trials 3 --no-report
+```
+
+`npm run eval`（与 `npm run eval:e2e` 相同）默认运行端到端回归：在独立临时项目执行真实任务、文件工具、命令及 Worker，用不可改的断言检查最终文件、行为和变更范围，失败返回非零。保留 edit_file、apply_patch、Worker 三条修复路径，并扩展为 15 个多类型场景；离线 provider 用于验证 harness，未测量真实模型能力。报告首行标明证据类型和覆盖的用例数。
+
+```bash
+npm run eval:trace
+npm run eval:trace -- --case small-bugfix
+npm run eval:trace -- --case small-bugfix --run /path/to/audit.json
+npm run eval:trace -- --run /path/to/audit.json --suggest
+npm run eval:trace -- --run /path/to/audit.json --auto-case
 deecoo eval
 ```
 
-上述命令运行 trace grader：读取 `eval/cases` 和 `eval/fixtures` 或审计记录，检查分类、工具和报告契约；分数不代表真实编码结果。
-
-```bash
-npm run eval:e2e -- --trials 3 --no-report
-```
-
-端到端回归在独立临时项目执行真实任务、文件工具、命令及 Worker，用不可改的断言检查最终文件、行为和变更范围，失败返回非零。保留 edit_file、apply_patch、Worker 三条修复路径，并扩展为 15 个多类型场景；离线 provider 用于验证 harness，未测量真实模型能力。两种模式均可输出 JSON；开发检查使用 `--no-report` 避免生成 `eval/reports`。详见 [Eval 使用说明](eval/README.md)。
+上述命令运行 trace grader：读取 `eval/cases` 和 `eval/fixtures` 或审计记录，检查分类、工具和报告契约；分数不代表真实编码结果。两种模式均可输出 JSON；开发检查使用 `--no-report` 避免生成 `eval/reports`。详见 [Eval 使用说明](eval/README.md)。
 
 ## 项目规则与上下文文件
 
@@ -872,13 +881,13 @@ echo "$DEECOO_HOME"
 ```bash
 npm run check
 npm test
-npm run eval -- --no-report
-npm run eval:e2e -- --trials 3 --no-report
+npm run eval -- --trials 3 --no-report
+npm run eval:trace -- --no-report
 ```
 
 - `npm run check` 对 CLI、源码、测试和 Eval JavaScript 执行语法检查。
 - `npm test` 运行 Node.js test runner 下的完整测试套件。
-- `npm run eval -- --no-report` 检查固定 trace 契约；`npm run eval:e2e -- --trials 3 --no-report` 独立检查真实临时项目结果，均不调用真实 provider。
+- `npm run eval -- --trials 3 --no-report` 独立检查真实临时项目结果；`npm run eval:trace -- --no-report` 检查固定 trace 契约。两者均不调用真实 provider。
 
 项目规则位于 `.deecoo.md`：代码修改后运行 `npm run check`，行为变化还需运行 `npm test`。`eval/reports` 是生成输出，除非明确要求，不应手工修改。
 
