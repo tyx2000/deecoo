@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { detectSandbox } from "../src/execution/sandbox.js";
 import { createModelClient } from "../src/llm/clientFactory.js";
 import { estimateCostUsd } from "../src/harness/cost.js";
 import { createScriptedEvalClient, executeEvalCase } from "./execution.js";
@@ -81,6 +82,12 @@ export async function runProviderBenchmark(cases, rawOptions, { clientFactory } 
     pricePromptPerM: options.offline ? 0 : options.pricePromptPerM, priceCompletionPerM: options.offline ? 0 : options.priceCompletionPerM,
     sandboxPolicy: { mode: options.offline ? "off" : options.sandboxMode ?? "required", network: options.sandboxNetwork ?? "deny" },
     stream: false, quiet: true };
+  // Graders import model-written code inside this sandbox, so without it no trial can be graded;
+  // refuse before the first paid request rather than after the budget is spent.
+  if (fixedConfig.sandboxPolicy.mode === "required") {
+    const sandbox = detectSandbox();
+    if (!sandbox.available) throw Object.assign(new Error(`Required OS sandbox unavailable: ${sandbox.reason}. Install it, or choose --sandbox auto or off to run tasks and graders without it.`), { code: "SANDBOX_UNAVAILABLE" });
+  }
   const budget = createBenchmarkBudget({ ...options, ...fixedConfig });
   const results = [];
   for (const definition of cases) {

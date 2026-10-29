@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { createBenchmarkBudget, runProviderBenchmark, validateBenchmarkOptions, classifyBenchmarkFailure } from "../eval/benchmark.js";
+import { detectSandbox } from "../src/execution/sandbox.js";
 
 const limits = { maxCalls: 20, tokenBudget: 500000, costBudgetUsd: 10, maxTokens: 128, timeoutMs: 30000, trials: 1 };
 const providerOptions = { ...limits, allowPaid: true, provider: "openai", model: "benchmark-test", baseUrl: "https://api.example.test/v1", pricePromptPerM: 1, priceCompletionPerM: 2 };
@@ -58,13 +59,22 @@ test("NEXT-006 real mode contract is exercised only with an injected fake provid
   const definition = JSON.parse(await readFile(new URL("../eval/tasks/review-clean.json", import.meta.url), "utf8"));
   let calls = 0;
   const { createScriptedEvalClient } = await import("../eval/execution.js");
-  const result = await runProviderBenchmark([definition], providerOptions, { clientFactory(context) { calls += 1; return createScriptedEvalClient(context.caseDefinition.execution.scripted); } });
+  const clientFactory = (context) => { calls += 1; return createScriptedEvalClient(context.caseDefinition.execution.scripted); };
+  // Real provider tools and graders default to required containment (EXECREVIEW-001, QUALITY-001).
+  // A host without an OS sandbox refuses before any provider call; the rest of the contract is
+  // then exercised with the sandbox explicitly off.
+  const sandboxed = detectSandbox().available;
+  if (!sandboxed) {
+    await assert.rejects(runProviderBenchmark([definition], providerOptions, { clientFactory }), { code: "SANDBOX_UNAVAILABLE" });
+    assert.equal(calls, 0);
+  }
+  const result = await runProviderBenchmark([definition], sandboxed ? providerOptions : { ...providerOptions, sandboxMode: "off" }, { clientFactory });
   assert.equal(calls, 1);
   assert.equal(result.evaluationKind, "provider-benchmark");
   assert.equal(result.summary.successfulTrials, 1);
   assert.ok(result.summary.measuredCostUsd > 0);
   assert.equal(result.config.retryAttempts, 1);
-  assert.deepEqual(result.config.sandboxPolicy, { mode: "required", network: "deny" }, "EXECREVIEW-001 real provider tools default to required containment");
+  assert.deepEqual(result.config.sandboxPolicy, { mode: sandboxed ? "required" : "off", network: "deny" });
   assert.equal(result.budget.calls, 2);
 });
 
