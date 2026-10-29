@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -14,17 +14,20 @@ const call = (id, name, args) => ({ choices: [{ message: { role: "assistant", to
 const answer = (content) => ({ choices: [{ message: { role: "assistant", content } }], usage: { total_tokens: 1 } });
 
 async function fixture(t) {
-  const cwd = await realpath(await mkdtemp(join(tmpdir(), "deecoo-steps-")));
+  // Session state and job logs live outside the workspace, as they do under ~/.deecoo.
+  const root = await realpath(await mkdtemp(join(tmpdir(), "deecoo-steps-")));
+  const cwd = join(root, "workspace");
+  await mkdir(cwd);
   const previousHome = process.env.DEECOO_HOME;
-  process.env.DEECOO_HOME = join(cwd, ".home");
+  process.env.DEECOO_HOME = join(root, "home");
   t.after(async () => {
     if (previousHome === undefined) delete process.env.DEECOO_HOME; else process.env.DEECOO_HOME = previousHome;
-    await rm(cwd, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
   });
   const sessionStore = await createSessionStore(cwd);
   const session = await sessionStore.createSession({ model: "test" });
   const tools = createToolRuntime({ cwd, permissionMode: "workspace-write", prompter: async () => "approve",
-    executionBackend: createExecutionBackend({ cwd, stateDir: join(cwd, ".jobs"), sandboxPolicy: { mode: "off" } }) });
+    executionBackend: createExecutionBackend({ cwd, stateDir: join(root, "jobs"), sandboxPolicy: { mode: "off" } }) });
   return { cwd, sessionStore, session, tools };
 }
 

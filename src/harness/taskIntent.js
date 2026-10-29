@@ -2,11 +2,14 @@
 // Keep negative instructions out of the positive edit detector.
 export function inferTaskIntent(task, { mode } = {}) {
   const text = String(task ?? "").trim();
+  // Paths, @mentions, code, and function names name things; the words inside them are not
+  // requests. "Review @src/update.js" or "the create() function" must not read as an edit.
+  const prose = withoutCodeReferences(text);
   const negativeWrite = /(?:不要|禁止|不得|无需|不必|勿|不允许|不要再|不需要)\s*(?:直接)?(?:修改|编辑|写入|写|创建|改动|更改|改造|搭建|接入|修复|实现|新增|删除)[^，,；;。\n]*/gi;
   const englishNegative = /\b(?:do\s+not|don't|never|without|no)\s+(?:make\s+)?(?:edit(?:ing|s)?|modif(?:y|ying)|writ(?:e|ing)|creat(?:e|ing)|updat(?:e|ing)|refactor(?:ing)?|build(?:ing)?|add(?:ing)?|chang(?:e|ing|es)|fix(?:ing|es)?|implement(?:ing)?|delet(?:e|ing))\b(?:(?!\.(?:\s|$)|\b(?:but|instead)\b|\band\s+(?:only\s+)?(?:fix|implement|edit|modify|create)\b)[^,;\n])*/gi;
   const negativeClauses = [...text.matchAll(negativeWrite), ...text.matchAll(englishNegative)].map((match) => match[0]);
   const writeRestrictions = [...new Map(negativeClauses.flatMap(scopedRestrictions).map((rule) => [JSON.stringify(rule), rule])).values()];
-  const positiveText = text.replace(negativeWrite, " ").replace(englishNegative, " ")
+  const positiveText = prose.replace(negativeWrite, " ").replace(englishNegative, " ")
     .replace(/\b(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:build|test|check)\b/gi, " ");
   const positiveWrite = /(修改|编辑|新增|创建|实现|改造|搭建|接入|改动|更改|修复|删除)/i.test(positiveText)
     || /\b(?:edit|modify|write|create|implement|update|change|refactor|build|add|fix|delete)\b/i.test(positiveText)
@@ -16,10 +19,10 @@ export function inferTaskIntent(task, { mode } = {}) {
   // A restriction on another operation ("do not change permissions") must not
   // erase an explicit code-change goal and turn a denied edit into an analysis success.
   const explicitReadOnly = hardReadOnly || negativeClauses.some((clause) => !scopedRestrictions(clause).length && (!positiveWrite || globalFileNegative(clause)));
-  const hasReview = /(review|审查|评审|风险|隐患)/i.test(text);
-  const hasAnalysis = /(解释|说明|分析|为什么|架构|方案|路径|是否合理|\bhow\b|\bwhy\b|explain|analy[sz]e|architecture)/i.test(text);
-  const hasDebug = /(报错|错误|失败|bug|debug|修复|\bfix\b|failed|error|crash|异常)/i.test(text);
-  const hasCommand = /(运行|执行|命令|测试|验证|\brun\b|\bcommand\b|\btest\b|\bcheck\b)/i.test(text);
+  const hasReview = /(review|审查|评审|风险|隐患)/i.test(prose);
+  const hasAnalysis = /(解释|说明|分析|为什么|架构|方案|路径|是否合理|\bhow\b|\bwhy\b|explain|analy[sz]e|architecture)/i.test(prose);
+  const hasDebug = /(报错|错误|失败|bug|debug|修复|\bfix\b|failed|error|crash|异常)/i.test(prose);
+  const hasCommand = /(运行|执行|命令|测试|验证|\brun\b|\bcommand\b|\btest\b|\bcheck\b)/i.test(prose);
   let requestType;
   if (explicitReadOnly) requestType = hasReview ? "review" : "analysis";
   else if (positiveWrite) requestType = hasDebug ? "debug" : "edit";
@@ -39,6 +42,18 @@ export function inferTaskIntent(task, { mode } = {}) {
     requiresCodeChange: mayWrite && positiveWrite,
     allowsNoChange: /(?:already|if needed|if necessary|无需|不必|已(?:经)?(?:修复|解决|满足)|若已|如果已)/i.test(text),
   };
+}
+
+function withoutCodeReferences(text) {
+  return text
+    .replace(/```[\s\S]*?(?:```|$)/g, " ")
+    .replace(/`[^`\n]*`/g, " ")
+    // A reference never takes the sentence's closing punctuation with it, or "Do not edit a/b.md.
+    // Fix c" would read as one negative clause.
+    .replace(/(^|\s)@\S*[^\s.,;:!?，。；：！？]/g, "$1 ")
+    .replace(/(?:[\w.-]+\/)+(?:[\w.-]*[\w-])?/g, " ")
+    .replace(/\b[\w-]+\.[A-Za-z]\w{0,7}\b/g, " ")
+    .replace(/\b[A-Za-z_$][\w$]*\([^()\n]*\)/g, " ");
 }
 
 function globalFileNegative(clause) {

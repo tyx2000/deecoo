@@ -1,9 +1,7 @@
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
 import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
-import { promisify } from "node:util";
 import { runTask } from "../src/agent/taskRunner.js";
 import { createExecutionBackend } from "../src/execution/backend.js";
 import { createSessionStore } from "../src/session/store.js";
@@ -13,7 +11,6 @@ import { isModelPriceKnown } from "../src/harness/cost.js";
 import { countLineChanges } from "../src/tools/textDiff.js";
 import { summarizeEvalResults } from "./scoring.js";
 
-const execFileAsync = promisify(execFile);
 const INSTRUMENTATION_FILE = ".deecoo/PROJECT.md";
 const DEFAULT_CONFIG = Object.freeze({ model: "scripted-eval", stream: false, quiet: true, maxSteps: 20, maxTokens: 2048, taskTimeoutMs: 30000 });
 
@@ -104,7 +101,11 @@ async function executeTrial(definition, { trial, clientFactory, keepWorkspaces }
     }
     // Sample before graders run, so a grader cannot hide a task's side effects.
     after = await snapshotWorkspace(workspace);
-    checks = await gradeWorkspace(definition, workspace, before, after);
+    // Independent checks import the candidate's code, so they get the same OS sandbox the task's
+    // own commands had; a provider benchmark must not hand model-written code the host's access.
+    const grader = createExecutionBackend({ cwd: workspace, stateDir: join(root, "grader-jobs"), sandboxPolicy: config.sandboxPolicy ?? { mode: "off" } });
+    try { checks = await gradeWorkspace(definition, workspace, before, after, grader); }
+    finally { await grader.dispose({ stopRunning: true, removeState: true }).catch(() => {}); }
     checks.unshift(...gradeRun(definition, run));
     if (recovery) checks.push(requiredCheck("recovery", ["failed", "interrupted"].includes(recovery.initialStatus) && recovery.checkpointUsed && run.status === "completed", JSON.stringify(recovery)));
   } catch (error) {
@@ -213,7 +214,7 @@ function sameReviewFinding(item, finding) {
     && (!finding.requireId || item.id === finding.id);
 }
 
-async function gradeWorkspace(definition, workspace, before, after) {
+async function gradeWorkspace(definition, workspace, before, after, grader) {
   const execution = definition.execution;
   const changed = changedFiles(before, after);
   const unauthorized = changed.filter((path) => !execution.allowedChanges.some((scope) => pathMatches(path, scope)));
@@ -246,24 +247,27 @@ async function gradeWorkspace(definition, workspace, before, after) {
   }
   for (let index = 0; index < (execution.checks.commands ?? []).length; index += 1) {
     const spec = execution.checks.commands[index];
-    const result = await runIndependentCommand(spec, workspace);
+    const result = await runIndependentCommand(spec, workspace, grader);
     checks.push({ ...requiredCheck("command:" + (spec.name ?? index + 1), result.exitCode === (spec.expectExitCode ?? 0) && !result.error,
       `Independent command exited ${result.exitCode ?? "without an exit code"}${result.error ? ": " + result.error : ""}`), evidence: result });
   }
   return checks;
 }
 
-async function runIndependentCommand(spec, workspace) {
+async function runIndependentCommand(spec, workspace, grader) {
   const args = spec.args ?? [];
-  const command = spec.command === "node" ? process.execPath : spec.command;
-  const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: "C", LC_ALL: "C", TMPDIR: tmpdir() };
+  const executable = spec.command === "node" ? process.execPath : spec.command;
+  const quote = (word) => "'" + String(word).replaceAll("'", "'\\''") + "'";
+  const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: "C", LC_ALL: "C" };
   try {
-    const { stdout, stderr } = await execFileAsync(command, args, { cwd: workspace, env, timeout: spec.timeoutMs ?? 10000, maxBuffer: 128 * 1024 });
-    return { command: spec.command, args: spec.args ?? [], exitCode: 0, stdout: stdout.slice(0, 8192), stderr: stderr.slice(0, 8192) };
+    const result = await grader.run({ command: [executable, ...args].map(quote).join(" "), cwd: workspace, env, replaceEnv: true,
+      timeoutMs: spec.timeoutMs ?? 10000, maxOutputBytes: 128 * 1024 });
+    const exited = result.status === "exited";
+    return { command: spec.command, args, exitCode: exited ? result.exitCode : null, sandbox: result.sandbox,
+      stdout: String(result.stdout ?? "").slice(0, 8192), stderr: String(result.stderr ?? "").slice(0, 8192),
+      ...(exited ? {} : { error: result.error ?? "Independent command did not exit normally" }) };
   } catch (error) {
-    return { command: spec.command, args: spec.args ?? [], exitCode: typeof error.code === "number" ? error.code : null,
-      stdout: String(error.stdout ?? "").slice(0, 8192), stderr: String(error.stderr ?? "").slice(0, 8192),
-      ...(typeof error.code !== "number" || error.killed ? { error: error.message } : {}) };
+    return { command: spec.command, args, exitCode: null, stdout: "", stderr: "", error: error.message };
   }
 }
 

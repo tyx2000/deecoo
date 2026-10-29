@@ -31,6 +31,7 @@ import { linkSignals } from "../harness/budget.js";
 import { compactToolResult } from "../tools/projection.js";
 export { compactToolResult } from "../tools/projection.js";
 import { appendEffects } from "../harness/effects.js";
+import { workspaceFingerprint } from "../harness/workspaceFingerprint.js";
 import { buildBudgetedContext, buildContextBudget, contextWindowHint, estimateTokens, measureContextMessages } from "../context/builder.js";
 import { createHash, randomUUID } from "node:crypto";
 import { redact } from "../observability/audit.js";
@@ -476,7 +477,10 @@ export async function runAgent({
       // Repeated calls are answered from earlier observations, but each still costs a model
       // request. Several consecutive steps that only repeat themselves mean the run has stalled.
       const fileRevision = effects.filter((event) => event.type === "file-change" || event.type === "workspace-uncertain").length;
-      const repeated = evaluated.map((item) => repeatsEarlierObservation(outcomeLedger, item, executedById.get(item.call.id).result, fileRevision));
+      const repeated = [];
+      for (const item of evaluated) {
+        repeated.push(await repeatsEarlierObservation(outcomeLedger, item, executedById.get(item.call.id).result, fileRevision, () => workspaceFingerprint(cwd)));
+      }
       noProgressSteps = repeated.every(Boolean) ? noProgressSteps + 1 : 0;
       if (noProgressSteps >= MAX_NO_PROGRESS_STEPS) {
         const stop = { reason: TERMINAL_TRANSITIONS.NO_PROGRESS, limit: MAX_NO_PROGRESS_STEPS, observed: noProgressSteps,
@@ -707,13 +711,20 @@ function compactionSummaryBodies(agentState, processController, source) {
 // harness could not use, or returns the same outcome as the last identical call with no file change
 // in between (rerunning a failing test, re-reading an unchanged file after a command). Every command
 // bumps the workspace revision, so the process controller's own dedup cannot see these repeats.
-function repeatsEarlierObservation(ledger, { name, args }, result, fileRevision) {
+async function repeatsEarlierObservation(ledger, { name, args }, result, fileRevision, workspaceState) {
   if (result?.alreadyAvailable === true || ["ALREADY_AVAILABLE", "DUPLICATE_FAILURE_LOOP", "INVALID_TOOL_ARGUMENTS"].includes(result?.code)) return true;
   const key = toolSignature(name, args) + (typeof args?.cwd === "string" ? "@" + args.cwd : "");
   const outcome = observationOutcome(name, result);
   const prior = ledger.get(key);
-  ledger.set(key, { fileRevision, outcome });
-  return Boolean(prior) && prior.fileRevision === fileRevision && prior.outcome === outcome;
+  const entry = { fileRevision, outcome };
+  ledger.set(key, entry);
+  if (!prior || prior.fileRevision !== fileRevision || prior.outcome !== outcome) return false;
+  if (name !== "run_shell") return true;
+  // A command can change files without a file-change event (appending to a log, writing build
+  // output), so it repeats only when the workspace is measurably unchanged since the previous
+  // identical run. The first suspected repeat records that baseline; an unknown state is progress.
+  entry.workspace = await workspaceState();
+  return prior.workspace !== undefined && entry.workspace !== undefined && prior.workspace === entry.workspace;
 }
 
 function observationOutcome(name, result) {
