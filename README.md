@@ -660,11 +660,13 @@ Deecoo 不会把完整历史无限追加到每个模型请求。会话上下文�
 
 Agent 运行会按队列原子写入版本化 checkpoint，包含 run ID、消息、步骤、使用量、可信执行效果和验证状态。任务成功后先等待写入结束再清理。`/continue` 或 `deecoo continue` 继续中断任务，校验项目真实路径、模型和权限，保留累计预算；若预算已耗尽，需要先提高对应上限。恢复会使旧验证和可复用观察失效，要求检查当前文件；结果未知的工具调用会标记为中断，不自动重放。`/resume` 只切换会话。
 
+存储容量耗尽（`STORAGE_CAPACITY`）时任务继续运行：磁盘上保留最后一个可恢复的检查点，运行结果的 `checkpoint.persistence` 为 `degraded` 并给出最后保存和失败的步骤，同时记录 `checkpoint-degraded` 事件；继续该检查点时会提示之后的进度未保存。0.1.9 写入的整段 transcript 检查点仍可恢复，下次保存时迁移为分段格式。
+
 模型路由身份还包含 provider、协议、endpoint 摘要和当前任务可见工具 schema。切换 endpoint 或工具合同后明确拒绝恢复；只改本地渲染函数或增加被任务策略隐藏的工具不影响身份。缺少路由身份的旧 checkpoint 不能在 CLI 中继续，需要开始新任务。
 
 ### 可追溯压缩与请求诊断
 
-上下文压缩保存稳定消息 ID、来源 hash、策略版本、替换内容和压缩前后估计。提交前再次校验来源及完整工具调用组，只有确实缩小时才替换模型消息；原始模型 transcript 保存在 `contextState`，Worker 各轮来源保存在 `workerContexts`。摘要以不可信 user 数据进入模型，保持初始系统/任务约束。它们随检查点、运行结果和审计保存，受既有容量、保留期和隐私策略约束，容量失败明确报告。
+上下文压缩保存稳定消息 ID、来源 hash、策略版本、替换内容和压缩前后估计。提交前再次校验来源及完整工具调用组，只有确实缩小时才替换模型消息；原始模型 transcript 保存在 `contextState`，Worker 各轮来源保存在 `workerContexts`。摘要以不可信 user 数据进入模型，保持初始系统/任务约束。写盘时原始 transcript 只追加地封存为 `transcripts/<session-id>/` 下按内容寻址的分段（替换消息附带其压缩证明），读取的文件内容按摘要只存一份；检查点、运行结果和审计只保存当前上下文、未封存的尾部和分段引用，大小随当前上下文而不随历史增长。分段与检查点使用相同的脱敏规则，受保留期和容量治理约束；加载时逐段校验摘要，缺失或被改动时整段历史标为不可用，从当前上下文继续，不部分信任。
 
 每次 dispatch 有过滤后的 messages/tools/生效配置快照、hash 和 attempt 状态；失败或重试不制造成功消息。`runJournal` 保存事件去重索引、计数和水位，`foldRun` 可重建诊断投影。检查点等待对应事件落定，恢复会接续磁盘中较新的日志尾部，不重复计费或重放工具。原始 transcript 由 `contextState` 管理，事件投影不替代它。
 
@@ -714,6 +716,7 @@ Review 类任务可以按正确性、安全、边界情况、架构、性能和�
     ├── <session-id>.json
     ├── <session-id>.checkpoint.json
     ├── memory.json
+    ├── transcripts/<session-id>/*.jsonl, content/*.txt
     ├── audit/<session-id>/*.json
     ├── tool-outputs/<session-id>/*.json
     └── outputs/<session-id>/*

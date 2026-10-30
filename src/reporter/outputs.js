@@ -47,6 +47,7 @@ export function structuredRunResult({ task, result }) {
     checkpoint: result?.checkpoint,
     checkpointFailure: result?.checkpointFailure,
     contextSnapshotError: result?.contextSnapshotError,
+    contextArchiveFailure: result?.contextArchiveFailure,
     failurePhase: result?.failurePhase,
     persistenceFailure: result?.persistenceFailure,
     contextMetrics: result?.contextMetrics,

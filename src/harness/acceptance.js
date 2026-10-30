@@ -122,10 +122,16 @@ export function evaluateTaskAcceptance({ taskSpec, verificationPlan, verificatio
     satisfied: errors.length === 0, checks, requirements, sourceEvidence: source.map(({ content, ...item }) => item), errors };
 }
 
+// File reads recorded before this revision can no longer serve as source evidence; later
+// mutations only move it forward.
+export function sourceEvidenceRevision(events = [], verification) {
+  const checkIds = new Set((verification?.evidence ?? []).map((item) => item.id).filter(Boolean));
+  return events.filter((event) => ["file-change", "workspace-uncertain"].includes(event.type) || (event.type === "command" && !checkIds.has(event.id))).at(-1)?.revision ?? 0;
+}
+
 function collectSourceEvidence(agentState, effects, verification) {
   const events = effects?.events ?? [];
-  const checkIds = new Set((verification?.evidence ?? []).map((item) => item.id).filter(Boolean));
-  const lastMutation = events.filter((event) => ["file-change", "workspace-uncertain"].includes(event.type) || (event.type === "command" && !checkIds.has(event.id))).at(-1)?.revision ?? 0;
+  const lastMutation = sourceEvidenceRevision(events, verification);
   const current = verification?.workspaceRevision ?? effects?.revision ?? agentState?.workspaceRevision ?? 0;
   const out = events.filter((event) => event.type === "file-read" && !event.truncated && event.chars > 0 && event.revision >= lastMutation)
     .map((event) => ({ id: event.id, path: event.path, revision: event.revision, ...(typeof event.content === "string" ? { content: event.content } : {}) }));

@@ -5,6 +5,7 @@ import { basename, join, resolve } from "node:path";
 import { dataContextMessage } from "../harness/contentTrust.js";
 import { appendJsonEvent, readJsonEvents, readJsonFile, removeStoredFile, updateJsonFile, withFileLock, writeJsonFile } from "../storage/atomic.js";
 import { canPersist, pruneStorage, storageInventory, storagePolicy } from "../storage/governance.js";
+import { archiveRunState, createTranscriptArchive, hydrateRunState } from "../storage/transcriptArchive.js";
 import { auditChainHeadPath, markStoredContextProjection, redact, redactSecretValues } from "../observability/audit.js";
 
 const RECENT_TURNS_FOR_CONTEXT = 6;
@@ -27,6 +28,12 @@ export async function createSessionStore(cwd, options = {}) {
   const operationPath = (id) => sessionPath(id) + ".operation";
   const ownerPath = (id) => join(projectDir, safeSessionId(id) + ".owner.json");
   const journalPath = (id) => join(projectDir, "journal", safeSessionId(id) + ".jsonl");
+  const downgradePath = (id) => join(projectDir, safeSessionId(id) + ".checkpoint-downgrade.json");
+  const archives = new Map();
+  // Sealed transcript segments are filtered like the checkpoint that references them.
+  const transcriptArchive = (id) => archives.get(id) ?? archives.set(id, createTranscriptArchive({ dir: join(projectDir, "transcripts", safeSessionId(id)),
+    maxFileBytes: policy.maxFileBytes, protect: (value) => policy.privacyMode === "redacted" ? redact(value, { secretRegistry: store.secretRegistry, maxTextChars: Infinity })
+      : redactSecretValues(value, { secretRegistry: store.secretRegistry }) })).get(id);
   const store = {
     rootDir, projectId, projectDir, storagePolicy: policy, secretRegistry: options.secretRegistry,
     async createSession({ model, title, summary = "", turns = [], history } = {}) {
@@ -78,12 +85,12 @@ export async function createSessionStore(cwd, options = {}) {
       return withFileLock(operationPath(id), async () => {
         await store.assertTaskOwner(id);
         await writeJsonFile(deletionPath(id), { schemaVersion: 1, id, deletedAt: new Date().toISOString() });
-      const paths = [sessionPath(id), checkpointPath(id), ownerPath(id)];
+      const paths = [sessionPath(id), checkpointPath(id), downgradePath(id), ownerPath(id)];
       if (associated) paths.push(journalPath(id));
       for (const path of paths) await removeStoredFile(path);
       const removed = [...paths];
       if (associated) {
-        for (const kind of ["artifacts", "audit", "output", "outputs", "tool-outputs"]) {
+        for (const kind of ["artifacts", "audit", "output", "outputs", "tool-outputs", "transcripts"]) {
           const path = join(projectDir, kind, id);
           await rm(path, { recursive: true, force: true }); removed.push(path);
         }
@@ -122,21 +129,46 @@ export async function createSessionStore(cwd, options = {}) {
       if (!isSafeSessionId(id)) return;
       if (!canPersist(store)) { volatileCheckpoints.set(id, structuredClone(checkpoint)); return; }
       await store.assertTaskOwner(id, checkpoint.metadata?.runId);
+      // The transcript's sealed prefix and read contents go to append-only storage first; the
+      // checkpoint then holds the live projection, the unsealed tail and their references.
+      const projected = await archiveRunState(transcriptArchive(id), checkpoint);
       // Standard mode keeps structure but never writes known secret values or credential-shaped
       // strings to disk; redacted mode also applies key-based redaction.
-      const stored = policy.privacyMode === "redacted" ? redact(checkpoint, { secretRegistry: store.secretRegistry, maxTextChars: Infinity })
-        : redactSecretValues(checkpoint, { secretRegistry: store.secretRegistry });
-      return writeJsonFile(checkpointPath(id), markStoredContextProjection(checkpoint, stored), { maxBytes: policy.maxFileBytes });
+      const stored = policy.privacyMode === "redacted" ? redact(projected, { secretRegistry: store.secretRegistry, maxTextChars: Infinity })
+        : redactSecretValues(projected, { secretRegistry: store.secretRegistry });
+      return writeJsonFile(checkpointPath(id), markStoredContextProjection(projected, stored), { maxBytes: policy.maxFileBytes });
     },
     async loadCheckpoint(id) {
       if (!isSafeSessionId(id)) return undefined;
       if (!canPersist(store)) return structuredClone(volatileCheckpoints.get(id));
-      return readJsonFile(checkpointPath(id), { validate: (value) => value && typeof value === "object" });
+      const checkpoint = await hydrateRunState(transcriptArchive(id), await readJsonFile(checkpointPath(id), { validate: (value) => value && typeof value === "object" }));
+      // A recorded downgrade belongs to this checkpoint only while it is still the last one saved.
+      const downgrade = checkpoint && await readJsonFile(downgradePath(id)).catch(() => undefined);
+      if (downgrade && downgrade.runId === checkpoint.metadata?.runId && downgrade.checkpointStep === checkpoint.step) {
+        checkpoint.persistence = { status: "degraded", code: downgrade.code, checkpointStep: downgrade.checkpointStep, failedStep: downgrade.failedStep, at: downgrade.at };
+      }
+      return checkpoint;
+    },
+    // Storage capacity ran out after the last checkpoint: that checkpoint stays resumable, and
+    // this marker says progress after it was not saved.
+    async recordCheckpointDowngrade(id, { runId, failedStep, code = "STORAGE_CAPACITY" } = {}) {
+      if (!isSafeSessionId(id) || !canPersist(store)) return undefined;
+      await store.assertTaskOwner(id, runId);
+      const current = await readJsonFile(checkpointPath(id)).catch(() => undefined);
+      const marker = { schemaVersion: 1, sessionId: id, runId, checkpointStep: current?.metadata?.runId === runId ? current.step : undefined,
+        failedStep, code, at: new Date().toISOString() };
+      await writeJsonFile(downgradePath(id), marker);
+      return marker;
     },
     async clearCheckpoint(id, { runId } = {}) {
       if (!isSafeSessionId(id)) return;
       volatileCheckpoints.delete(id);
-      if (canPersist(store)) { await store.assertTaskOwner(id, runId); await removeStoredFile(checkpointPath(id)); }
+      if (canPersist(store)) { await store.assertTaskOwner(id, runId); await removeStoredFile(checkpointPath(id)); await removeStoredFile(downgradePath(id)); }
+    },
+    // Run audits and outputs reference the same stored segments and contents instead of copying them.
+    async archiveRunState(id, value) {
+      if (!isSafeSessionId(id) || !canPersist(store)) return value;
+      return archiveRunState(transcriptArchive(id), value);
     },
     async appendToolEvent(id, event) {
       if (!canPersist(store) || !policy.durableToolEvents) return undefined;

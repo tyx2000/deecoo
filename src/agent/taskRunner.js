@@ -87,8 +87,9 @@ export async function runTask({ client, tools, task, cwd, config, sessionStore, 
       sessionStore.secretRegistry = secretRegistry;
       try {
         await sessionStore.assertTaskOwner?.(session.id, runtimeContext?.runId);
-        await saveRunAudit(sessionStore, session, { task, cwd, model: config.model, ...outcome }, { secretRegistry });
-        await saveRunOutputs(sessionStore, session, { task, result: outcome });
+        const stored = { ...outcome, ...await archivedRunContexts(sessionStore, session, outcome) };
+        await saveRunAudit(sessionStore, session, { task, cwd, model: config.model, ...stored }, { secretRegistry });
+        await saveRunOutputs(sessionStore, session, { task, result: stored });
       } catch (failure) { outcome.persistenceFailure = { code: "FAILURE_REPORT_UNAVAILABLE", error: secretRegistry.redact(failure.message) }; }
     }
     return outcome;
@@ -248,6 +249,10 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
     result.workerContexts = workerContexts();
     result.runJournal = events.checkpoint();
     result.checkpoint = checkpointWriter?.diagnostics?.();
+    if (!config.quiet && result.checkpoint?.persistence === "degraded") {
+      console.error("Checkpoint storage capacity was exhausted at step " + result.checkpoint.downgrade.failedStep + "; "
+        + (result.checkpoint.lastSavedStep === undefined ? "no resumable checkpoint was saved by this run." : "the last resumable checkpoint is from step " + result.checkpoint.lastSavedStep + "."));
+    }
     result.modelDiagnostics = { events: tracer.events().filter((event) => ["model-attempt-start", "model-attempt-end", "model-retry", "context-compacted"].includes(event.type)),
       coverage: { ...events.snapshot(), retainedTraceComplete: tracer.snapshot().droppedEvents === 0 && !journalResume?.sequence,
         contextSourceComplete: result.contextState?.sourceCompleteness === "complete" && !result.contextState?.privacyFiltered,
@@ -256,7 +261,8 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
   try {
   status?.start();
   checkpointWriter = session && sessionStore ? createCheckpointWriter({ store: sessionStore, sessionId: session.id,
-    identity, task: contractTask, runId: runtimeContext.runId, strict: true }) : undefined;
+    identity, task: contractTask, runId: runtimeContext.runId, strict: true,
+    onDowngrade: (downgrade) => { events.emit({ type: "checkpoint-degraded", ...downgrade }); } }) : undefined;
   await checkpointWriter?.ready?.();
   if (changeSet) {
     if (resumeCheckpoint?.metadata?.changeSetId && volatileChanges && existingChangeSet?.id !== changeSet.id) throw Object.assign(new Error("The private in-memory change baseline is unavailable in this process. Start a new task to establish a new baseline; existing workspace edits are preserved."), { code: "CHANGE_BASELINE_UNAVAILABLE" });
@@ -395,6 +401,10 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
       printAssistantResponse(displayText, footer);
     }
     if (session && sessionStore) {
+      const storedContexts = await archivedRunContexts(sessionStore, session, result);
+      // Like the session turn below, a run record that no longer fits the storage cap is
+      // reported instead of turning finished work into a failed task.
+      try {
       await saveRunAudit(sessionStore, session, {
         task,
         cwd,
@@ -420,9 +430,14 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
         reviewReport: result.reviewReport,
         quarantine: result.quarantine,
         messages: result.messages,
-        contextState: result.contextState, workerContexts: result.workerContexts, runJournal: result.runJournal, modelDiagnostics: result.modelDiagnostics, checkpoint: result.checkpoint,
+        ...storedContexts, runJournal: result.runJournal, modelDiagnostics: result.modelDiagnostics, checkpoint: result.checkpoint,
       }, { secretRegistry });
-      await saveRunOutputs(sessionStore, session, { task, result });
+      await saveRunOutputs(sessionStore, session, { task, result: { ...result, ...storedContexts } });
+      } catch (recordError) {
+        if (recordError.code !== "STORAGE_CAPACITY") throw recordError;
+        result.persistenceFailure = { code: recordError.code, phase: "run-record", error: secretRegistry.redact(recordError.message) };
+        if (!config.quiet) console.error("The run record exceeded the storage capacity and was not saved.");
+      }
       for (const entry of summarizeRunForMemory({ task, result })) {
         await recordProjectMemory(sessionStore, entry);
       }
@@ -466,11 +481,12 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
     finishDiagnostics(result);
     if (session && sessionStore) {
       try {
+        const stored = { ...result, ...await archivedRunContexts(sessionStore, session, result) };
         await saveRunAudit(sessionStore, session, {
           task, cwd, model: config.model, requestType: coordination.requestType,
-          ...result, tracer: tracer.snapshot(),
+          ...stored, tracer: tracer.snapshot(),
         }, { secretRegistry });
-        await saveRunOutputs(sessionStore, session, { task, result });
+        await saveRunOutputs(sessionStore, session, { task, result: stored });
       } catch {
         if (!config.quiet) console.error("Unable to persist failed run outputs.");
       }
@@ -481,6 +497,15 @@ async function runTaskInner({ client, tools, task, cwd, config, sessionStore, se
     tools.setEventSink?.(undefined);
     await checkpointWriter?.flush();
   }
+}
+
+// Audits and run outputs reference the stored transcript segments and read contents; a copy
+// of a long task's whole history in each record would exceed the per-file storage cap.
+async function archivedRunContexts(sessionStore, session, result) {
+  const state = { contextState: result.contextState, workerContexts: result.workerContexts, effects: result.effects };
+  if (!sessionStore?.archiveRunState) return state;
+  try { return await sessionStore.archiveRunState(session.id, state); }
+  catch (error) { return { contextState: undefined, workerContexts: undefined, effects: undefined, contextArchiveFailure: { code: error.code ?? "CONTEXT_ARCHIVE_FAILED", error: error.message } }; }
 }
 
 async function disposeTaskPlugins(scope, secretRegistry) {

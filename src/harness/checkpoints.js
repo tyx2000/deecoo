@@ -1,4 +1,5 @@
 import { createRouteIdentity } from "../llm/prepareRequest.js";
+import { sourceEvidenceRevision } from "./acceptance.js";
 import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -16,24 +17,54 @@ export async function checkpointIdentity({ cwd, model, tools, taskSpec, config, 
 
 // One writer per task; callers may enqueue without awaiting, but completion/clear
 // always waits for the queue. Store writes are atomic and ordered as well.
-export function createCheckpointWriter({ store, sessionId, identity, task, runId = randomUUID(), strict = false }) {
+// Exhausted storage capacity is not a write failure: the last checkpoint stays the resumable
+// one, the downgrade is recorded, and the run continues without claiming newer state was saved.
+export function createCheckpointWriter({ store, sessionId, identity, task, runId = randomUUID(), strict = false, onDowngrade }) {
   const ownership = Promise.resolve().then(() => store.claimTaskOwner?.(sessionId, { runId, taskId: runId }));
   let queue = ownership;
-  let lastError, lastSavedStep;
-  let writeFailures = 0;
+  let lastError, lastSavedStep, latestStep, downgrade;
+  let writeFailures = 0, downgrades = 0;
   return {
     runId,
     ready() { return ownership; },
     save(snapshot) {
-      const value = structuredClone({ ...snapshot, metadata: { version: 1, runId, task, ...identity } });
-      const operation = queue.then(async () => { await store.saveCheckpoint(sessionId, value); lastSavedStep = value.step; });
+      const value = structuredClone({ ...checkpointProjection(snapshot), metadata: { version: 1, runId, task, ...identity } });
+      const operation = queue.then(async () => {
+        latestStep = value.step;
+        try { await store.saveCheckpoint(sessionId, value); }
+        catch (error) {
+          if (error?.code !== "STORAGE_CAPACITY") throw error;
+          downgrades++;
+          downgrade = { code: error.code, failedStep: value.step, lastSavedStep, at: new Date().toISOString() };
+          try { await store.recordCheckpointDowngrade?.(sessionId, { runId, failedStep: value.step, code: error.code }); }
+          catch (markerError) { downgrade.markerError = markerError.message; }
+          onDowngrade?.(structuredClone(downgrade));
+          return;
+        }
+        lastSavedStep = value.step;
+        downgrade = undefined;
+      });
       queue = operation.catch((error) => { lastError = error; writeFailures++; });
       return strict ? operation : queue;
     },
-    diagnostics: () => ({ writeFailures, lastSavedStep, ...(lastError ? { error: lastError.message, code: lastError.code ?? "CHECKPOINT_PERSIST_FAILED" } : {}) }),
+    diagnostics: () => ({ writeFailures, lastSavedStep, latestStep, persistence: downgrade ? "degraded" : "durable",
+      ...(downgrades ? { downgrades } : {}), ...(downgrade ? { downgrade: structuredClone(downgrade) } : {}),
+      ...(lastError ? { error: lastError.message, code: lastError.code ?? "CHECKPOINT_PERSIST_FAILED" } : {}) }),
     async flush() { try { await queue; return lastError; } finally { await store.releaseTaskOwner?.(sessionId, runId); } },
     async clear() { try { await queue; await store.clearCheckpoint?.(sessionId, { runId }); } finally { await store.releaseTaskOwner?.(sessionId, runId); } },
   };
+}
+
+// Resume rebuilds the process controller, and a file read taken before the latest workspace
+// mutation can never again be source evidence, so neither copy is persisted.
+export function checkpointProjection(snapshot) {
+  const { processController: _discardedOnResume, ...value } = snapshot ?? {};
+  if (Array.isArray(value.effects?.events)) {
+    const settled = sourceEvidenceRevision(value.effects.events, value.verification);
+    value.effects = { ...value.effects, events: value.effects.events.map((event) => event?.type === "file-read" && typeof event.content === "string" && event.revision < settled
+      ? Object.assign(Object.fromEntries(Object.entries(event).filter(([key]) => key !== "content")), { contentOmitted: "superseded" }) : event) };
+  }
+  return value;
 }
 
 export function validateCheckpoint(checkpoint, identity) {
@@ -76,6 +107,8 @@ export function prepareCheckpointResume(checkpoint) {
   if (next.workflow) next.workflow = { ...next.workflow, status: "executing", phase: "resumed",
     transitions: [...(next.workflow.transitions ?? []), { from: next.workflow.status, to: "executing", phase: "resumed", type: "resumed", at: new Date().toISOString() }] };
   delete next.acceptance;
-  next.messages.push({ role: "user", content: "Continue the interrupted task from current workspace state. Prior verification is stale; inspect before editing. Do not automatically repeat pending calls." });
+  const unsaved = next.persistence?.status === "degraded"
+    ? " Storage capacity ran out after this checkpoint, so later progress was not saved; the workspace may contain changes from those steps." : "";
+  next.messages.push({ role: "user", content: "Continue the interrupted task from current workspace state. Prior verification is stale; inspect before editing. Do not automatically repeat pending calls." + unsaved });
   return next;
 }
