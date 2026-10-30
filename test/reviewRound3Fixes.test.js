@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -70,14 +71,20 @@ test("R3-QUALITY-001 independent graders run candidate code inside the task's OS
 
 test("R3-CTRL-001 words inside paths, mentions, code, and function names do not grant write access", () => {
   for (const task of ["Review @src/update.js", "审查 @src/fix.js", "Review the create() function in src/a.js", "Review src/add.js",
-    "Explain src/delete-user.js", "Review `updateUser` in api.ts", "Review add(a, b) in math.js"]) {
+    "Explain src/delete-user.js", "Review `updateUser` in api.ts", "Review add(a, b) in math.js",
+    // Hyphenated names, file names in other scripts, and a change named as the thing to inspect.
+    "Review the create-user endpoint", "Explain the add-on loader in plugins.js", "Review the fix-ups in the last commit",
+    "审查 src/修复.js", "审查 修复.js", "Review this: the bug fix landed yesterday", "Review the change", "Explain why the build fails",
+    "Look at the update in api.js and explain it", "审查这次修改"]) {
     const intent = inferTaskIntent(task);
     assert.equal(intent.mayWrite, false, task);
     assert.equal(intent.requiresCodeChange, false, task);
   }
   for (const task of ["Fix src/update.js and review it", "修复 src/fix.js 的问题", "Update README.md", "Create done.txt and check it.",
     "Fix src/add.js so add(a, b) returns the sum and run npm test.", "Add a test for src/value.js", "Review @src/value.js and fix the bug", "Review @src/a.js. Fix the bug in it.",
-    "Do not edit docs/guide.md. Fix src/agent"]) {
+    "Do not edit docs/guide.md. Fix src/agent", "Fix the build", "Apply the fix from the review", "I need a fix for the crash in src/a.js",
+    "Make the change in src/a.js", "Re-create the index file", "Review the change and fix the bug", "Explain why the build fails and fix it",
+    "In the update function, add logging", "审查 src/a.js并修复", "修改app.js", "修改修复v2.js"]) {
     assert.equal(inferTaskIntent(task).mayWrite, true, task);
   }
 });
@@ -98,17 +105,39 @@ test("R3-CTRL-001 a review of a file named after an action cannot edit it", asyn
   assert.equal(editStep?.toolResult?.ok, false);
 });
 
+const gitInit = (cwd, ignore) => {
+  execFileSync("git", ["init", "-q"], { cwd });
+  return writeFile(join(cwd, ".gitignore"), ignore);
+};
+
 test("R3-CTRL-004 a command that keeps writing to the workspace is progress, not a repeat", async (t) => {
-  const { cwd, sessionStore, session, tools } = await taskFixture(t);
-  let calls = 0;
-  const result = await runTask({ cwd, tools, sessionStore, session, task: "Append one x to progress.txt ten times, one command per step.",
-    config: { model: "test", quiet: true, stream: false, maxSteps: 40 },
-    client: { async chatCompletion() { calls += 1; return calls <= 10 ? call("c" + calls, "run_shell", { command: "printf x >> progress.txt" }) : answer("Appended ten times."); } } });
-  assert.notEqual(result.stoppedReason, "no_progress");
-  assert.equal(await readFile(join(cwd, "progress.txt"), "utf8"), "x".repeat(10));
+  for (const git of [false, true]) {
+    const { cwd, sessionStore, session, tools } = await taskFixture(t);
+    if (git) await gitInit(cwd, "coverage/\n");
+    let calls = 0;
+    const result = await runTask({ cwd, tools, sessionStore, session, task: "Append one x to progress.txt ten times, one command per step.",
+      config: { model: "test", quiet: true, stream: false, maxSteps: 40 },
+      client: { async chatCompletion() { calls += 1; return calls <= 10 ? call("c" + calls, "run_shell", { command: "printf x >> progress.txt" }) : answer("Appended ten times."); } } });
+    assert.notEqual(result.stoppedReason, "no_progress", git ? "git" : "plain");
+    assert.equal(await readFile(join(cwd, "progress.txt"), "utf8"), "x".repeat(10), git ? "git" : "plain");
+  }
 });
 
-test("R3-CTRL-004 the workspace fingerprint sees writes, ignores tool directories, and gives up on huge trees", async (t) => {
+test("R3-CTRL-004 rerunning a passing command that only rewrites generated output is still no progress", async (t) => {
+  // Plain workspaces skip well-known output directories; Git work trees skip what .gitignore excludes.
+  for (const [git, command] of [[false, "mkdir -p coverage && echo $RANDOM$RANDOM > coverage/stamp && echo built"],
+    [true, "mkdir -p generated && echo $RANDOM$RANDOM > generated/stamp && echo built"]]) {
+    const { cwd, sessionStore, session, tools } = await taskFixture(t);
+    if (git) await gitInit(cwd, "generated/\n");
+    let calls = 0;
+    const result = await runTask({ cwd, tools, sessionStore, session, task: "Build the project.", config: { model: "test", quiet: true, stream: false, maxSteps: 30 },
+      client: { async chatCompletion() { calls += 1; return call("b" + calls, "run_shell", { command }); } } });
+    assert.equal(result.stoppedReason, "no_progress", git ? "git" : "plain");
+    assert.ok(calls <= 5, `${git ? "git" : "plain"} stopped after ${calls} model calls`);
+  }
+});
+
+test("R3-CTRL-004 the workspace fingerprint sees source writes, ignores tool and output directories, and gives up on huge trees", async (t) => {
   const cwd = await scratch(t, "deecoo-r3-fingerprint-");
   await writeFile(join(cwd, "a.txt"), "a");
   const first = await workspaceFingerprint(cwd);
@@ -116,10 +145,25 @@ test("R3-CTRL-004 the workspace fingerprint sees writes, ignores tool directorie
   await appendFile(join(cwd, "a.txt"), "b");
   const appended = await workspaceFingerprint(cwd);
   assert.notEqual(appended, first);
-  for (const directory of [".git", "node_modules", ".deecoo"]) {
+  for (const directory of ["node_modules", ".deecoo", "coverage", "dist", "__pycache__"]) {
     await mkdir(join(cwd, directory), { recursive: true });
     await writeFile(join(cwd, directory, "state"), String(Math.random()));
   }
   assert.equal(await workspaceFingerprint(cwd), appended);
+  await writeFile(join(cwd, "b.txt"), "b");
   assert.equal(await workspaceFingerprint(cwd, { maxEntries: 1 }), undefined);
+
+  const repository = await scratch(t, "deecoo-r3-fingerprint-git-");
+  await writeFile(join(repository, "tracked.txt"), "1");
+  await gitInit(repository, "*.log\nbuild/\n");
+  const clean = await workspaceFingerprint(repository);
+  await mkdir(join(repository, "build"));
+  await writeFile(join(repository, "build", "out.js"), "generated");
+  await writeFile(join(repository, "run.log"), "log");
+  assert.equal(await workspaceFingerprint(repository), clean, "ignored output is not progress");
+  await writeFile(join(repository, "notes.md"), "new");
+  const untracked = await workspaceFingerprint(repository);
+  assert.notEqual(untracked, clean, "an untracked file Git would show is progress");
+  await appendFile(join(repository, "tracked.txt"), "2");
+  assert.notEqual(await workspaceFingerprint(repository), untracked);
 });

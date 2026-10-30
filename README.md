@@ -482,7 +482,7 @@ deecoo --json changes export CHANGE_ID --output ./task.patch
 3. **长作业**：`run_shell` 可后台启动，返回 job ID；支持 status、按字节读取磁盘日志和 stop。普通命令仍默认 30 秒，单次返回约 20KB，完整输出可继续读取。
 4. **变更交付**：任务开始采样工作区实际基线，输出整体 diff，支持按文件或 hunk 接受、撤销和导出 patch。冲突显式返回，普通二进制文件支持无漂移时整体恢复；hunk 和 patch 仅适用于文本，符号链接变更单独报告。
 5. **系统边界**：macOS Seatbelt、Linux bubblewrap 后端提供文件和网络限制；required 不可用时拒绝执行，auto 在返回能力信息中明确降级。off、允许网络和附加可写根需要显式配置。
-6. **Eval 与 CI**：15 个离线真实执行场景覆盖跨文件、多语言、review/no-change、权限、失败、作弊和恢复；push/PR 跑确定性检查，真实 provider 基准必须单独显式触发并提供费用预算。
+6. **Eval 与 CI**：16 个离线真实执行场景覆盖跨文件、多语言、review/no-change、权限、失败、作弊和恢复；push/PR 跑确定性检查，真实 provider 基准必须单独显式触发并提供费用预算。
 7. **上下文与导航**：按模型窗口预留输出并分层分配 token 预算，支持范围读取、文件版本、词法符号与引用导航。范围读取不能假装完整源码，词法导航不等于编译器/LSP 语义分析。
 8. **存储治理**：原子写入、并发锁、版本迁移、损坏备份恢复、任务所有权及可选工具事件；Memory 可查看/编辑/删除/过期清理，项目存储可查看和按期限/容量清理。
 
@@ -743,7 +743,7 @@ deecoo trace
 npm run eval -- --trials 3 --no-report
 ```
 
-`npm run eval`（与 `npm run eval:e2e` 相同）默认运行端到端回归：在独立临时项目执行真实任务、文件工具、命令及 Worker，用不可改的断言检查最终文件、行为和变更范围，失败返回非零。保留 edit_file、apply_patch、Worker 三条修复路径，并扩展为 15 个多类型场景；离线 provider 用于验证 harness，未测量真实模型能力。报告首行标明证据类型和覆盖的用例数。
+`npm run eval`（与 `npm run eval:e2e` 相同）默认运行端到端回归：在独立临时项目执行真实任务、文件工具、命令及 Worker，用不可改的断言检查最终文件、行为和变更范围，失败返回非零。保留 edit_file、apply_patch、Worker 三条修复路径，并扩展为 16 个多类型场景；离线 provider 用于验证 harness，未测量真实模型能力。报告首行标明证据类型和覆盖的用例数。
 
 ```bash
 npm run eval:trace

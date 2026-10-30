@@ -1,5 +1,16 @@
 // Intent is advisory task understanding; mayWrite is the capability contract consumed by tools.
 // Keep negative instructions out of the positive edit detector.
+const ENGLISH_WRITE_WORD = "(?:edit|modify|write|create|implement|update|change|refactor|build|add|fix|delete)";
+// A hyphenated name ("the create-user endpoint", "add-on", "bug-fix") is not a request; "re-create" is.
+const ENGLISH_WRITE_REQUEST = new RegExp(`(?<![\\w-])(?:re-)?${ENGLISH_WRITE_WORD}(?![\\w-])`, "i");
+// A change named as a thing to inspect ("Review the fix", "explain why the build fails",
+// "Review this: the bug fix landed") is the subject of the task, not a request to make one. Only
+// a determiner after an inspection word or a clause start marks the noun; "Apply the fix" or
+// "I need a fix" still ask for a change.
+const INSPECTED_CHANGE = new RegExp(`(?:^|[.:;!?]\\s*|\\b(?:review|explain|analy[sz]e|inspect|examine|audit|evaluate|describe|summari[sz]e|discuss|assess|look\\s+at|about|of|in|on|at|from|after|before|behind|why|how|when|where|whether|if)\\s+)`
+  + `(?:the|a|an|this|that|these|those|its|our|your|my|their|his|her)\\s+(?:[\\w-]+\\s+)?${ENGLISH_WRITE_WORD}(?:e?s)?(?![\\w-])`, "gim");
+const INSPECTED_CHANGE_ZH = /(?:审查|评审|解释|说明|分析|检查|查看|看看|看一下)\s*(?:一下)?\s*(?:这个|这次|这些|此次|该|那个|上次|上一次|之前的|最近的|本次)\s*(?:修复|修改|改动|更改)/g;
+
 export function inferTaskIntent(task, { mode } = {}) {
   const text = String(task ?? "").trim();
   // Paths, @mentions, code, and function names name things; the words inside them are not
@@ -10,9 +21,10 @@ export function inferTaskIntent(task, { mode } = {}) {
   const negativeClauses = [...text.matchAll(negativeWrite), ...text.matchAll(englishNegative)].map((match) => match[0]);
   const writeRestrictions = [...new Map(negativeClauses.flatMap(scopedRestrictions).map((rule) => [JSON.stringify(rule), rule])).values()];
   const positiveText = prose.replace(negativeWrite, " ").replace(englishNegative, " ")
-    .replace(/\b(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:build|test|check)\b/gi, " ");
+    .replace(/\b(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:build|test|check)\b/gi, " ")
+    .replace(INSPECTED_CHANGE, " ").replace(INSPECTED_CHANGE_ZH, " ");
   const positiveWrite = /(修改|编辑|新增|创建|实现|改造|搭建|接入|改动|更改|修复|删除)/i.test(positiveText)
-    || /\b(?:edit|modify|write|create|implement|update|change|refactor|build|add|fix|delete)\b/i.test(positiveText)
+    || ENGLISH_WRITE_REQUEST.test(positiveText)
     || (/(继续|完善)/.test(positiveText) && /(代码|实现|功能|文件|code|file|feature)/i.test(positiveText));
   const hardReadOnly = mode === "read-only" || /(?:只读|仅审查|只审查|仅分析|只分析|read[- ]only|review\s+only|only\s+review)/i.test(text);
   // "any test files" restricts a path class; "any files" restricts the task.
@@ -51,6 +63,10 @@ function withoutCodeReferences(text) {
     // A reference never takes the sentence's closing punctuation with it, or "Do not edit a/b.md.
     // Fix c" would read as one negative clause.
     .replace(/(^|\s)@\S*[^\s.,;:!?，。；：！？]/g, "$1 ")
+    // A file name in another script ("src/修复.js") once something separates it from the prose;
+    // with nothing in between ("审查修复.js", "修改app.js") the boundary is unknowable, so only
+    // the ASCII name below is removed and the words stay.
+    .replace(/(?<=^|[\s/\\"'(（「，。；：、])(?:(?![A-Za-z])[\p{L}\p{N}_-])+(?:\.[\p{L}\p{N}_-]+)*\.[A-Za-z][A-Za-z0-9]{0,7}(?![A-Za-z0-9_])/gu, " ")
     .replace(/(?:[\w.-]+\/)+(?:[\w.-]*[\w-])?/g, " ")
     .replace(/\b[\w-]+\.[A-Za-z]\w{0,7}\b/g, " ")
     .replace(/\b[A-Za-z_$][\w$]*\([^()\n]*\)/g, " ");

@@ -716,14 +716,14 @@ async function repeatsEarlierObservation(ledger, { name, args }, result, fileRev
   const key = toolSignature(name, args) + (typeof args?.cwd === "string" ? "@" + args.cwd : "");
   const outcome = observationOutcome(name, result);
   const prior = ledger.get(key);
-  const entry = { fileRevision, outcome };
+  // A command can change files without a file-change event (appending to a log), so it repeats
+  // only when the workspace is measurably unchanged since the previous identical run. Every run
+  // records the state it left, so the second identical run can already be compared; an unknown
+  // state is progress.
+  const entry = { fileRevision, outcome, workspace: name === "run_shell" ? await workspaceState() : undefined };
   ledger.set(key, entry);
   if (!prior || prior.fileRevision !== fileRevision || prior.outcome !== outcome) return false;
   if (name !== "run_shell") return true;
-  // A command can change files without a file-change event (appending to a log, writing build
-  // output), so it repeats only when the workspace is measurably unchanged since the previous
-  // identical run. The first suspected repeat records that baseline; an unknown state is progress.
-  entry.workspace = await workspaceState();
   return prior.workspace !== undefined && entry.workspace !== undefined && prior.workspace === entry.workspace;
 }
 
