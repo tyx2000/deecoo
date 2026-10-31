@@ -171,16 +171,8 @@ async function requestAnthropicStream(config, request, handlers) {
     });
     if (!response.ok) throw await apiError(response);
     if (!response.body) throw new Error("Anthropic API returned no stream body.");
-    return readAnthropicSse(response.body, {
-      ...handlers,
-      onContent(content) {
-        progress.emitted = true;
-        handlers.onContent?.(content);
-      },
-      onToolUse() {
-        progress.emitted = true;
-      },
-    });
+    // Text, tool_use and other content deltas all restart the idle timeout and rule out a retry.
+    return readAnthropicSse(response.body, { ...handlers, onDelta: progress.delta });
   });
 }
 
@@ -208,6 +200,7 @@ async function readAnthropicSse(body, handlers) {
       outputTokens = Number(event.message?.usage?.output_tokens ?? 0);
     } else if (event.type === "content_block_start") {
       const block = event.content_block ?? {};
+      if ((block.type === "text" && block.text) || block.type === "tool_use") handlers.onDelta?.();
       if (block.type === "text" && block.text) {
         message.content += block.text;
         handlers.onContent?.(block.text);
@@ -217,8 +210,8 @@ async function readAnthropicSse(body, handlers) {
         text: block.text ?? "",
         arguments: block.type === "tool_use" && Object.keys(block.input ?? {}).length ? JSON.stringify(block.input) : "",
       });
-      if (block.type === "tool_use") handlers.onToolUse?.();
     } else if (event.type === "content_block_delta") {
+      handlers.onDelta?.();
       handlers.onProgress?.(event.delta?.text ?? event.delta?.partial_json ?? event.delta?.thinking ?? "");
       const block = blocks.get(event.index) ?? { type: event.delta?.type === "text_delta" ? "text" : "tool_use", text: "", arguments: "" };
       if (event.delta?.type === "text_delta") {

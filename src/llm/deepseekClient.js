@@ -53,13 +53,8 @@ async function requestChatCompletionStream(config, request, handlers) {
       throw new Error("API returned no stream body.");
     }
 
-    return readChatCompletionSse(response.body, {
-      ...handlers,
-      onContent(content) {
-        progress.emitted = true;
-        handlers.onContent?.(content);
-      },
-    });
+    // Text, reasoning and tool-call deltas all restart the idle timeout and rule out a retry.
+    return readChatCompletionSse(response.body, { ...handlers, onDelta: progress.delta });
   });
 }
 
@@ -140,6 +135,8 @@ function applyChatDelta(message, delta, handlers) {
   // Every generated piece counts toward output, including reasoning and tool arguments.
   const generated = (delta.content ?? "") + (delta.reasoning_content ?? "")
     + (delta.tool_calls ?? []).map((call) => call.function?.arguments ?? "").join("");
+  // A tool-call header (id and name, empty arguments) is generated output too.
+  if (generated || delta.tool_calls?.length) handlers.onDelta?.();
   if (generated) handlers.onProgress?.(generated);
   if (delta.role) message.role = delta.role;
   if (delta.content) {

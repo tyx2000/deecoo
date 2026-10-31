@@ -8,8 +8,12 @@ export function retryAttempts(config) {
   return Math.min(5, Math.max(1, config.retryAttempts ?? 5));
 }
 
-// Runs one request attempt at a time with its own timeout and abort link. An attempt that has
-// already streamed output to the caller (progress.emitted) is never repeated.
+// Runs one request attempt at a time with its own idle timeout and abort link. timeoutMs bounds
+// silence, not total duration: every streamed delta (text, reasoning or tool arguments) restarts
+// it through progress.delta(), so a long healthy stream is never cut off, while a request that
+// never sends output and a stream that stalls still time out. The task-wide deadline arrives as
+// the caller's signal. An attempt that has already streamed output to the caller
+// (progress.emitted) is never repeated: a retry would start over and bill the output twice.
 export async function withRetries({ attempts, signal, timeoutMs, onRuntimeEvent, beforeAttempt, onAttemptError }, attemptRequest) {
   let lastError;
   let attempt = 1;
@@ -21,8 +25,14 @@ export async function withRetries({ attempts, signal, timeoutMs, onRuntimeEvent,
     throwIfAborted(signal);
     const controller = new AbortController();
     const removeAbortListener = linkAbortSignal(signal, controller);
-    const timeout = setTimeout(() => controller.abort(new Error("Request timed out.")), timeoutMs);
-    const progress = { emitted: false };
+    const timeout = setTimeout(() => controller.abort(new Error(`Request timed out: no response or model output for ${timeoutMs} ms.`)), timeoutMs);
+    const progress = {
+      emitted: false,
+      delta() {
+        progress.emitted = true;
+        if (!controller.signal.aborted) timeout.refresh();
+      },
+    };
     let delayMs;
     try {
       return await attemptRequest({ signal: controller.signal, attempt, progress });
