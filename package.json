@@ -1,6 +1,6 @@
 {
   "name": "deecoo",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "private": true,
   "type": "module",
   "bin": {
@@ -23,5 +23,5 @@
     "highlight.js": "^11.11.1",
     "markdown-it": "^14.2.0"
   },
-  "releasedAt": "2026-11-02T12:54:12+08:00"
+  "releasedAt": "2026-11-02T14:17:15+08:00"
 }

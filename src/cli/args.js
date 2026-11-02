@@ -66,6 +66,9 @@ export function parseArgs(argv) {
       args.yes = true;
     } else if (arg === "--yes-files" || arg === "--auto-approve-files") {
       args.yesFiles = true;
+    } else if (!args.command && args.taskParts.length === 0 && arg === "version") {
+      args.command = "version";
+      args.version = true;
     } else if (!args.command && args.taskParts.length === 0 && (arg === "config" || ["jobs", "memory", "storage", "changes"].includes(arg) || APP_COMMANDS.has(arg))) {
       args.command = arg;
     } else if (args.command === "config" && !args.configAction) {
@@ -116,6 +119,7 @@ export function printHelp() {
     "Usage:",
     "  deecoo [options]",
     "  deecoo [options] <task>",
+    "  deecoo version",
     "  deecoo model",
     "  deecoo resume",
     "  deecoo continue",

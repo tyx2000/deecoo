@@ -52,13 +52,13 @@ async function mainInner(args) {
   }
   await applyPositionalCwd(args);
   if (args.help) {
-    if (args.outputFormat) { console.log(JSON.stringify({ schemaVersion: 1, type: "help", usage: "deecoo [options] <task>", commands: [...APP_COMMANDS, "jobs", "memory", "storage", "changes"], machineOptions: ["--version", "--json", "--jsonl", "--non-interactive", "--sandbox", "--sandbox-network", "--acceptance", "--context-window", "--output-reserve", "--privacy", "--retention-days", "--trust-project-env"] })); return; }
+    if (args.outputFormat) { console.log(JSON.stringify({ schemaVersion: 1, type: "help", usage: "deecoo [options] <task>", commands: [...APP_COMMANDS, "version", "jobs", "memory", "storage", "changes"], machineOptions: ["--version", "--json", "--jsonl", "--non-interactive", "--sandbox", "--sandbox-network", "--acceptance", "--context-window", "--output-reserve", "--privacy", "--retention-days", "--trust-project-env"] })); return; }
     printHelp();
     return;
   }
 
   if (args.command === "help") {
-    if (args.outputFormat) { console.log(JSON.stringify({ schemaVersion: 1, type: "help", commands: [...APP_COMMANDS, "jobs", "memory", "storage", "changes"] })); return; }
+    if (args.outputFormat) { console.log(JSON.stringify({ schemaVersion: 1, type: "help", commands: [...APP_COMMANDS, "version", "jobs", "memory", "storage", "changes"] })); return; }
     printSlashHelp();
     return;
   }

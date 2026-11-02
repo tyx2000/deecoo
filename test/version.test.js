@@ -28,12 +28,23 @@ async function commitFixture(root) {
 }
 const inspect = async (root, cwd, env) => JSON.parse((await exec(process.execPath, [join(root, "inspect.mjs")], { cwd, env, timeout: 8000 })).stdout);
 
-test("version flags have aliases and respect the literal task delimiter", () => {
+test("version flags and subcommand respect command boundaries and the literal task delimiter", () => {
   assert.equal(parseArgs(["--version"]).version, true);
   assert.equal(parseArgs(["-v"]).version, true);
-  const literal = parseArgs(["--", "--version"]);
-  assert.equal(literal.version, false);
-  assert.equal(literal.task, "--version");
+  for (const argv of [["version"], ["--json", "version"], ["version", "--jsonl"]]) {
+    const parsed = parseArgs(argv);
+    assert.equal(parsed.version, true);
+    assert.equal(parsed.command, "version");
+    assert.equal(parsed.task, "");
+  }
+  for (const word of ["--version", "version"]) {
+    const literal = parseArgs(["--", word]);
+    assert.equal(literal.version, false);
+    assert.equal(literal.task, word);
+  }
+  assert.equal(parseArgs(["explain", "version"]).version, false);
+  assert.equal(parseArgs(["config", "version"]).version, false);
+  assert.equal(parseArgs(["jobs", "version"]).version, false);
 });
 
 test("actual version CLI is offline, ignores settings/workspace setup, and supports machine output", async () => fixture(async (root) => {
@@ -42,7 +53,8 @@ test("actual version CLI is offline, ignores settings/workspace setup, and suppo
   await writeFile(join(root, ".env"), "DEECOO_PROVIDER=not-a-provider\n");
   const preloader = join(root, "no-network.mjs");
   await writeFile(preloader, 'globalThis.fetch = () => { throw new Error("Version must not access the network"); };\n');
-  for (const flags of [["--version"], ["-v"], ["--json", "--version"], ["--jsonl", "--version"], ["--non-interactive", "--version"]]) {
+  for (const flags of [["--version"], ["-v"], ["version"], ["--json", "version"], ["version", "--json"], ["version", "--jsonl"],
+    ["--json", "--version"], ["--jsonl", "--version"], ["--non-interactive", "--version"], ["--non-interactive", "version"]]) {
     const result = await exec(process.execPath, ["--import", preloader, cli, "--settings", settings, "--cwd", join(root, "does-not-exist"), ...flags],
       { cwd: root, env: envFor(root), timeout: 8000 });
     assert.equal(result.stderr, "");
