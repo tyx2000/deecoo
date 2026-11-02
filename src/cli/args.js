@@ -39,6 +39,7 @@ export function parseArgs(argv) {
     else if (arg === "--dry-run") args.dryRun = true;
     else if (arg === "--include-expired") args.includeExpired = true;
     else if (arg === "--durable-tool-events") args.durableToolEvents = true;
+    else if (arg === "--trust-project-env") args.trustProjectEnv = true;
     else if (arg === "--hunk") { args.hunkIds ??= []; args.hunkIds.push(requiredOptionValue(argv, i, arg)); i += 1; }
     else if (arg === "--help" || arg === "-h") {
       args.help = true;
@@ -139,6 +140,7 @@ export function printHelp() {
     "Options:",
     "  --cwd <path>         Workspace directory. Defaults to current directory.",
     "  --settings <path>    App settings file or directory. Defaults to " + appSettingsPath() + ".",
+    "  --trust-project-env Allow this workspace's .env to supply provider, model and API key.",
     "  --task-mode <mode>  Explicit edit/debug/review/analysis/command/read-only intent.",
     "  --model <model>     Override DEECOO_MODEL.",
     "  --yes, -y           Auto-approve guarded shell commands.",

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -11,6 +11,7 @@ import {
   setAutoApproveAllShellCommands,
 } from "../src/config/settings.js";
 import { createToolRuntime } from "../src/tools/runtime.js";
+import { shellApprovalKey } from "../src/permissions/shellApprovals.js";
 
 test("--yes prompter auto-approves shell commands only", async () => {
   const prompt = createPrompter(true);
@@ -116,7 +117,7 @@ test("always shell approval persists the exact command in settings", async () =>
   assert.equal(first.ok, true);
   assert.equal(second.ok, true);
   assert.equal(prompts, 1);
-  assert.deepEqual(settings.permissions.shell.approvedCommands, [command]);
+  assert.deepEqual(settings.permissions.shell.approvedCommands, [shellApprovalKey(await realpath(workspace), command)]);
 
   const reloadedTools = createToolRuntime({
     cwd: workspace,
@@ -212,7 +213,7 @@ test("config reset-shell-approvals clears both per-command approvals and always-
   await setAutoApproveAllShellCommands({ settingsPath: settingsDir });
 
   const before = await loadSettingsEnv({ settingsPath: settingsDir });
-  assert.deepEqual(before.permissions.shell.approvedCommands, ["chmod 755 ."]);
+  assert.deepEqual(before.permissions.shell.approvedCommands, [shellApprovalKey(await realpath(process.cwd()), "chmod 755 .")]);
   assert.equal(before.permissions.shell.autoApproveAll, true);
 
   await resetShellApprovals({ settingsPath: settingsDir });

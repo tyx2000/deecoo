@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <inttypes.h>
 
 static int fail(const char *operation) {
   int code = errno ? errno : EINVAL;
@@ -72,6 +73,38 @@ static int regular(int parent_fd, const char *leaf) {
   return 0;
 }
 
+static void identity(const struct stat *info) {
+  printf("{\"dev\":\"%ju\",\"ino\":\"%ju\"}\n", (uintmax_t)info->st_dev, (uintmax_t)info->st_ino);
+}
+
+// Rollback is conditional on the object the earlier mutation actually produced,
+// not merely on a path still naming some regular file. Compare in the same native
+// operation that removes/moves the entry, before any directory entry is changed.
+static int expected_file(int fd, const char *leaf, char **args, struct stat *info) {
+  char *end = NULL;
+  unsigned long long size = strtoull(args[2], &end, 10);
+  if (*end || size > 268435456) { errno = EFBIG; return fail("comparison size"); }
+  char *expected = malloc((size_t)size + 1), *actual = malloc((size_t)size + 1);
+  if (!expected || !actual) { free(expected); free(actual); errno = ENOMEM; return fail("comparison memory"); }
+  int result = 0, file = -1;
+  if (read_exact(0, expected, (size_t)size) < 0) { result = fail("comparison input"); goto done; }
+  file = openat(fd, leaf, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+  if (file < 0) { result = fail("comparison file"); goto done; }
+  if (fstat(file, info) < 0 || !S_ISREG(info->st_mode) || info->st_nlink != 1) { errno = EINVAL; result = fail("comparison regular file"); goto done; }
+  char dev[32], ino[32];
+  snprintf(dev, sizeof(dev), "%ju", (uintmax_t)info->st_dev);
+  snprintf(ino, sizeof(ino), "%ju", (uintmax_t)info->st_ino);
+  struct stat entry;
+  if ((*args[0] && strcmp(args[0], dev)) || (*args[1] && strcmp(args[1], ino))
+      || info->st_size != (off_t)size || read_exact(file, actual, (size_t)size) < 0 || memcmp(expected, actual, (size_t)size)
+      || fstatat(fd, leaf, &entry, AT_SYMLINK_NOFOLLOW) < 0 || entry.st_dev != info->st_dev || entry.st_ino != info->st_ino) {
+    fputs("file changed before conditional rollback or move\n", stderr); result = 240;
+  }
+done:
+  if (file >= 0) close(file);
+  free(expected); free(actual); return result;
+}
+
 int main(int argc, char **argv) {
   struct stat root;
   if (argc < 3 || fstat(3, &root) < 0 || !S_ISDIR(root.st_mode)) { errno = EINVAL; return fail("workspace descriptor"); }
@@ -102,11 +135,18 @@ int main(int argc, char **argv) {
       free(actual);
     }
     if (!result && (ftruncate(file, 0) < 0 || lseek(file, 0, SEEK_SET) < 0 || write_exact(file, body, (size_t)size) < 0)) result = fail("write content");
+    if (!result) identity(&info);
     close(file); free(old); free(body);
   } else if (!strcmp(op, "unlink")) {
-    if (regular(fd, leaf) < 0 || unlinkat(fd, leaf, 0) < 0) result = fail("remove file");
+    struct stat info;
+    if (argc != 6) { errno = EINVAL; result = fail("remove arguments"); goto done; }
+    result = expected_file(fd, leaf, argv + 3, &info);
+    if (!result && unlinkat(fd, leaf, 0) < 0) result = fail("remove file");
   } else if (!strcmp(op, "move")) {
-    if (argc != 4 || regular(fd, leaf) < 0) { result = fail("move source"); goto done; }
+    struct stat info;
+    if (argc == 7) result = expected_file(fd, leaf, argv + 4, &info);
+    else if (argc != 4 || regular(fd, leaf) < 0 || fstatat(fd, leaf, &info, AT_SYMLINK_NOFOLLOW) < 0) result = fail("move source");
+    if (result) goto done;
     char *target = NULL;
     int target_fd = parent(argv[3], 1, &target);
     if (target_fd < 0) { result = fail("move parent"); goto done; }
@@ -114,6 +154,7 @@ int main(int argc, char **argv) {
     // until the source is removed, and restore the link if unlinking the source fails.
     if (linkat(fd, leaf, target_fd, target, 0) < 0) result = fail("move target");
     else if (unlinkat(fd, leaf, 0) < 0) { int e = errno; unlinkat(target_fd, target, 0); errno = e; result = fail("move source removal"); }
+    if (!result) identity(&info);
     close(target_fd); free(target);
   } else { errno = EINVAL; result = fail("operation"); }
 done:

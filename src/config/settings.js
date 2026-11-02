@@ -2,6 +2,8 @@ import { access, chmod, mkdir, readFile, realpath, writeFile } from "node:fs/pro
 import { homedir } from "node:os";
 import { dirname, extname, resolve } from "node:path";
 import { normalizeShellCommand } from "../permissions/shellPolicy.js";
+import { parseShellApprovalKey, shellApprovalKey } from "../permissions/shellApprovals.js";
+import { recordEnvironmentSource } from "./environmentSources.js";
 import {
   PROVIDER_NAMES,
   inferProviderFromModel,
@@ -41,12 +43,13 @@ export async function loadSettingsEnv({ settingsPath, workspace = process.cwd() 
   };
 }
 
-export function applySettingsEnv(env, { overrideKeys = [] } = {}) {
+export function applySettingsEnv(env, { overrideKeys = [], targetEnv = process.env } = {}) {
   const override = new Set(overrideKeys);
   for (const [key, value] of Object.entries(env)) {
     if (!isSupportedSettingsKey(key)) continue;
-    if (process.env[key] !== undefined && !override.has(key)) continue;
-    process.env[key] = String(value);
+    if (targetEnv[key] !== undefined && !override.has(key)) continue;
+    targetEnv[key] = String(value);
+    recordEnvironmentSource(targetEnv, key, "settings.json");
   }
 }
 
@@ -95,9 +98,9 @@ export async function writeProviderModel({ settingsPath, provider, model }) {
 
 export const SHELL_APPROVAL_POLICY_VERSION = 2;
 
-export async function addApprovedShellCommand({ settingsPath, command, workspace = process.cwd(), scope = "workspace" }) {
-  const normalizedCommand = normalizeShellCommand(command);
-  if (!normalizedCommand) throw new Error("command is required");
+export async function addApprovedShellCommand({ settingsPath, command, workspace = process.cwd(), cwd = workspace, scope = "workspace" }) {
+  if (!normalizeShellCommand(command)) throw new Error("command is required");
+  const normalizedCommand = parseShellApprovalKey(command) ? command : shellApprovalKey(await canonicalWorkspacePath(cwd), command);
   const identity = await approvalIdentity({ workspace, scope });
 
   const { path, shell } = await updateShellPermissions({
@@ -299,9 +302,10 @@ export async function resolveShellPermissions(permissions, { workspace = process
   return { shell: {
     ...shell,
     workspace: canonicalWorkspace,
-    approvedCommands: [...new Set(shell.approvals.filter(applies).map((entry) => entry.command))],
+    approvedCommands: [...new Set(shell.approvals.filter(applies).map((entry) => entry.command).filter(parseShellApprovalKey))],
     autoApproveAll: shell.autoApprovals.some(applies),
-    legacyPending: shell.legacy.approvedCommands.length > 0 || shell.legacy.autoApproveAll,
+    legacyPending: shell.legacy.approvedCommands.length > 0 || shell.legacy.autoApproveAll
+      || shell.approvals.some((entry) => applies(entry) && !parseShellApprovalKey(entry.command)),
   } };
 }
 

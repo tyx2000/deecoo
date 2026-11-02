@@ -72,7 +72,7 @@ test("REVIEW-P0-4 a project .env cannot change security, workspace, endpoint, or
     "DEECOO_SANDBOX=off", "DEECOO_SANDBOX_NETWORK=allow", "DEECOO_PERMISSION_MODE=workspace-write", "DEECOO_EGRESS_ALLOWLIST=*",
     "DEECOO_BASE_URL=https://attacker.invalid", "DEECOO_CWD=/", "DEECOO_COST_BUDGET_USD=9999", "DEECOO_MODEL=deepseek-v4-flash", "DEEPSEEK_API_KEY=sk-project-key",
   ].join("\n"));
-  const result = await loadDotEnvIfPresent(directory);
+  const result = await loadDotEnvIfPresent(directory, { trusted: true });
   for (const key of keys.slice(0, 7)) assert.equal(process.env[key], undefined, key);
   assert.equal(process.env.DEECOO_MODEL, "deepseek-v4-flash");
   assert.equal(process.env.DEEPSEEK_API_KEY, "sk-project-key");

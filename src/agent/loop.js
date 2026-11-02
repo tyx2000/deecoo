@@ -31,7 +31,7 @@ import { linkSignals } from "../harness/budget.js";
 import { compactToolResult } from "../tools/projection.js";
 export { compactToolResult } from "../tools/projection.js";
 import { appendEffects } from "../harness/effects.js";
-import { workspaceFingerprint } from "../harness/workspaceFingerprint.js";
+import { explicitProgressPaths, workspaceFingerprint } from "../harness/workspaceFingerprint.js";
 import { buildBudgetedContext, buildContextBudget, contextWindowHint, estimateTokens, measureContextMessages } from "../context/builder.js";
 import { createHash, randomUUID } from "node:crypto";
 import { redact } from "../observability/audit.js";
@@ -112,6 +112,7 @@ export async function runAgent({
   let finalValidationAttempt = 0;
   let noProgressSteps = 0;
   const outcomeLedger = new Map();
+  const progressPaths = explicitProgressPaths(task);
   let acceptance;
   let contextBudget = buildContextBudget({ contextWindow: contextWindow ?? client.capabilities?.contextWindow ?? 128000,
     outputReserve: Math.max(outputReserve ?? 0, maxTokens ?? outputReserve ?? client.capabilities?.outputReserve ?? 4096) });
@@ -479,7 +480,7 @@ export async function runAgent({
       const fileRevision = effects.filter((event) => event.type === "file-change" || event.type === "workspace-uncertain").length;
       const repeated = [];
       for (const item of evaluated) {
-        repeated.push(await repeatsEarlierObservation(outcomeLedger, item, executedById.get(item.call.id).result, fileRevision, () => workspaceFingerprint(cwd)));
+        repeated.push(await repeatsEarlierObservation(outcomeLedger, item, executedById.get(item.call.id).result, fileRevision, () => workspaceFingerprint(cwd, { explicitPaths: progressPaths })));
       }
       noProgressSteps = repeated.every(Boolean) ? noProgressSteps + 1 : 0;
       if (noProgressSteps >= MAX_NO_PROGRESS_STEPS) {

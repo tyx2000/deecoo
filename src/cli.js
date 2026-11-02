@@ -52,7 +52,7 @@ async function mainInner(args) {
   }
   await applyPositionalCwd(args);
   if (args.help) {
-    if (args.outputFormat) { console.log(JSON.stringify({ schemaVersion: 1, type: "help", usage: "deecoo [options] <task>", commands: [...APP_COMMANDS, "jobs", "memory", "storage", "changes"], machineOptions: ["--version", "--json", "--jsonl", "--non-interactive", "--sandbox", "--sandbox-network", "--acceptance", "--context-window", "--output-reserve", "--privacy", "--retention-days"] })); return; }
+    if (args.outputFormat) { console.log(JSON.stringify({ schemaVersion: 1, type: "help", usage: "deecoo [options] <task>", commands: [...APP_COMMANDS, "jobs", "memory", "storage", "changes"], machineOptions: ["--version", "--json", "--jsonl", "--non-interactive", "--sandbox", "--sandbox-network", "--acceptance", "--context-window", "--output-reserve", "--privacy", "--retention-days", "--trust-project-env"] })); return; }
     printHelp();
     return;
   }
@@ -66,13 +66,11 @@ async function mainInner(args) {
   const settings = await loadSettingsEnv({ settingsPath: args.settings });
   applySettingsEnv(settings.env, { overrideKeys: ["DEECOO_MODEL", "DEECOO_THEME"] });
 
-  const dotEnvResults = [await loadDotEnvIfPresent(process.cwd())];
-  if (args.cwd) {
-    dotEnvResults.push(await loadDotEnvIfPresent(resolve(args.cwd)));
-  }
-  if (!args.cwd && process.env.DEECOO_CWD) {
-    dotEnvResults.push(await loadDotEnvIfPresent(resolve(process.env.DEECOO_CWD)));
-  }
+  // Only the selected workspace is eligible; trusting it must not also trust an unrelated
+  // repository from which the command happened to be launched. The trust switch is read before
+  // any project file is loaded and cannot be enabled by that file.
+  const trustedProjectEnv = args.trustProjectEnv === true || /^(?:1|true|yes|on)$/i.test(process.env.DEECOO_TRUST_PROJECT_ENV ?? "");
+  const dotEnvResults = [await loadDotEnvIfPresent(resolve(args.cwd ?? process.env.DEECOO_CWD ?? process.cwd()), { trusted: trustedProjectEnv })];
   for (const notice of dotEnvResults.map(formatIgnoredDotEnvKeys).filter(Boolean)) console.error(notice);
 
   if (args.command === "config") {
@@ -160,7 +158,9 @@ async function mainInner(args) {
   if (!args.nonInteractive) printStartupInfo([
     ["Version", formatVersion(await getVersionInfo())],
     ["Workspace", cwd],
-    ["Provider", config.provider],
+    ["Provider", config.provider + " (" + config.configSources.provider + ")"],
+    ["Endpoint", displayEndpoint(config.baseUrl) + " (" + config.configSources.baseUrl + ")"],
+    ["Credentials", config.apiKeyEnv + " from " + config.configSources.apiKey],
     ["Model", config.model],
     ["Context", `${client.capabilities.contextWindow} tokens (${client.capabilities.contextWindowSource})`],
     ["Permissions", tools.getPermissionMode()],
@@ -331,6 +331,14 @@ async function runInteractiveSession({
   }
 }
 
+
+function displayEndpoint(value) {
+  try {
+    const url = new URL(value);
+    url.username = ""; url.password = ""; url.search = ""; url.hash = "";
+    return url.href.replace(/\/$/, "");
+  } catch { return "configured endpoint"; }
+}
 
 async function runInterruptibleTask(params) {
   const interrupt = installTaskInterrupt(params.config?.nonInteractive);

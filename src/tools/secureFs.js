@@ -18,14 +18,14 @@ function run(executable, args, { input, root, cwd, env, timeoutMs = 0 } = {}) {
     const timer = timeoutMs ? setTimeout(() => {
       try { if (detached && child.pid) process.kill(-child.pid, "SIGKILL"); else child.kill("SIGKILL"); } catch {}
     }, timeoutMs) : undefined;
-    let stderr = "";
-    child.stdout.resume();
+    let stderr = "", stdout = "";
+    child.stdout.on("data", bytes => { stdout = (stdout + bytes).slice(-4096); });
     child.stderr.on("data", bytes => { stderr = (stderr + bytes).slice(-4096); });
     child.once("error", error => { clearTimeout(timer); reject(error); });
     child.stdin.on("error", () => {});
     child.once("close", (code, signal) => {
       clearTimeout(timer);
-      if (code === 0) return resolve();
+      if (code === 0) return resolve(stdout);
       let errorCode = "SECURE_FS_FAILED";
       if (code === 240) errorCode = "FILE_CHANGED_BEFORE_WRITE";
       else if (Number.isInteger(code) && code > 0 && code < 240) { try { errorCode = getSystemErrorName(-code); } catch {} }
@@ -99,7 +99,12 @@ async function mutate(workspace, operation, path, options = {}) {
       assertSafePath(workspace, options.target);
       args.push(relative(workspace, options.target));
     }
-    await run(executable, args, { input, root });
+    if ((operation === "unlink" || operation === "move") && options.expectedContent !== undefined) {
+      input = Buffer.from(options.expectedContent, "utf8");
+      args.push(options.expectedIdentity?.dev ?? "", options.expectedIdentity?.ino ?? "", String(input.length));
+    }
+    const output = await run(executable, args, { input, root });
+    return output.trim() ? JSON.parse(output) : undefined;
   } finally { await root.close(); }
 }
 

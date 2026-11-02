@@ -14,6 +14,7 @@ import {
 import { countLineChanges, countOccurrences, unifiedDiff } from "./textDiff.js";
 import { secureMove, secureUnlink, secureWrite, workspaceIdentity } from "./secureFs.js";
 import { taskWritePathViolation } from "../permissions/taskPolicy.js";
+import { isPreservedJsonNumber, parseLosslessJson, stringifyLosslessJson } from "./losslessJson.js";
 
 export async function listFiles(workspace, getRealWorkspace, args) {
   const directory = args.directory ?? ".";
@@ -515,7 +516,7 @@ async function assertWriteTarget(workspace, getRealWorkspace, path, permissionSt
 async function writeWorkspaceText(workspace, getRealWorkspace, path, content, { create = false, original = "", permissionState, signal } = {}) {
   await assertWriteTarget(workspace, getRealWorkspace, path, permissionState);
   try {
-    await secureWrite(workspace, path, content, { create, original, signal, identity: workspaceIdentity(workspace, permissionState) });
+    return await secureWrite(workspace, path, content, { create, original, signal, identity: workspaceIdentity(workspace, permissionState) });
   } catch (error) {
     if (error.workspaceMutationUncertain) error.uncertainPaths = [relative(workspace, path)];
     throw error;
@@ -683,13 +684,14 @@ async function applyPatchSetPlan(workspace, getRealWorkspace, plan, permissionSt
     await writeWorkspaceText(workspace, getRealWorkspace, plan.path, plan.content, { original: plan.original, permissionState, signal });
   } else if (plan.action === "create") {
     throwIfAborted(signal);
-    await writeWorkspaceText(workspace, getRealWorkspace, plan.path, plan.content, { create: true, permissionState, signal });
+    plan.mutationIdentity = await writeWorkspaceText(workspace, getRealWorkspace, plan.path, plan.content, { create: true, permissionState, signal });
   } else if (plan.action === "move") {
     await assertPatchSetMoveStillCurrent(plan);
     throwIfAborted(signal);
     await assertWriteTarget(workspace, getRealWorkspace, plan.fromPath, permissionState);
     await assertWriteTarget(workspace, getRealWorkspace, plan.path, permissionState);
-    await secureMove(workspace, plan.fromPath, plan.path, { signal, identity: workspaceIdentity(workspace, permissionState) });
+    plan.mutationIdentity = await secureMove(workspace, plan.fromPath, plan.path, { signal, expectedContent: plan.original,
+      identity: workspaceIdentity(workspace, permissionState) });
   }
 }
 
@@ -716,11 +718,13 @@ async function rollbackPatchSetPlan(workspace, getRealWorkspace, plan, permissio
     await writeWorkspaceText(workspace, getRealWorkspace, plan.path, plan.original, { original: plan.content, permissionState });
   } else if (plan.action === "create") {
     await assertWriteTarget(workspace, getRealWorkspace, plan.path, permissionState);
-    await secureUnlink(workspace, plan.path, { identity: workspaceIdentity(workspace, permissionState) });
+    await secureUnlink(workspace, plan.path, { expectedContent: plan.content, expectedIdentity: plan.mutationIdentity,
+      identity: workspaceIdentity(workspace, permissionState) });
   } else if (plan.action === "move") {
     await assertWriteTarget(workspace, getRealWorkspace, plan.path, permissionState);
     await assertWriteTarget(workspace, getRealWorkspace, plan.fromPath, permissionState);
-    await secureMove(workspace, plan.path, plan.fromPath, { identity: workspaceIdentity(workspace, permissionState) });
+    await secureMove(workspace, plan.path, plan.fromPath, { expectedContent: plan.original, expectedIdentity: plan.mutationIdentity,
+      identity: workspaceIdentity(workspace, permissionState) });
   }
 }
 
@@ -920,15 +924,20 @@ function planStructuredPatch(original, hunks) {
   }
 
   const next = [...parsed.lines];
+  const endings = [...parsed.endings];
   let offset = 0;
   for (const hunk of normalized) {
     const oldIndex = hunk.oldStart - 1 + offset;
+    const localEnding = endings[oldIndex] || endings[oldIndex - 1] || parsed.lineEnding;
+    const replacementEndings = hunk.newLines.map((_line, index) =>
+      index < hunk.oldLines.length ? endings[oldIndex + index] : localEnding);
     next.splice(oldIndex, hunk.oldLines.length, ...hunk.newLines);
+    endings.splice(oldIndex, hunk.oldLines.length, ...replacementEndings);
     offset += hunk.newLines.length - hunk.oldLines.length;
   }
   return {
     ok: true,
-    content: serializeTextLines(next, parsed),
+    content: serializeTextLines(next, parsed, endings),
     hunks: normalized,
   };
 }
@@ -953,7 +962,7 @@ function resolveHunkStart(lines, { oldStart, oldLines }) {
 function planJsonPatch(original, operations) {
   let value;
   try {
-    value = JSON.parse(original);
+    value = parseLosslessJson(original);
   } catch (error) {
     return { ok: false, error: `invalid JSON: ${error.message}` };
   }
@@ -973,7 +982,7 @@ function planJsonPatch(original, operations) {
 
   return {
     ok: true,
-    content: JSON.stringify(value, null, 2) + "\n",
+    content: stringifyLosslessJson(value) + "\n",
   };
 }
 
@@ -1026,7 +1035,7 @@ function resolveJsonParent(root, segments) {
   const parentSegments = segments.slice(0, -1);
   const key = segments.at(-1);
   const parent = getJsonValue(root, parentSegments);
-  if (parent === undefined || parent === null || typeof parent !== "object") {
+  if (parent === undefined || parent === null || typeof parent !== "object" || isPreservedJsonNumber(parent)) {
     return { ok: false, error: "parent path does not exist or is not an object/array" };
   }
   return { ok: true, parent, key };
@@ -1036,6 +1045,7 @@ function getJsonValue(root, segments) {
   let current = root;
   for (const segment of segments) {
     if (current === undefined || current === null) return undefined;
+    if (isPreservedJsonNumber(current)) return undefined;
     if (Array.isArray(current)) {
       const index = arrayIndex(current, segment);
       if (index === undefined || index >= current.length) return undefined;
@@ -1058,16 +1068,23 @@ function arrayIndex(array, key, { allowAppend = false } = {}) {
 
 function parseTextLines(text) {
   const value = String(text ?? "");
-  if (value === "") return { lines: [], trailingNewline: false, lineEnding: "\n" };
+  if (value === "") return { lines: [], endings: [], trailingNewline: false, lineEnding: "\n" };
   const lineEnding = value.includes("\r\n") ? "\r\n" : "\n";
   const trailingNewline = value.endsWith("\n");
   const lines = value.split(/\r?\n/);
   if (trailingNewline) lines.pop();
-  return { lines, trailingNewline, lineEnding };
+  const endings = [...value.matchAll(/\r?\n/g)].map(([ending]) => ending);
+  if (!trailingNewline) endings.push("");
+  return { lines, endings, trailingNewline, lineEnding };
 }
 
-function serializeTextLines(lines, parsed) {
-  return lines.join(parsed.lineEnding) + (parsed.trailingNewline ? parsed.lineEnding : "");
+function serializeTextLines(lines, parsed, endings) {
+  if (!lines.length) return parsed.trailingNewline ? parsed.lineEnding : "";
+  return lines.map((line, index) => {
+    const last = index === lines.length - 1;
+    const ending = last && !parsed.trailingNewline ? "" : endings[index] || parsed.lineEnding;
+    return line + ending;
+  }).join("");
 }
 
 function sameLines(left, right) {

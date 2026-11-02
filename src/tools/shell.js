@@ -1,4 +1,5 @@
-import { classifyShellCommand, gitInvocationDirectories, normalizeShellCommand } from "../permissions/shellPolicy.js";
+import { classifyShellCommand, gitInvocationDirectories } from "../permissions/shellPolicy.js";
+import { shellApprovalKey } from "../permissions/shellApprovals.js";
 import { repositoryProgramConfigKeys } from "../permissions/gitPolicy.js";
 import { createExecutionBackend } from "../execution/backend.js";
 import { realpath } from "node:fs/promises";
@@ -25,7 +26,8 @@ export async function runShell(workspace, args, prompter, allowShellWithoutPromp
   try { executionCwd = await validateExecutionCwd(workspace, args.cwd); }
   catch (error) { return { ok: false, code: "SHELL_CWD_BLOCKED", error: error.message }; }
   const command = String(args.command);
-  const approvedCommandKey = normalizeShellCommand(command);
+  const approvedCwd = executionCwd;
+  const approvedCommandKey = shellApprovalKey(executionCwd, command);
   let policy = classifyShellCommand(command, { egressAllowlist: permissionState.egressAllowlist });
   if (policy.level === "allow") policy = await withRepositoryGitPrograms(policy, command, executionCwd);
   if (policy.level === "block") {
@@ -44,7 +46,7 @@ export async function runShell(workspace, args, prompter, allowShellWithoutPromp
   const decision =
     commandIsSafe || hasStandingApproval
       ? "approve"
-      : await prompter(shellPrompt(command, policy) + (args.cwd ? `\nWorking directory: ${executionCwd}` : ""), { kind: "shell-command-approval", policy, command, cwd: executionCwd });
+      : await prompter(shellPrompt(command, policy) + `\nWorking directory: ${executionCwd}\nRemembering this command applies only to this directory.`, { kind: "shell-command-approval", policy, command, cwd: executionCwd });
   throwIfAborted(signal);
   await ALWAYS_DECISION_HANDLERS[decision]?.(permissionState, approvedCommandKey);
   throwIfAborted(signal);
@@ -53,6 +55,7 @@ export async function runShell(workspace, args, prompter, allowShellWithoutPromp
 
   try {
     executionCwd = await validateExecutionCwd(workspace, args.cwd);
+    if (executionCwd !== approvedCwd) throw Object.assign(new Error("Execution cwd changed after approval; approve the command in its new directory."), { code: "SHELL_CWD_CHANGED" });
     const backend = permissionState.executionBackend ?? createExecutionBackend({ cwd: workspace });
     const writeRestrictions = structuredClone(permissionState.taskToolPolicy?.writeRestrictions ?? []);
     if (writeRestrictions.length && backend.capabilities?.().scopedWriteRestrictions !== true) throw Object.assign(new Error("This execution backend cannot enforce the task's restricted write paths."), { code: "TASK_SCOPED_SHELL_UNAVAILABLE" });

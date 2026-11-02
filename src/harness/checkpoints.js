@@ -99,7 +99,8 @@ export function prepareCheckpointResume(checkpoint) {
   // invalidate reusable observations and prior verification on every resume.
   next.processController = undefined;
   const revision = (next.effects?.revision ?? next.verification?.workspaceRevision ?? 0) + 1;
-  next.effects = { ...(next.effects ?? { version: 1, events: [] }), revision };
+  next.effects = { ...(next.effects ?? { version: 1 }), revision, events: [...(next.effects?.events ?? []),
+    { id: randomUUID(), type: "workspace-resumed", revision }] };
   if (next.verification) next.verification = { ...next.verification, workspaceRevision: revision,
     status: next.verification.evidence?.length ? "pending" : "not-run" };
   // The interrupted phase (often "verifying") and any acceptance verdict describe a workspace

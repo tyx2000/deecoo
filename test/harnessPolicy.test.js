@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -8,6 +8,7 @@ import { addApprovedShellCommand, loadSettingsEnv, resolveShellPermissions, setA
 import { inferTaskIntent } from "../src/harness/taskIntent.js";
 import { buildTaskSpec, taskSpecMessage } from "../src/harness/taskSpec.js";
 import { classifyShellCommand, normalizeShellCommand } from "../src/permissions/shellPolicy.js";
+import { shellApprovalKey } from "../src/permissions/shellApprovals.js";
 import { buildTaskToolPolicy, effectiveToolNames, taskToolPolicyViolation } from "../src/permissions/taskPolicy.js";
 import { isSensitivePath } from "../src/tools/pathPolicy.js";
 import { createToolRuntime } from "../src/tools/runtime.js";
@@ -84,14 +85,14 @@ test("shell approval grants are workspace scoped, canonical, and preserve quoted
   const command = '  printf "a  b"  ';
   await addApprovedShellCommand({ settingsPath, workspace: alias, command });
   const settings = await loadSettingsEnv({ settingsPath, workspace: actual });
-  assert.deepEqual(settings.permissions.shell.approvedCommands, ['printf "a  b"']);
-  assert.equal(settings.permissions.shell.approvedCommands.includes('printf "a b"'), false);
+  assert.deepEqual(settings.permissions.shell.approvedCommands, [shellApprovalKey(await realpath(actual), 'printf "a  b"')]);
+  assert.equal(settings.permissions.shell.approvedCommands.includes(shellApprovalKey(await realpath(actual), 'printf "a b"')), false);
   assert.equal(normalizeShellCommand(' printf "a  b" '), 'printf "a  b"');
   assert.deepEqual((await resolveShellPermissions(settings.permissions, { workspace: other })).shell.approvedCommands, []);
   await setAutoApproveAllShellCommands({ settingsPath, workspace: actual });
   assert.equal((await loadSettingsEnv({ settingsPath, workspace: other })).permissions.shell.autoApproveAll, false);
   await addApprovedShellCommand({ settingsPath, workspace: actual, command: "node --version", scope: "global" });
-  assert.deepEqual((await loadSettingsEnv({ settingsPath, workspace: other })).permissions.shell.approvedCommands, ["node --version"]);
+  assert.deepEqual((await loadSettingsEnv({ settingsPath, workspace: other })).permissions.shell.approvedCommands, [shellApprovalKey(await realpath(actual), "node --version")]);
   const raw = JSON.parse(await readFile(settingsPath, "utf8"));
   assert.equal(raw.permissions.shell.approvals.every((entry) => entry.version === 2), true);
 });
@@ -106,7 +107,7 @@ test("legacy unscoped approvals stay inert through load and subsequent approval 
   assert.equal(shell.legacyPending, true);
   await addApprovedShellCommand({ settingsPath, workspace, command: "npm install" });
   shell = (await loadSettingsEnv({ settingsPath, workspace })).permissions.shell;
-  assert.deepEqual(shell.approvedCommands, ["npm install"]);
+  assert.deepEqual(shell.approvedCommands, [shellApprovalKey(await realpath(workspace), "npm install")]);
   assert.equal(shell.autoApproveAll, false);
   assert.deepEqual(shell.legacy.approvedCommands, ["chmod 755 ."]);
   assert.equal(shell.legacy.autoApproveAll, true);

@@ -10,6 +10,15 @@ const ENGLISH_WRITE_REQUEST = new RegExp(`(?<![\\w-])(?:re-)?${ENGLISH_WRITE_WOR
 const INSPECTED_CHANGE = new RegExp(`(?:^|[.:;!?]\\s*|\\b(?:review|explain|analy[sz]e|inspect|examine|audit|evaluate|describe|summari[sz]e|discuss|assess|look\\s+at|about|of|in|on|at|from|after|before|behind|why|how|when|where|whether|if)\\s+)`
   + `(?:the|a|an|this|that|these|those|its|our|your|my|their|his|her)\\s+(?:[\\w-]+\\s+)?${ENGLISH_WRITE_WORD}(?:e?s)?(?![\\w-])`, "gim");
 const INSPECTED_CHANGE_ZH = /(?:审查|评审|解释|说明|分析|检查|查看|看看|看一下)\s*(?:一下)?\s*(?:这个|这次|这些|此次|该|那个|上次|上一次|之前的|最近的|本次)\s*(?:修复|修改|改动|更改)/g;
+const SYMBOL_NAME = "(?:[\\p{L}_$][\\p{L}\\p{N}_$-]*|[\"'“‘][\\p{L}_$][\\p{L}\\p{N}_$-]*[\"'”’])";
+const SYMBOL_LIST = SYMBOL_NAME + "(?:\\s*(?:,\\s*(?:and\\s+)?|\\band\\s+|&\\s*)" + SYMBOL_NAME + ")*";
+const SYMBOL_KIND = "(?:functions?|methods?|endpoints?|handlers?|classes|class|variables?|properties|property|symbols?|routes?|APIs?)\\b";
+// Named objects are not imperatives. Requiring a determiner or inspection verb keeps
+// "Update functions" writable, while "Review update and delete functions" remains read-only.
+const DETERMINED_SYMBOLS = new RegExp("\\b(?:the|a|an|this|that|these|those|our|your|its)\\s+"
+  + "(?:(?:current|existing|new|old|legacy|public|private)\\s+)*" + SYMBOL_LIST + "\\s+" + SYMBOL_KIND, "giu");
+const INSPECTED_SYMBOLS = new RegExp("\\b(review|explain|inspect|examine|audit|evaluate|describe|assess|analy[sz]e|look\\s+at)\\s+"
+  + SYMBOL_LIST + "\\s+" + SYMBOL_KIND, "giu");
 
 export function inferTaskIntent(task, { mode } = {}) {
   const text = String(task ?? "").trim();
@@ -17,7 +26,7 @@ export function inferTaskIntent(task, { mode } = {}) {
   // requests. "Review @src/update.js" or "the create() function" must not read as an edit.
   const prose = withoutCodeReferences(text);
   const negativeWrite = /(?:不要|禁止|不得|无需|不必|勿|不允许|不要再|不需要)\s*(?:直接)?(?:修改|编辑|写入|写|创建|改动|更改|改造|搭建|接入|修复|实现|新增|删除)[^，,；;。\n]*/gi;
-  const englishNegative = /\b(?:do\s+not|don't|never|without|no)\s+(?:make\s+)?(?:edit(?:ing|s)?|modif(?:y|ying)|writ(?:e|ing)|creat(?:e|ing)|updat(?:e|ing)|refactor(?:ing)?|build(?:ing)?|add(?:ing)?|chang(?:e|ing|es)|fix(?:ing|es)?|implement(?:ing)?|delet(?:e|ing))\b(?:(?!\.(?:\s|$)|\b(?:but|instead)\b|\band\s+(?:only\s+)?(?:fix|implement|edit|modify|create)\b)[^,;\n])*/gi;
+  const englishNegative = /\b(?:do\s+not|don't|never|without|no)\s+(?:make\s+)?(?:edit(?:ing|s)?|modif(?:y|ying)|writ(?:e|ing)|creat(?:e|ing)|updat(?:e|ing)|refactor(?:ing)?|build(?:ing)?|add(?:ing)?|chang(?:e|ing|es)|fix(?:ing|es)?|implement(?:ing)?|delet(?:e|ing)|appl(?:y|ying))\b(?:(?!\.(?:\s|$)|\b(?:but|instead)\b|\band\s+(?:only\s+)?(?:fix|implement|edit|modify|create)\b)[^,;\n])*/gi;
   const negativeClauses = [...text.matchAll(negativeWrite), ...text.matchAll(englishNegative)].map((match) => match[0]);
   const writeRestrictions = [...new Map(negativeClauses.flatMap(scopedRestrictions).map((rule) => [JSON.stringify(rule), rule])).values()];
   const positiveText = prose.replace(negativeWrite, " ").replace(englishNegative, " ")
@@ -58,6 +67,9 @@ export function inferTaskIntent(task, { mode } = {}) {
 
 function withoutCodeReferences(text) {
   return text
+    .replace(DETERMINED_SYMBOLS, " ")
+    .replace(INSPECTED_SYMBOLS, "$1 ")
+    .replace(/["'“‘][\p{L}_$][\p{L}\p{N}_$-]*["'”’]\s*(?:函数|方法|接口|处理器|字段|变量|属性)/gu, " ")
     .replace(/```[\s\S]*?(?:```|$)/g, " ")
     .replace(/`[^`\n]*`/g, " ")
     // A reference never takes the sentence's closing punctuation with it, or "Do not edit a/b.md.
@@ -74,7 +86,7 @@ function withoutCodeReferences(text) {
 
 function globalFileNegative(clause) {
   return /(?:修改|编辑|写入|写|创建|改动|更改|修复|实现|新增|删除)\s*(?:任何|所有|全部)?(?:代码|文件|内容)?\s*$/.test(clause)
-    || /\b(?:edit(?:ing|s)?|modif(?:y|ying)|writ(?:e|ing)|creat(?:e|ing)|updat(?:e|ing)|chang(?:e|ing|es)|fix(?:ing|es)?|implement(?:ing)?|delet(?:e|ing))\s+(?:(?:any|all|the)\s+)?(?:files?|code|anything|changes?)(?:\s+at\s+all)?\s*$/i.test(clause);
+    || /\b(?:edit(?:ing|s)?|modif(?:y|ying)|writ(?:e|ing)|creat(?:e|ing)|updat(?:e|ing)|chang(?:e|ing|es)|fix(?:ing|es)?|implement(?:ing)?|delet(?:e|ing)|appl(?:y|ying))\s+(?:(?:any|all|the)\s+)?(?:files?|code|anything|changes?)(?:\s+at\s+all)?\s*$/i.test(clause);
 }
 
 function scopedRestrictions(clause) {

@@ -160,11 +160,7 @@ deecoo config import-env
 
 ### 使用项目 `.env`
 
-Deecoo 会按顺序尝试读取：
-
-1. 启动时的当前目录 `.env`
-2. `--cwd` 指定目录的 `.env`
-3. 没有 `--cwd` 时，`DEECOO_CWD` 指定目录的 `.env`
+Deecoo 只读取本次选中工作区的 `.env`：优先使用 `--cwd`，其次为 Shell 中的 `DEECOO_CWD`，否则使用当前目录。指定其他工作区时，不会同时信任启动目录的项目配置。
 
 示例：
 
@@ -174,7 +170,9 @@ DEECOO_PROVIDER=openai
 DEECOO_MODEL=gpt-5.1
 ```
 
-`.env` 只读取 provider key 和以下调优变量：`DEECOO_PROVIDER`、`DEECOO_MODEL`、`DEECOO_THEME`、`DEECOO_REASONING_EFFORT`、`DEECOO_THINKING`、`DEECOO_STREAM`、`DEECOO_MAX_TOKENS`、`DEECOO_TIMEOUT_MS`、`DEECOO_API_RETRIES`、`DEECOO_CONTEXT_WINDOW`、`DEECOO_OUTPUT_RESERVE`。项目 `.env` 由仓库作者控制，因此沙箱、网络、权限模式、出口白名单、`DEECOO_BASE_URL`、工作区（`DEECOO_CWD`/`DEECOO_HOME`）、存储与预算类变量会被忽略并在 stderr 提示；这些设置请放在 Shell 环境或 `settings.json`。`.env` 不会覆盖已经存在于进程环境或已加载设置中的同名变量。不要把包含真实 key 的 `.env` 提交到版本库。
+默认只读取调优变量：`DEECOO_THEME`、`DEECOO_REASONING_EFFORT`、`DEECOO_THINKING`、`DEECOO_STREAM`、`DEECOO_MAX_TOKENS`、`DEECOO_TIMEOUT_MS`、`DEECOO_API_RETRIES`、`DEECOO_CONTEXT_WINDOW`、`DEECOO_OUTPUT_RESERVE`。项目 `.env` 中的 provider、model 和 API key 默认忽略并提示；确认信任该项目账号配置后，可运行 `deecoo --trust-project-env`，或在真实 Shell 环境设置 `DEECOO_TRUST_PROJECT_ENV=1`。这个开关不能由项目文件自启。启动栏显示 provider、endpoint 和凭据来源，不显示密钥值。
+
+即使显式信任项目，沙箱、网络、权限模式、出口白名单、`DEECOO_BASE_URL`、工作区（`DEECOO_CWD`/`DEECOO_HOME`）、存储与预算类变量仍忽略并提示；这些设置请放在 Shell 环境或 `settings.json`。项目配置不会覆盖已有 Shell 值或已加载的同名调优参数；显式信任时允许项目 provider/key 替换 settings 中对应平台的选择与账号。不要把包含真实 key 的 `.env` 提交到版本库。
 
 ### 使用间接 secret 引用
 
@@ -257,7 +255,7 @@ schema v2 示例：
 | `providers.<name>.baseUrl` | 平台 API 根地址，不要以 `/` 结尾。 |
 | `providers.<name>.model` | 该平台默认模型。 |
 | `env` | 与平台无关的运行参数。 |
-| `permissions.shell.approvals` | 版本化的精确命令授权，默认绑定规范化项目路径。 |
+| `permissions.shell.approvals` | 版本化的精确命令授权，绑定规范化项目路径与执行 cwd。 |
 | `permissions.shell.autoApprovals` | 版本化的 warn 级自动批准范围，默认仅当前项目。 |
 | `permissions.shell.legacy` | 旧版未限定范围的记录，只保留供迁移查看，不再生效。 |
 
@@ -314,7 +312,7 @@ API key: 平台环境变量 > settings.providers.<provider>.apiKey
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `DEECOO_TIMEOUT_MS` | `120000` | 单次 provider 请求超时。 |
+| `DEECOO_TIMEOUT_MS` | `120000` | 单次 provider 请求的空闲超时；持续生成会刷新计时。 |
 | `DEECOO_API_RETRIES` | `5` | provider 请求最大尝试次数，客户端内部最多限制为 5 次。 |
 | `DEECOO_EGRESS_ALLOWLIST` | 无 | 逗号分隔的允许访问主机；设置后阻止访问列表外主机。 |
 
@@ -370,6 +368,7 @@ deecoo config <config-command>
 | --- | --- |
 | `--cwd <path>` | 指定工作区。 |
 | `--settings <path>` | 指定设置文件或目录。 |
+| `--trust-project-env` | 显式允许选中工作区的 `.env` 提供 provider、model 和 API key。 |
 | `--model <model>` | 本次运行覆盖模型；可识别模型也会影响平台选择。 |
 | `--task-mode <mode>` | 显式选择 edit/debug/review/analysis/command/read-only；用户明确的只读约束仍优先。 |
 | `--yes`、`-y` | 自动批准需要确认的 Shell 命令，不批准文件写入。 |
@@ -569,7 +568,7 @@ Shell 策略分为：
 | `warn` | 请求用户批准；例如安装依赖、网络访问、重定向、后台命令、解释器 one-liner，以及运行项目自带代码的命令（`npm test`、`npm run *`、`make`、`node <file>`、`./script.sh`、`npx`、测试运行器等）。 |
 | `block` | 始终拒绝；例如 `sudo`、`git reset --hard`、递归强制删除、下载后直接执行、敏感凭据读取或数据上传。 |
 
-warn 级授权选项包括本次批准、拒绝、永久批准该精确命令、永久批准本项目所有 warn 命令。永久授权写入 `settings.json`，匹配规范化项目路径、完整命令（保留引号内空白）和策略版本。旧未限定范围的授权进入 `legacy`，需要在目标项目重新批准；显式全局范围只可通过配置 API 的 `scope: "global"` 设置，CLI 默认创建项目授权。清除所有新旧 Shell 永久授权：
+warn 级授权选项包括本次批准、拒绝、永久批准该精确命令、永久批准本项目所有 warn 命令。精确命令授权写入 `settings.json`，匹配规范化项目路径、真实执行 cwd、完整命令（保留引号内空白）和策略版本；根目录批准 `npm test` 不会批准子目录另一份 package.json 的同名命令。旧未绑定 cwd 的精确授权保留记录但不自动生效，需要重新批准；“本项目所有 warn 命令”仍是明确的广泛授权。显式全局范围只可通过配置 API 的 `scope: "global"` 设置，CLI 默认创建项目授权。清除所有新旧 Shell 永久授权：
 
 ```bash
 deecoo config reset-shell-approvals

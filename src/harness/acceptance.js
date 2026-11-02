@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { sourceEvidenceRevision } from "./sourceEvidence.js";
+export { sourceEvidenceRevision } from "./sourceEvidence.js";
 
 const COMPLETION_TYPES = ["modified", "no-change", "partial", "blocked"];
 const UNSAFE_COMMAND = /[;&|\n\r$`<>]/;
@@ -122,19 +124,15 @@ export function evaluateTaskAcceptance({ taskSpec, verificationPlan, verificatio
     satisfied: errors.length === 0, checks, requirements, sourceEvidence: source.map(({ content, ...item }) => item), errors };
 }
 
-// File reads recorded before this revision can no longer serve as source evidence; later
-// mutations only move it forward.
-export function sourceEvidenceRevision(events = [], verification) {
-  const checkIds = new Set((verification?.evidence ?? []).map((item) => item.id).filter(Boolean));
-  return events.filter((event) => ["file-change", "workspace-uncertain"].includes(event.type) || (event.type === "command" && !checkIds.has(event.id))).at(-1)?.revision ?? 0;
-}
-
 function collectSourceEvidence(agentState, effects, verification) {
   const events = effects?.events ?? [];
   const lastMutation = sourceEvidenceRevision(events, verification);
   const current = verification?.workspaceRevision ?? effects?.revision ?? agentState?.workspaceRevision ?? 0;
   const out = events.filter((event) => event.type === "file-read" && !event.truncated && event.chars > 0 && event.revision >= lastMutation)
     .map((event) => ({ id: event.id, path: event.path, revision: event.revision, ...(typeof event.content === "string" ? { content: event.content } : {}) }));
+  // Modern executor effects are authoritative. Historical compact step copies can belong to
+  // another revision, and must never overwrite a fresh observation of the same path.
+  if (events.length) return out;
   // Legacy callers keep executor observations in agentState. They are accepted
   // only as actual complete read tool results, never as model statements.
   for (const step of agentState?.steps ?? []) {
@@ -142,7 +140,6 @@ function collectSourceEvidence(agentState, effects, verification) {
     const content = step.toolResult?.content;
     if (typeof content !== "string" || !content || /\.\.\. truncated/.test(content)) continue;
     const path = step.toolCall.args?.path;
-    if (events.length && !out.some((item) => item.path === path)) continue;
     const existing = out.find((item) => item.path === path);
     if (existing) existing.content = content;
     else out.push({ path, revision: current, content });

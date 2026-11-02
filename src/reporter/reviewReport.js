@@ -1,3 +1,5 @@
+import { sourceResumeRevision } from "../harness/sourceEvidence.js";
+
 const REQUIRED_TOP_LEVEL = ["schema_version", "review", "findings", "open_questions", "test_gaps", "residual_risks"];
 const FINDING_REQUIRED = [
   "id",
@@ -62,7 +64,9 @@ export function createReviewFinalValidator({ maxRepairAttempts = 2, task: reques
 }
 
 export function reviewCoverage({ task, effects } = {}) {
-  const events = effects?.events ?? [];
+  const allEvents = effects?.events ?? [];
+  const resumedAt = sourceResumeRevision(allEvents);
+  const events = resumedAt ? allEvents.filter((event) => event.revision >= resumedAt) : allEvents;
   const text = String(task ?? "");
   const observations = fileCoverage(events);
   const files = [...new Set([...observations.keys(), ...events.filter((event) => event.type === "diff-read").flatMap((event) => event.paths ?? [event.path])].filter(Boolean))];
@@ -140,6 +144,10 @@ function hasInlineSource(task) {
     if (logSubject && !sourceSubject) continue;
     if (/^(?:diff --git |@@\s+-\d|---\s+[^\n]+\n\+\+\+\s+)/m.test(body)) return true;
     if (/\{[\s\S]*\}|=>|<\/?[\w:-]+(?:\s|>)/.test(body) || /^\s*(?:\w+\s+){0,3}[\w.$"'\[\]-]+\s*(?:=|:)\s*\S/m.test(body)) return true;
+    // Calls and declarations are source even without a magic "code" word in the request.
+    // A language label alone is insufficient: arbitrary log text still is not inspection.
+    if (/^\s*(?:(?:return|await|yield)\s+)?[A-Za-z_$][\w.$:]*\s*\([^\n]*\)\s*;?\s*$/m.test(body)
+      || /^\s*(?:def|class|function|fn|func)\s+[A-Za-z_$][\w$]*(?:\s*\(|\s*[:{])/m.test(body)) return true;
     if (sourceSubject && !/^(?:text|logs?|console|output|stdout|stderr)$/i.test(info)) return true;
   }
   return false;

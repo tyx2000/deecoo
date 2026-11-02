@@ -136,6 +136,7 @@ function classifyShellText(text, { egressAllowlist }, depth) {
     ...detectInlineCodeExecution(text),
     ...detectProjectCodeExecution(text),
     ...detectProgramLaunch(text),
+    ...detectFilesystemOptions(text),
     ...detectGitRisk(text),
     ...detectBackgroundExecution(text),
     ...WARN_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason),
@@ -286,10 +287,21 @@ function expandAssignedVariables(command) {
 function detectDynamicShellCode(command) {
   const reasons = [];
   if (shellCommandSegments(command).some((segment) => unwrapCommand(segment).uncertain)) reasons.push("unsupported command wrapper syntax");
+  // The tokenizer does not evaluate brace/glob/ANSI-C quoting or variables. In command
+  // position these can choose a different executable; never silently treat it as read-only.
+  if (shellCommandSegments(command).some((segment) => /[$`*?\[\]{}\\]/.test(effectiveCommand(segment)[0] ?? ""))) reasons.push("dynamic command name requires approval");
   if (commandSubstitutions(command).length) reasons.push("dynamic command substitution");
   const expanded = expandAssignedVariables(command);
   if (shellTokens(expanded).some((token) => token.includes("/") && /\$(\{|[A-Za-z_])/.test(token))) reasons.push("unresolved variable in a path");
   return reasons;
+}
+
+function detectFilesystemOptions(command) {
+  return shellCommandSegments(command).some((segment) => {
+    const [executable, ...args] = effectiveCommand(segment);
+    return ["find", "gfind"].includes(basenameCommand(executable))
+      && args.some((arg) => ["-delete", "-fprint", "-fprint0", "-fprintf", "-fls"].includes(arg));
+  }) ? ["find can delete files or write output files"] : [];
 }
 
 function detectProjectCodeExecution(command) {

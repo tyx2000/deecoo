@@ -63,11 +63,20 @@ export async function createSessionStore(cwd, options = {}) {
     },
     async save(session) {
       safeSessionId(session.id);
-      if (!canPersist(store)) { volatileSessions.set(session.id, structuredClone(session)); return session; }
+      if (!canPersist(store)) {
+        const current = volatileSessions.get(session.id);
+        const ordered = orderSessionHistory(current, sessionWithTurnIds(session));
+        const next = current && current.revision !== (session.revision ?? 0) ? mergeSession(current, ordered) : ordered;
+        next.revision = (current?.revision ?? 0) + 1;
+        volatileSessions.set(session.id, structuredClone(next));
+        Object.assign(session, next);
+        return session;
+      }
       const value = await withFileLock(operationPath(session.id), async () => {
         if (await readJsonFile(deletionPath(session.id))) throw Object.assign(new Error("Session was deleted; stale state cannot recreate it."), { code: "SESSION_DELETED" });
         return updateJsonFile(sessionPath(session.id), (current) => {
-        const next = current && current.revision !== (session.revision ?? 0) ? mergeSession(current, session) : structuredClone(session);
+        const ordered = orderSessionHistory(current, sessionWithTurnIds(session));
+        const next = current && current.revision !== (session.revision ?? 0) ? mergeSession(current, ordered) : ordered;
         next.schemaVersion = 2;
         next.revision = (current?.revision ?? 0) + 1;
         const stored = policy.privacyMode === "redacted" ? redact(next, { secretRegistry: store.secretRegistry, maxTextChars: Infinity })
@@ -291,8 +300,9 @@ function fitSessionWithinBytes(session, maxBytes) {
     if (!removed) break;
     // Keep the explicit constraints of dropped turns so a summary rebuilt after a concurrent
     // save (mergeSession) still sees them.
-    const dropped = session.history.splice(0, removed).flatMap((turn) => explicitUserConstraints(turn.user));
-    session.trimmedHistoryConstraints = recentEntriesWithin([...(session.trimmedHistoryConstraints ?? []), ...dropped], MAX_CONSTRAINT_CHARS);
+    const dropped = session.history.splice(0, removed);
+    session.historyTrimmedThrough = Math.max(session.historyTrimmedThrough ?? 0, ...dropped.map((turn) => turn.sequence ?? 0));
+    session.trimmedHistoryConstraints = recentEntriesWithin([...(session.trimmedHistoryConstraints ?? []), ...dropped.flatMap((turn) => explicitUserConstraints(turn.user))], MAX_CONSTRAINT_CHARS);
     session.historyTrimmedTurns = (session.historyTrimmedTurns ?? 0) + removed;
     excess = size() - maxBytes;
   }
@@ -336,6 +346,9 @@ function sessionReadOptions() {
 async function readSessionFile(path) { return readJsonFile(path, sessionReadOptions()); }
 function migrateSession(parsed) {
   if (!parsed || typeof parsed !== "object" || (parsed.schemaVersion ?? 1) > 2) return parsed;
+  return orderSessionHistory(undefined, sessionWithTurnIds(parsed));
+}
+function sessionWithTurnIds(parsed) {
   const rawHistory = parsed.history ?? [...(parsed.turns ?? [])];
   const history = rawHistory.map((turn, index) => ({ ...turn, id: turn.id ?? "legacy-" + hash(JSON.stringify(turn) + ":" + index) }));
   const turns = (parsed.turns ?? []).map((turn, index, recent) => {
@@ -348,9 +361,39 @@ function migrateSession(parsed) {
     summary: parsed.summary ?? "", artifacts: parsed.artifacts ?? [] };
 }
 
+// Sequence numbers are allocated under the save lock, not from a stale writer's clock or
+// revision. The trim watermark makes removed turns stay removed without an unbounded ID list.
+// Legacy files receive stable sequences in their persisted order on first load.
+function orderSessionHistory(current, incoming) {
+  const next = structuredClone(incoming);
+  const retained = new Map((current?.history ?? []).map((turn) => [turnIdentity(turn), turn]));
+  const trimmedThrough = Math.max(current?.historyTrimmedThrough ?? 0, next.historyTrimmedThrough ?? 0);
+  let sequence = Math.max(current?.historySequence ?? 0, next.historySequence ?? 0, trimmedThrough,
+    ...(current?.history ?? []).map((turn) => turn.sequence ?? 0), ...(next.history ?? []).map((turn) => turn.sequence ?? 0));
+  const legacyOffset = !current && !next.historySequence ? next.historyTrimmedTurns ?? 0 : 0;
+  sequence = Math.max(sequence, legacyOffset);
+  const ordered = new Map();
+  next.history = (next.history ?? next.turns ?? []).map((turn) => {
+    const known = retained.get(turnIdentity(turn));
+    const value = known ?? { ...turn, id: turn.id ?? randomUUID(), sequence: Number.isSafeInteger(turn.sequence) && turn.sequence > 0 ? turn.sequence : ++sequence };
+    ordered.set(turnIdentity(turn), value);
+    return value;
+  }).filter((turn) => turn.sequence > trimmedThrough).sort((a, b) => a.sequence - b.sequence || turnIdentity(a).localeCompare(turnIdentity(b)));
+  next.turns = (next.turns ?? []).flatMap((turn) => {
+    const value = ordered.get(turnIdentity(turn));
+    return value?.sequence > trimmedThrough ? [value] : [];
+  });
+  next.historySequence = sequence;
+  next.historyTrimmedThrough = trimmedThrough;
+  return next;
+}
+
 function mergeSession(current, incoming) {
   const tombstones = [...new Set([...(current.artifactTombstones ?? []), ...(incoming.artifactTombstones ?? [])])];
-  const merged = { ...current, ...incoming, history: mergeEntries(current.history, incoming.history, turnIdentity),
+  const trimmedThrough = Math.max(current.historyTrimmedThrough ?? 0, incoming.historyTrimmedThrough ?? 0);
+  const merged = { ...current, ...incoming, history: mergeEntries(current.history, incoming.history, turnIdentity)
+    .filter((turn) => turn.sequence > trimmedThrough).sort((a, b) => a.sequence - b.sequence || turnIdentity(a).localeCompare(turnIdentity(b))),
+    historySequence: Math.max(current.historySequence ?? 0, incoming.historySequence ?? 0), historyTrimmedThrough: trimmedThrough,
     trimmedHistoryConstraints: mergeEntries(current.trimmedHistoryConstraints, incoming.trimmedHistoryConstraints, (item) => item),
     historyTrimmedTurns: Math.max(current.historyTrimmedTurns ?? 0, incoming.historyTrimmedTurns ?? 0),
     artifactTombstones: tombstones,

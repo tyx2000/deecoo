@@ -1,4 +1,5 @@
 import { inferProviderFromModel, normalizeProviderName, providerDefaults } from "./providers.js";
+import { environmentSource } from "./environmentSources.js";
 
 export function loadConfig(env, args = {}, settings = {}) {
   const cliModelProvider = inferProviderFromModel(args.model);
@@ -17,6 +18,11 @@ export function loadConfig(env, args = {}, settings = {}) {
 
   return {
     provider,
+    configSources: {
+      provider: env.DEECOO_PROVIDER !== undefined ? environmentSource(env, "DEECOO_PROVIDER") : cliModelProvider ? "--model" : envModelProvider ? environmentSource(env, "DEECOO_MODEL") : "settings/default",
+      apiKey: env[defaults.apiKeyEnv] !== undefined ? environmentSource(env, defaults.apiKeyEnv) : "settings.json",
+      baseUrl: env.DEECOO_BASE_URL !== undefined ? environmentSource(env, "DEECOO_BASE_URL") : providerSettings.baseUrl ? "settings.json" : "provider default",
+    },
     apiKeyEnv: defaults.apiKeyEnv,
     apiKey,
     baseUrl: normalizeBaseUrl(env.DEECOO_BASE_URL ?? providerSettings.baseUrl ?? defaults.baseUrl),
