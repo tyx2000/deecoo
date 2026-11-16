@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.1.12 — 2026-11-16
+
+- Shell 与外联分类器识别子 Shell `(...)`、花括号命令组 `{ ...; }`、紧邻重定向（如 `cat<.env`）及 ANSI-C 引号转义 `$'\''`，防止绕过拦截与审批规则。
+- 只读审查与分析提问提及测试命令或软件对象名词（如 `logic`、`flow`、`behavior`、`为什么...`）时保持只读且不再错误要求执行受阻的 Shell 检查；显式执行请求仍正常校验。
+- `processController` 对 `run_shell` 的重复调用判定纳入非默认 `cwd`；后台 `job_status` 按 `start_job` 启动时的工作区修订号判定验证新鲜度。
+- Linux `bubblewrap` 沙箱保护工作树 `.git` 指针文件，CI 增加 Linux 沙箱门禁；加固 DeepSeek SSE 流解析、`/model` 切换后的客户端元数据刷新、审批菜单内 `Esc` 行为以及 `apply_json_patch` 对 `__proto__` 的自有属性写入。
+
 ## 0.1.11 — 2026-11-02
 
 - `deecoo version` 与 `--version`/`-v` 使用同一离线入口，打印版本后立即退出，不再把 version 当作任务发送给模型；支持 `version --json`/`--jsonl`，保留 `-- version` 字面任务及其他命令参数的原含义。

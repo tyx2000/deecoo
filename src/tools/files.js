@@ -998,6 +998,8 @@ function applyJsonOperation(root, operation) {
       if (index > parent.length) return { ok: false, error: `array index is beyond append position: ${key}` };
       if (index === parent.length) parent.push(operation.value);
       else parent[index] = operation.value;
+    } else if (key === "__proto__") {
+      Object.defineProperty(parent, key, { value: operation.value, writable: true, enumerable: true, configurable: true });
     } else {
       parent[key] = operation.value;
     }

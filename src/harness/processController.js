@@ -778,7 +778,8 @@ function normalizeArgs(name, args = {}) {
     return { path: String(args.path ?? ""), ref: String(args.ref ?? ""), staged: Boolean(args.staged) };
   }
   if (name === "run_shell") {
-    return { command: String(args.command ?? "").trim() };
+    const cwd = typeof args.cwd === "string" ? args.cwd.trim() : "";
+    return { command: String(args.command ?? "").trim(), ...(cwd && cwd !== "." ? { cwd } : {}) };
   }
   const out = {};
   for (const key of Object.keys(args).sort()) {

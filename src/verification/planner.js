@@ -10,20 +10,20 @@ export function buildVerificationPlan({ taskSpec, projectIndex }) {
   if (scripts.build) commands.push({ kind: "build", command: scriptCommand(packageManager, "build"), reason: "project defines build script" });
 
   const requestType = taskSpec?.requestType ?? "general";
-  const required =
-    requestType === "edit" ||
-    requestType === "debug" ||
-    requestType === "command" ||
-    /test|check|verify|验证|测试/.test(taskSpec?.goal ?? "");
-
   let requiredChecks = taskSpec?.requiredChecks ?? taskSpec?.acceptance?.requiredChecks ?? [];
-  if (!requiredChecks.length && taskSpec?.acceptance?.requiredChecksSource !== "explicit") {
+  if (!requiredChecks.length && taskSpec?.acceptance?.requiredChecksSource !== "explicit" && taskSpec?.mayWrite !== false) {
     const goal = taskSpec?.goal ?? "";
     const asksTests = /(?:run|execute|运行|执行)[^.;。\n]{0,24}(?:tests?|测试)/i.test(goal) && !/(?:do not|don't|不要|无需|不必)\s*(?:run|execute|运行|执行)?[^.;。\n]{0,12}(?:tests?|测试)/i.test(goal);
     const primary = commands.find((item) => item.kind === "unit-test") ?? commands.find((item) => ["check", "typecheck", "lint"].includes(item.kind));
     if (asksTests) requiredChecks = [{ command: testCommand(packageManager), target: "project:tests", purpose: "Execute the requested project tests", source: "project-inferred" }];
     else if (taskSpec?.requiresCodeChange && primary) requiredChecks = [{ ...primary, target: "project:" + primary.kind, purpose: "Verify the scoped implementation", source: "project-inferred" }];
   }
+  const required =
+    requestType === "edit" ||
+    requestType === "debug" ||
+    requestType === "command" ||
+    requiredChecks.length > 0 ||
+    (taskSpec?.mayWrite !== false && /test|check|verify|验证|测试/.test(taskSpec?.goal ?? ""));
   return {
     schemaVersion: 2,
     requiredChecks: normalizeRequiredChecks(requiredChecks),

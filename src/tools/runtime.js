@@ -64,6 +64,7 @@ export function createToolRuntime({
   let outputInlineBytes = 16000;
   let observerErrors = 0;
   const observedJobs = new Set();
+  const jobStartRevisions = new Map();
 
   const runtime = {
     get schemas() { return schemasFor(); },
@@ -152,6 +153,7 @@ export function createToolRuntime({
       permissionState.taskToolPolicy = undefined;
       effects.reset();
       observedJobs.clear();
+      jobStartRevisions.clear();
     },
     async execute(name, args = {}, options = {}) {
       const invocationId = randomUUID();
@@ -170,11 +172,18 @@ export function createToolRuntime({
         if (name === "job_status" && ["exited", "stopped", "timed_out", "failed", "cleanup_unconfirmed"].includes(result?.status)) {
           if (!observedJobs.has(result.jobId)) {
             observedJobs.add(result.jobId);
+            const validatedRevision = jobStartRevisions.get(result.jobId);
             observed = effects.record("run_shell", { command: result.command }, { ...result,
+              ...(validatedRevision !== undefined ? { validatedRevision } : {}),
               ok: result.status === "exited" && result.exitCode === 0 && result.treeCleanup?.confirmed,
               shellPolicy: { level: "allow", source: "previously-approved-job" } });
           }
-        } else observed = effects.record(name, args, result, executionEntry);
+        } else {
+          observed = effects.record(name, args, result, executionEntry);
+          if (name === "start_job" && result?.jobId && Number.isFinite(observed?.workspaceRevision)) {
+            jobStartRevisions.set(result.jobId, observed.workspaceRevision);
+          }
+        }
       }
       if ((observed.effects?.events ?? []).some((event) => ["file-change", "workspace-uncertain", "command"].includes(event.type))) permissionState.readCache.clear();
       registry.copyProjection?.(result, observed);

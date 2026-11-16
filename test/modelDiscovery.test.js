@@ -10,12 +10,15 @@ const listing = { object: "list", data: [
   { id: "deepseek-legacy", object: "model", owned_by: "deepseek" },
 ] };
 
-// These tests need a loopback HTTP server. A network-denied sandbox refuses the bind; skip with
-// that reason there instead of loosening the sandbox. Every other environment, CI included, runs them.
+// These tests need a loopback HTTP server. A network-denied sandbox refuses the bind or loopback
+// fetch; skip with that reason there instead of loosening the sandbox. Every other environment, CI included, runs them.
 const loopbackDenied = await new Promise((resolve) => {
-  const probe = createServer();
-  probe.once("error", (error) => resolve(error.code === "EPERM" ? "loopback networking is denied by the current sandbox" : false));
-  probe.listen(0, "127.0.0.1", () => probe.close(() => resolve(false)));
+  const probe = createServer((_request, response) => response.end("ok"));
+  probe.once("error", (error) => resolve(["EPERM", "EACCES"].includes(error.code) ? "loopback networking is denied by the current sandbox" : false));
+  probe.listen(0, "127.0.0.1", async () => {
+    const denied = await fetch(`http://127.0.0.1:${probe.address().port}`).then(() => false, () => "loopback networking is denied by the current sandbox");
+    probe.close(() => resolve(denied));
+  });
 });
 
 async function modelsServer(handler, fn) {

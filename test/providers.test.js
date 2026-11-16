@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { loadConfig } from "../src/config/env.js";
 import { loadSettingsEnv, writeProviderSettings, writeSettingsEnv } from "../src/config/settings.js";
 import { createAnthropicClient, fromAnthropicResponse, toAnthropicRequest } from "../src/llm/anthropicClient.js";
+import { createDeepSeekClient } from "../src/llm/deepseekClient.js";
 import { createModelClient, toOpenAIRequest } from "../src/llm/clientFactory.js";
 
 test("missing provider key gives the exact configuration command", () => {
@@ -264,5 +265,25 @@ test("client factory exposes all configured providers", () => {
     assert.equal(typeof client.chatCompletion, "function");
     assert.equal(typeof client.chatCompletionStream, "function");
     assert.equal(typeof client.listModels, "function");
+  }
+});
+
+test("DeepSeek streaming tolerates malformed SSE frames and surfaces explicit error frames", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const payload =
+      "data: {not valid json\n\n" +
+      `data: ${JSON.stringify({ choices: [{ delta: { content: "Hi" }, finish_reason: "stop" }] })}\n\n` +
+      "data: [DONE]\n\n";
+    globalThis.fetch = async () => new Response(payload, { status: 200, headers: { "content-type": "text/event-stream" } });
+    const client = createDeepSeekClient({ apiKey: "k", baseUrl: "https://api.deepseek.com", timeoutMs: 1000, retryAttempts: 1 });
+    const response = await client.chatCompletionStream({ model: "deepseek-v4-pro", messages: [{ role: "user", content: "hi" }] });
+    assert.equal(response.choices[0].message.content, "Hi");
+
+    const errorPayload = `data: ${JSON.stringify({ error: { message: "quota exceeded", code: 429 } })}\n\n`;
+    globalThis.fetch = async () => new Response(errorPayload, { status: 200, headers: { "content-type": "text/event-stream" } });
+    await assert.rejects(client.chatCompletionStream({ model: "deepseek-v4-pro", messages: [{ role: "user", content: "hi" }] }), /API stream error: quota exceeded/);
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });

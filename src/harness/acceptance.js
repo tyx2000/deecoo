@@ -42,7 +42,10 @@ export function inferRequiredChecks(task) {
   const pattern = /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?[\w:.-]+(?:\s+--(?:\s+(?!(?:and|then|并|然后|且|与)\b)[^\s,;。`]+)+)?|\bnode\s+--test(?:\s+(?!(?:and|then|please|report|并|然后|且|与)\b)[\w./*-]+)*|\b(?:python3?\s+-m\s+)?pytest(?:\s+(?!(?:and|then|please|report|并|然后|且|与)\b)[\w./*-]+)*|\bcargo\s+(?:test|check|clippy)|\bgo\s+test(?:\s+(?!(?:and|then|please|report|并|然后|且|与)\b)[\w./*-]+)*|\bswift\s+test|\bdotnet\s+test/g;
   for (const match of String(task ?? "").matchAll(pattern)) {
     const prefix = String(task).slice(Math.max(0, match.index - 30), match.index);
+    const suffix = String(task).slice(match.index + match[0].length, match.index + match[0].length + 30);
     if (/(?:do not|don't|never|不要|无需|不必|禁止)\s*(?:run|execute|运行|执行)?\s*$/i.test(prefix)) continue;
+    if (/(?:why(?:\s+did|\s+does|\s+is)?|how(?:\s+does|\s+to)?|what(?:\s+does|\s+is|\s+makes)?|whether|explain|review|inspect|examine|analy[sz]e|describe|about)\s+(?:the\s+)?$/i.test(prefix)
+      || /^\s+(?:script|config(?:uration)?|command|output|logs?|results?|failures?|errors?|failed|fails)\b/i.test(suffix)) continue;
     const command = match[0].replace(/[.!?。]+$/, "");
     const key = canonicalCheckCommand(command);
     if (key && !checks.some((item) => canonicalCheckCommand(item.command) === key)) checks.push({ command });

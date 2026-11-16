@@ -1,5 +1,6 @@
 import readline from "node:readline";
 import { formatToolLine } from "../terminal/markdown.js";
+import { isInteractivePromptActive } from "../terminal/statusLine.js";
 
 // The first request belongs to the task: await its cooperative cancellation and
 // descendant cleanup. A second explicit interrupt bounds that wait, including
@@ -38,7 +39,7 @@ export function installTaskInterrupt(nonInteractive = false, { forceExitAfterMs 
     process.stdin.setRawMode(true);
     const onKeypress = (_str, key = {}) => {
       if (key.ctrl && key.name === "c") { onSigint(); return; }
-      if (key.name !== "escape" || controller.signal.aborted) return;
+      if (key.name !== "escape" || controller.signal.aborted || isInteractivePromptActive()) return;
       reported = true;
       controller.abort(Object.assign(new Error("Task interrupted by Esc."), { code: "ABORT_ERR" }));
       process.stdout.write("\n" + formatToolLine("interrupted: Esc") + "\n");

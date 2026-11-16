@@ -150,3 +150,15 @@ test("R2-P2-8 patch-set and pure EOL files retain their established newline beha
     }
   }
 });
+
+test("apply_json_patch sets __proto__ as an own JSON property without mutating the object prototype", async (t) => {
+  const { cwd, tools } = await fixture(t);
+  await writeFile(join(cwd, "proto.json"), '{"safe":true}\n');
+  const result = await tools.execute("apply_json_patch", {
+    path: "proto.json",
+    operations: [{ op: "set", pointer: "/__proto__", value: { injected: true } }],
+  });
+  assert.equal(result.ok, true, result.error);
+  const text = await readFile(join(cwd, "proto.json"), "utf8");
+  assert.match(text, /"__proto__": \{\s*"injected": true\s*\}/);
+});

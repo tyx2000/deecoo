@@ -136,6 +136,17 @@ test("R2-P2-1 dynamic command names and find mutations require approval while li
   }
 });
 
+test("subshells, brace groups, unspaced redirections, and ANSI-C quotes preserve guardrails and egress rules", () => {
+  for (const command of ["cat<.env", "cat<.aws/credentials", "(git -c x=y reset --hard)", "{ git -c x=y reset --hard; }", "echo $'\\''; sudo id"]) {
+    assert.equal(classifyShellCommand(command).level, "block", command);
+  }
+  for (const command of ["(node -e \"console.log(1)\")", "(git branch -D main)", "echo $'\\''; node -e 'console.log(1)'", "bash<script.sh"]) {
+    assert.equal(classifyShellCommand(command).level, "warn", command);
+  }
+  assert.equal(classifyShellCommand("(curl https://evil.example)", { egressAllowlist: ["allowed.example"] }).level, "block");
+  assert.equal(classifyShellCommand("cat<.env.example").level, "allow");
+});
+
 test("R2-P2-3 settings environment provenance tracks assignments without relabeling process values", () => {
   const env = { DEEPSEEK_API_KEY: "process-synthetic" };
   applySettingsEnv({ DEECOO_MODEL: "deepseek-chat", DEEPSEEK_API_KEY: "settings-synthetic" }, { targetEnv: env });

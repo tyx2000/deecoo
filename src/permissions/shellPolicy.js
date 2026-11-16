@@ -116,7 +116,7 @@ function classifyShellText(text, { egressAllowlist }, depth) {
   const blocked = [
     ...detectBlockedShellTokens(text),
     ...detectInteractiveShellCommands(text),
-    ...(shellTokens(text).some((token) => token.split(/[=:]/).some((path) => isSensitivePath(path.replace(/^[@<>]+/, "")))) ? ["sensitive path access"] : []),
+    ...(shellTokens(text).some((token) => token.split(/[=:<>&]/).some((path) => isSensitivePath(path.replace(/^[@<>]+/, "")))) ? ["sensitive path access"] : []),
     ...BLOCK_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason),
     ...SENSITIVE_PATH_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason),
     ...EGRESS_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason),
@@ -239,14 +239,16 @@ function shellCommandPayload(args) {
 function commandSubstitutions(command) {
   const payloads = [];
   let quote = "";
+  let ansiQuote = false;
   for (let index = 0; index < command.length; index += 1) {
     const char = command[index];
     if (quote === "'") {
-      if (char === "'") quote = "";
+      if (ansiQuote && char === "\\") { index += 1; continue; }
+      if (char === "'") { quote = ""; ansiQuote = false; }
       continue;
     }
     if (char === "\\") { index += 1; continue; }
-    if (char === "'" && !quote) { quote = "'"; continue; }
+    if (char === "'" && !quote) { quote = "'"; ansiQuote = index > 0 && command[index - 1] === "$"; continue; }
     if (char === "\"") { quote = quote ? "" : "\""; continue; }
     if (char === "`") {
       const end = command.indexOf("`", index + 1);
@@ -540,6 +542,7 @@ function shellTokens(command) {
   const tokens = [];
   let current = "";
   let quote = "";
+  let ansiQuote = false;
   let escaped = false;
 
   for (let index = 0; index < command.length; index += 1) {
@@ -551,16 +554,20 @@ function shellTokens(command) {
       continue;
     }
     if (char === "\\") {
-      if (quote === "'") current += char;
-      else escaped = true;
+      if (quote === "'" && !ansiQuote) current += char;
+      else {
+        if (ansiQuote) current += char;
+        escaped = true;
+      }
       continue;
     }
     if (quote) {
-      if (char === quote) quote = "";
+      if (char === quote) { quote = ""; ansiQuote = false; }
       else current += char;
       continue;
     }
     if (char === "'" || char === "\"") {
+      ansiQuote = char === "'" && current.endsWith("$");
       quote = char;
       continue;
     }
@@ -571,6 +578,25 @@ function shellTokens(command) {
       continue;
     }
     if (/\s/.test(char)) {
+      pushCurrent();
+      continue;
+    }
+    if (char === "(" || char === ")") {
+      pushCurrent();
+      tokens.push(char);
+      continue;
+    }
+    if (char === "<" || char === ">") {
+      if (!/^(?:\d+|&)$/.test(current)) pushCurrent();
+      current += char;
+      while (command[index + 1] === "<" || command[index + 1] === ">") {
+        index += 1;
+        current += command[index];
+      }
+      if (command[index + 1] === "&" && /[0-9-]/.test(command[index + 2] ?? "")) {
+        current += command[index + 1] + command[index + 2];
+        index += 2;
+      }
       pushCurrent();
       continue;
     }
@@ -616,7 +642,7 @@ function shellTokens(command) {
 }
 
 function isShellBoundary(token) {
-  return token === ";" || token === "|" || token === "&&" || token === "||";
+  return token === ";" || token === "|" || token === "&&" || token === "||" || token === "(" || token === ")" || token === "{" || token === "}";
 }
 
 function isRecursiveForceRm(segment) {

@@ -2,7 +2,7 @@ import { paint } from "./theme.js";
 import { prefixAtColumn } from "./promptLayout.js";
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-let current;
+let current, activePrompts = 0;
 
 // Pins one status line to the bottom row while a task runs. The rows above it
 // become the scroll region, so streamed text and tool logs scroll past without
@@ -75,7 +75,19 @@ export function createStatusLine({ stream = process.stdout, render, intervalMs =
 }
 
 export function pauseStatusLine() {
-  return current ? current.pause() : () => {};
+  activePrompts += 1;
+  const resumeCurrent = current ? current.pause() : () => {};
+  let resumed = false;
+  return () => {
+    if (resumed) return;
+    resumed = true;
+    activePrompts = Math.max(0, activePrompts - 1);
+    resumeCurrent();
+  };
+}
+
+export function isInteractivePromptActive() {
+  return activePrompts > 0;
 }
 
 export function formatStatusLine({ frame, phase, elapsedMs, usage = {} }) {

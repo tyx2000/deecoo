@@ -60,7 +60,7 @@ export function advanceVerificationState(state, event, { plan } = {}) {
       const isCheck = isVerificationCommand(effect.command, plan);
       if (!isCheck) next.validationRevision = revision;
       const attempt = { command: String(effect.command ?? ""), ok: effect.ok !== false, revision,
-        validatedRevision: next.validationRevision, scope: effect.scope ?? ".", cwd: effect.cwd, checkIds: matchingCheckIds(effect.command, plan?.requiredChecks, { scope: effect.scope ?? "." }),
+        validatedRevision: Number.isFinite(effect.validatedRevision) ? effect.validatedRevision : next.validationRevision, scope: effect.scope ?? ".", cwd: effect.cwd, checkIds: matchingCheckIds(effect.command, plan?.requiredChecks, { scope: effect.scope ?? "." }),
         step: event.step, id: effect.id, stdout: summarize(effect.stdout), stderr: summarize(effect.stderr), error: effect.error ?? "" };
       next.commands.push(attempt);
       delete next.reason;

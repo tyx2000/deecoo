@@ -37,7 +37,8 @@ export function createEffectLedger({ revision = 0, workspace } = {}) {
         // read/verification is reused after such an execution.
         current += 1;
         events.push({ id: randomUUID(), type: "command", tool: name, command: String(args.command ?? ""),
-          ok: result.ok !== false, revision: current, cwd: result.cwd ?? workspace, scope: result.relativeScope ?? (workspace && result.cwd ? relative(workspace, canonical(result.cwd)) || "." : "."), stdout: result.stdout, stderr: result.stderr, error: result.error });
+          ok: result.ok !== false, revision: current, ...(Number.isFinite(result.validatedRevision) ? { validatedRevision: result.validatedRevision } : {}),
+          cwd: result.cwd ?? workspace, scope: result.relativeScope ?? (workspace && result.cwd ? relative(workspace, canonical(result.cwd)) || "." : "."), stdout: result.stdout, stderr: result.stderr, error: result.error });
       } else if (name === "read_file" && result?.ok !== false && typeof result?.content === "string") {
         const path = result.path ?? args.path;
         const contentHash = result.contentHash ?? createHash("sha256").update(result.content).digest("hex");

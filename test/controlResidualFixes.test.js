@@ -6,9 +6,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { runTask } from "../src/agent/taskRunner.js";
 import { createExecutionBackend } from "../src/execution/backend.js";
+import { evaluateTaskAcceptance } from "../src/harness/acceptance.js";
+import { createProcessController, evaluateToolCall, recordToolObservation } from "../src/harness/processController.js";
 import { inferTaskIntent } from "../src/harness/taskIntent.js";
+import { buildTaskSpec } from "../src/harness/taskSpec.js";
 import { createSessionStore } from "../src/session/store.js";
 import { createToolRuntime } from "../src/tools/runtime.js";
+import { buildVerificationPlan } from "../src/verification/planner.js";
+import { advanceVerificationState, emptyVerificationState } from "../src/verification/state.js";
 
 const call = (id, name, args) => ({ choices: [{ message: { role: "assistant", tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(args) } }] } }], usage: { total_tokens: 1 } });
 const answer = (content) => ({ choices: [{ message: { role: "assistant", content } }], usage: { total_tokens: 1 } });
@@ -75,4 +80,58 @@ test("CTRL-004 explicit output targets count as progress in plain and ignored Gi
     assert.notEqual(result.stoppedReason, "no_progress", git ? "git" : "plain");
     assert.equal(await readFile(join(f.cwd, "dist/progress.txt"), "utf8"), "xxxxxxxxxx");
   }
+});
+
+test("read-only questions and reviews mentioning test commands or software subjects stay read-only and satisfiable", () => {
+  for (const task of [
+    "Why did npm test fail?",
+    "Review the npm run check script in package.json",
+    "Review update logic in src/app.js",
+    "Review the create and delete logic in src/app.js",
+    "分析一下为什么会创建失败",
+    "为什么这段代码会修改全局状态？",
+    "审查一下这个新增的校验逻辑",
+  ]) {
+    const spec = buildTaskSpec({ task, cwd: "/tmp/repo" });
+    const plan = buildVerificationPlan({ taskSpec: spec });
+    const acceptance = evaluateTaskAcceptance({ taskSpec: spec, verificationPlan: plan, verification: emptyVerificationState(), agentState: {}, effects: { events: [] } });
+    assert.equal(spec.mayWrite, false, task);
+    assert.equal(spec.requiresCodeChange, false, task);
+    assert.deepEqual(spec.requiredChecks, [], task);
+    assert.equal(plan.required, false, task);
+    assert.equal(acceptance.satisfied, true, task);
+  }
+  const compound = buildTaskSpec({ task: "分析一下为什么会创建失败，并修复它", cwd: "/tmp/repo" });
+  assert.equal(compound.mayWrite, true);
+  assert.equal(compound.requiresCodeChange, true);
+});
+
+test("processController run_shell deduplication distinguishes cwd while short-circuiting same-cwd repeats", () => {
+  const controller = createProcessController();
+  recordToolObservation(controller, { name: "run_shell", args: { command: "npm test", cwd: "pkg-a" }, result: { ok: true, stdout: "pkg-a ok" }, step: 1 });
+  const otherCwd = evaluateToolCall(controller, { name: "run_shell", args: { command: "npm test", cwd: "pkg-b" }, step: 2 });
+  assert.equal(otherCwd.action, "allow");
+  const sameCwd = evaluateToolCall(controller, { name: "run_shell", args: { command: "npm test", cwd: "pkg-a" }, step: 2 });
+  assert.equal(sameCwd.action, "short_circuit");
+});
+
+test("background job_status binds verification freshness to start_job launch revision", async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.cwd, "src/api.js"), "export const v = 1;\n");
+  await writeFile(join(f.cwd, "package.json"), JSON.stringify({ scripts: { test: 'node -e "process.exit(0)"' } }));
+  const taskSpec = buildTaskSpec({ task: "Update src/api.js and run npm test", cwd: f.cwd });
+  const plan = buildVerificationPlan({ taskSpec });
+  let vState = emptyVerificationState();
+  const started = await f.tools.execute("start_job", { command: "npm test" });
+  vState = advanceVerificationState(vState, { name: "start_job", args: { command: "npm test" }, result: started, step: 1 }, { plan });
+  const edited = await f.tools.execute("edit_file", { path: "src/api.js", search: "1", replace: "2" });
+  vState = advanceVerificationState(vState, { name: "edit_file", args: {}, result: edited, step: 2 }, { plan });
+  let polled;
+  for (let i = 0; i < 40; i += 1) {
+    polled = await f.tools.execute("job_status", { jobId: started.jobId });
+    if (polled.status === "exited") break;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  vState = advanceVerificationState(vState, { name: "job_status", args: { jobId: started.jobId }, result: polled, step: 3 }, { plan });
+  assert.equal(evaluateTaskAcceptance({ taskSpec, verificationPlan: plan, verification: vState, agentState: { filesEdited: ["src/api.js"] }, effects: { events: [] } }).checks[0].status, "stale");
 });

@@ -67,39 +67,41 @@ async function readChatCompletionSse(body, handlers) {
   let usage;
   let buffer = "";
 
+  const applyEvent = (event) => {
+    if (event === "[DONE]") {
+      sawDone = true;
+      return;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(event);
+    } catch {
+      return;
+    }
+    if (parsed.error) {
+      const detail = typeof parsed.error === "string" ? parsed.error : parsed.error.message ?? JSON.stringify(parsed.error);
+      const error = new Error(`API stream error: ${detail}`);
+      if (Number.isInteger(parsed.error.status ?? parsed.error.code)) error.status = Number(parsed.error.status ?? parsed.error.code);
+      throw error;
+    }
+    if (parsed.usage) usage = parsed.usage;
+    const choice = parsed.choices?.[0];
+    if (!choice) return;
+    if (choice.finish_reason) finishReason = choice.finish_reason;
+    applyChatDelta(message, choice.delta ?? {}, handlers);
+  };
+
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     const events = consumeSseEvents(buffer);
     buffer = events.rest;
-    for (const event of events.items) {
-      if (event === "[DONE]") {
-        sawDone = true;
-        continue;
-      }
-      const parsed = JSON.parse(event);
-      if (parsed.usage) usage = parsed.usage;
-      const choice = parsed.choices?.[0];
-      if (!choice) continue;
-      if (choice.finish_reason) finishReason = choice.finish_reason;
-      applyChatDelta(message, choice.delta ?? {}, handlers);
-    }
+    for (const event of events.items) applyEvent(event);
   }
 
   buffer += decoder.decode();
-  for (const event of consumeSseEvents(`${buffer}\n\n`).items) {
-    if (event === "[DONE]") {
-      sawDone = true;
-      continue;
-    }
-    const parsed = JSON.parse(event);
-    if (parsed.usage) usage = parsed.usage;
-    const choice = parsed.choices?.[0];
-    if (!choice) continue;
-    if (choice.finish_reason) finishReason = choice.finish_reason;
-    applyChatDelta(message, choice.delta ?? {}, handlers);
-  }
+  for (const event of consumeSseEvents(`${buffer}\n\n`).items) applyEvent(event);
 
   if (!sawDone || !finishReason) {
     throw incompleteResponse("Stream ended before its completion marker and finish reason.", usage);

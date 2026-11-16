@@ -164,6 +164,7 @@ export function executionCommand({ command, cwd, policy, sandbox, shell = "/bin/
     else args.push("--ro-bind", "/dev/null", path);
   }
   for (const path of policy.denyWriteRoots) if (existsSync(path) && !policy.denyReadRoots.includes(path)) args.push("--ro-bind", path, path);
+  for (const path of policy.denyWriteLiterals ?? []) if (existsSync(path) && lstatSync(path).isFile()) args.push("--ro-bind", path, path);
   args.push("--proc", "/proc", "--dev", "/dev", "--remount-ro", "/", "--chdir", cwd, "--", shell, ...shellArgs);
   return { executable: sandbox.executable, args, sandbox: { ...sandbox, enforced: true } };
 }

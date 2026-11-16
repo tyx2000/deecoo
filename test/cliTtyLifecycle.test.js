@@ -136,6 +136,17 @@ test("CLI-EXIT-002: a TTY file approval still accepts input before single-task e
   });
 });
 
+test("CLI-EXIT-002: pressing Esc in a TTY approval menu denies the tool without aborting the task", async () => {
+  await ttyFixture("approval", async ({ child, cwd, waitFor, finish }) => {
+    await waitFor((text) => text.includes("Always Approve"), "the file approval menu");
+    child.stdin.write("\x1b");
+    const result = await finish();
+    assert.doesNotMatch(result.stdout, /interrupted: Esc/);
+    await assert.rejects(readFile(join(cwd, "approved.txt"), "utf8"), { code: "ENOENT" });
+    assert.match(result.stdout, /User denied file write/);
+  });
+});
+
 test("CLI-EXIT-002: interactive tasks remain usable after task input cleanup", async () => {
   await ttyFixture("success", async ({ child, waitFor, finish }) => {
     await waitFor((text) => text.includes("deecoo >>"), "the initial interactive prompt");

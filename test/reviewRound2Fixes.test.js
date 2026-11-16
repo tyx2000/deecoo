@@ -35,6 +35,10 @@ test("R2-P0-1 the sandbox policy keeps the repository's config, hooks, and .git 
   assert.deepEqual(policy.denyWriteLiterals, [join(cwd, ".git")]);
   assert.match(seatbeltProfile(policy), new RegExp(`\\(deny file-write\\* \\(literal "${join(cwd, ".git").replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}"\\)\\)`));
   assert.ok(policy.writeRoots.includes(cwd), "the rest of the workspace stays writable");
+  await writeFile(join(cwd, ".git"), "gitdir: ../.git/worktrees/sub\n");
+  const bwrap = executionCommand({ command: "true", cwd, policy, sandbox: { available: true, kind: "bubblewrap", executable: "/usr/bin/bwrap" } });
+  const gitFile = join(cwd, ".git");
+  assert.ok(bwrap.args.some((arg, index) => arg === "--ro-bind" && bwrap.args[index + 1] === gitFile && bwrap.args[index + 2] === gitFile));
 });
 
 test("R2-P0-1 a sandboxed job cannot plant git config or hooks, but ordinary git work still succeeds", { skip: seatbeltSkip }, async (t) => {

@@ -1,6 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { writeProviderModel, writeSettingsEnv } from "../config/settings.js";
+import { createModelClient } from "../llm/clientFactory.js";
 import { listRunAudits, readRunAudit, verifyRunAuditChain } from "../observability/audit.js";
 import { buildTraceEvalResultLines, buildTraceEvalSuggestionLines } from "./evalTrace.js";
 import { listCodexSkills, loadCodexSkill } from "../skills/install.js";
@@ -198,6 +199,15 @@ export async function selectModel({ client, config, settingsPath }) {
     });
     if (!selected) return;
     config.model = selected.value;
+    const entry = Array.isArray(result?.data) ? result.data.find((item) => item?.id === config.model) : undefined;
+    const contextWindow = Number.isSafeInteger(entry?.context_window) && entry.context_window > 0 ? entry.context_window : undefined;
+    const maxOutputTokens = Number.isSafeInteger(entry?.max_output_tokens) && entry.max_output_tokens > 0 ? entry.max_output_tokens : undefined;
+    config.modelMetadata = contextWindow && config.provider === "deepseek"
+      ? { model: config.model, provider: config.provider, baseUrl: config.baseUrl, contextWindow, ...(maxOutputTokens ? { maxOutputTokens } : {}) }
+      : undefined;
+    if (client && typeof client === "object" && config.provider && config.apiKey && config.baseUrl) {
+      Object.assign(client, createModelClient(config));
+    }
     await persistProviderModel({ settingsPath, provider: config.provider, model: config.model });
     console.log("Model: " + config.model);
   } catch (error) {

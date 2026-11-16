@@ -37,11 +37,11 @@ export function extractNetworkTargets(command) {
 function commandWords(command) {
   const withoutQuotes = String(command ?? "").replace(/"[^"]*"|'[^']*'/g, " ");
   return withoutQuotes
-    .split(/(?:\|\||&&|[;|&\n])/)
+    .split(/(?:\|\||&&|[;|&\n()])/)
     .map((segment) => {
       const tokens = segment.trim().split(/\s+/).filter(Boolean);
-      // Skip leading env assignments (FOO=bar) to find the real command word of the segment.
-      const cmd = tokens.find((token) => !/^\w+=/.test(token));
+      // Skip leading env assignments (FOO=bar) and group braces to find the real command word.
+      const cmd = tokens.find((token) => !/^(?:\w+=.*|[{}])$/.test(token));
       return cmd ? basename(cmd) : undefined;
     })
     .filter(Boolean);
