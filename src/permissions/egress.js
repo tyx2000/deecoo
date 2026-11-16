@@ -6,8 +6,8 @@ const NETWORK_TOOLS = new Set(["curl", "wget", "http", "https", "httpie", "nc", 
 // Commands that reach the network via a subcommand (host may be a URL argument).
 const NETWORK_COMMANDS = new Set(["git", "npm", "pnpm", "yarn", "pip", "pip3", "docker", "gh"]);
 
-const URL_RE = /\bhttps?:\/\/([^/\s"']+)/gi;
-const HOST_ARG_RE = /(?:^|\s)(?:--?[a-z-]+\s+)?([a-z0-9.-]+\.[a-z]{2,}|\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?(?=\s|$)/gi;
+const URL_RE = /\bhttps?:\/\/([^/\s"'();|&<>`}]+)/gi;
+const HOST_ARG_RE = /(?:^|[\s(])(?:--?[a-z-]+\s+)?([a-z0-9.-]+\.[a-z]{2,}|\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?(?=[\s);|&<>`}]|$)/gi;
 
 // Extract candidate network destination hosts — ONLY from commands that actually reach the
 // network, so a command that merely mentions a URL (echo, grep, a code comment) is not treated

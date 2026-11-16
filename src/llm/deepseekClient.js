@@ -67,6 +67,7 @@ async function readChatCompletionSse(body, handlers) {
   let usage;
   let buffer = "";
 
+  let completed = false;
   const applyEvent = (event) => {
     if (event === "[DONE]") {
       sawDone = true;
@@ -76,7 +77,7 @@ async function readChatCompletionSse(body, handlers) {
     try {
       parsed = JSON.parse(event);
     } catch {
-      return;
+      throw incompleteResponse("Stream ended with a malformed SSE JSON event.", usage);
     }
     if (parsed.error) {
       const detail = typeof parsed.error === "string" ? parsed.error : parsed.error.message ?? JSON.stringify(parsed.error);
@@ -91,27 +92,35 @@ async function readChatCompletionSse(body, handlers) {
     applyChatDelta(message, choice.delta ?? {}, handlers);
   };
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const events = consumeSseEvents(buffer);
-    buffer = events.rest;
-    for (const event of events.items) applyEvent(event);
-  }
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = consumeSseEvents(buffer);
+      buffer = events.rest;
+      for (const event of events.items) applyEvent(event);
+    }
 
-  buffer += decoder.decode();
-  for (const event of consumeSseEvents(`${buffer}\n\n`).items) applyEvent(event);
+    buffer += decoder.decode();
+    for (const event of consumeSseEvents(`${buffer}\n\n`).items) applyEvent(event);
 
-  if (!sawDone || !finishReason) {
-    throw incompleteResponse("Stream ended before its completion marker and finish reason.", usage);
+    if (!sawDone || !finishReason) {
+      throw incompleteResponse("Stream ended before its completion marker and finish reason.", usage);
+    }
+    assertCompleteToolCalls(message.tool_calls, usage, finishReason);
+    if (message.tool_calls.length === 0) delete message.tool_calls;
+    completed = true;
+    return {
+      choices: [{ message, finish_reason: finishReason }],
+      usage,
+    };
+  } finally {
+    if (!completed) {
+      try { await reader.cancel(); } catch {}
+    }
+    try { reader.releaseLock(); } catch {}
   }
-  assertCompleteToolCalls(message.tool_calls, usage, finishReason);
-  if (message.tool_calls.length === 0) delete message.tool_calls;
-  return {
-    choices: [{ message, finish_reason: finishReason }],
-    usage,
-  };
 }
 
 function consumeSseEvents(buffer) {

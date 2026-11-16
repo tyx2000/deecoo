@@ -18,7 +18,7 @@ export async function selectOption({ title, options, selectedIndex = 0, filterab
   let renderedFrame;
 
   readline.emitKeypressEvents(input);
-  const resumeStatusLine = pauseStatusLine();
+  const resumeStatusLine = pauseStatusLine({ handlesEscape: true });
   const wasRaw = input.isRaw;
   input.setRawMode(true);
   output.write("\x1B[?25l");

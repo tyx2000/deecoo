@@ -116,7 +116,7 @@ function classifyShellText(text, { egressAllowlist }, depth) {
   const blocked = [
     ...detectBlockedShellTokens(text),
     ...detectInteractiveShellCommands(text),
-    ...(shellTokens(text).some((token) => token.split(/[=:<>&]/).some((path) => isSensitivePath(path.replace(/^[@<>]+/, "")))) ? ["sensitive path access"] : []),
+    ...(shellTokens(text).some((token) => token.split(/[=:]/).some((path) => isSensitivePath(path.replace(/^[@<>]+/, "")))) ? ["sensitive path access"] : []),
     ...BLOCK_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason),
     ...SENSITIVE_PATH_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason),
     ...EGRESS_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason),
@@ -593,9 +593,14 @@ function shellTokens(command) {
         index += 1;
         current += command[index];
       }
-      if (command[index + 1] === "&" && /[0-9-]/.test(command[index + 2] ?? "")) {
-        current += command[index + 1] + command[index + 2];
-        index += 2;
+      if (command[index + 1] === "&") {
+        if (/[0-9-]/.test(command[index + 2] ?? "")) {
+          current += command[index + 1] + command[index + 2];
+          index += 2;
+        } else {
+          current += "&";
+          index += 1;
+        }
       }
       pushCurrent();
       continue;

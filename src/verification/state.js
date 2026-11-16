@@ -85,7 +85,7 @@ export function verificationIsFresh(state, plan) {
   if (plan?.requiredChecks?.some((check) => check.required !== false)) {
     const revision = state?.validationRevision ?? state?.workspaceRevision;
     return plan.requiredChecks.filter((check) => check.required !== false).every((check) => {
-      const latest = (state?.evidence ?? []).filter((item) => matchingCheckIds(item.command, [check], { scope: item.scope ?? "." }).length).at(-1);
+      const latest = latestEvidenceForCheck((state?.evidence ?? []).filter((item) => matchingCheckIds(item.command, [check], { scope: item.scope ?? "." }).length));
       return latest?.ok && (latest.validatedRevision ?? latest.revision) === revision;
     }) && !hasFailedVerification(state, plan);
   }
@@ -96,11 +96,24 @@ export function verificationIsFresh(state, plan) {
 export function hasFailedVerification(state, plan) {
   return latestEvidence(state, plan).some((item) => !item.ok);
 }
+function evidenceRank(item) {
+  return Number(item?.validatedRevision ?? item?.revision ?? 0);
+}
+function latestEvidenceForCheck(items = []) {
+  let best;
+  for (const item of items) {
+    if (!best || evidenceRank(item) >= evidenceRank(best)) best = item;
+  }
+  return best;
+}
 function latestEvidence(state, plan) {
   const latest = new Map();
   for (const item of state?.evidence ?? []) {
     const ids = plan?.requiredChecks ? matchingCheckIds(item.command, plan.requiredChecks, { scope: item.scope ?? "." }) : item.checkIds ?? [];
-    for (const key of ids.length ? ids.map((id) => "check:" + id) : [canonicalCheckCommand(item.command) ?? item.command]) latest.set(key, item);
+    for (const key of ids.length ? ids.map((id) => "check:" + id) : [canonicalCheckCommand(item.command) ?? item.command]) {
+      const prior = latest.get(key);
+      if (!prior || evidenceRank(item) >= evidenceRank(prior)) latest.set(key, item);
+    }
   }
   return [...latest.values()];
 }

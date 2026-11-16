@@ -10,9 +10,11 @@ const ENGLISH_WRITE_REQUEST = new RegExp(`(?<![\\w-])(?:re-)?${ENGLISH_WRITE_WOR
 const INSPECTED_CHANGE = new RegExp(`(?:^|[.:;!?]\\s*|\\b(?:review|explain|analy[sz]e|inspect|examine|audit|evaluate|describe|summari[sz]e|discuss|assess|look\\s+at|about|of|in|on|at|from|after|before|behind|why|how|when|where|whether|if)\\s+)`
   + `(?:the|a|an|this|that|these|those|its|our|your|my|their|his|her)\\s+(?:[\\w-]+\\s+)?${ENGLISH_WRITE_WORD}(?:e?s)?(?![\\w-])`, "gim");
 const INSPECTED_CHANGE_ZH = /(?:审查|评审|解释|说明|分析|检查|查看|看看|看一下)\s*(?:一下)?\s*(?:这个|这次|这些|此次|该|那个|上次|上一次|之前的|最近的|本次)\s*(?:修复|修改|改动|更改|新增|创建|删除|编辑|实现|改造)/g;
-const QUESTION_CHANGE_ZH = /(?:(?:审查|评审|解释|说明|分析|检查|查看|看看|看一下)\s*(?:一下)?\s*)?为什么(?:(?!并(?:且)?(?:修改|修复|实现|新增|删除|创建|改动|更改))[^，,；;。\n？?])*/g;
-const SYMBOL_NAME = "(?:[\\p{L}_$][\\p{L}\\p{N}_$-]*|[\"'“‘][\\p{L}_$][\\p{L}\\p{N}_$-]*[\"'”’])";
-const SYMBOL_LIST = SYMBOL_NAME + "(?:\\s*(?:,\\s*(?:and\\s+)?|\\band\\s+|&\\s*)" + SYMBOL_NAME + ")*";
+const QUESTION_CHANGE_ZH = /(?:(?:审查|评审|解释|说明|分析|检查|查看|看看|看一下)\s*(?:一下)?\s*)?为什么(?:(?!(?:并(?:且)?|然后|接着|再|同时|顺便|以及|随后|之后|请|帮我)\s*(?:修改|编辑|新增|创建|实现|改造|搭建|接入|改动|更改|修复|删除))[^，,；;。\n？?])*/g;
+const QUOTED_SYMBOL = "[\"'“‘][\\p{L}_$][\\p{L}\\p{N}_$-]*[\"'”’]";
+const SYMBOL_NAME = `(?:[\\p{L}_$][\\p{L}\\p{N}_$-]*|${QUOTED_SYMBOL})`;
+const COORDINATED_SYMBOL = `(?:${ENGLISH_WRITE_WORD}|${QUOTED_SYMBOL})`;
+const SYMBOL_LIST = `(?:${COORDINATED_SYMBOL}(?:\\s*(?:,\\s*(?:and\\s+)?|\\band\\s+|&\\s*)${COORDINATED_SYMBOL})*|${SYMBOL_NAME})`;
 const SYMBOL_KIND = "(?:functions?|methods?|endpoints?|handlers?|classes|class|variables?|properties|property|symbols?|routes?|APIs?|logic|flows?|behaviors?|implementations?|modules?|services?|helpers?|components?|middlewares?|controllers?|hooks?|paths?|scripts?|steps?|rules?|policies|policy|contracts?|states?)\\b";
 // Named objects are not imperatives. Requiring a determiner or inspection verb keeps
 // "Update functions" writable, while "Review update and delete functions" remains read-only.

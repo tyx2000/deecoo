@@ -268,21 +268,31 @@ test("client factory exposes all configured providers", () => {
   }
 });
 
-test("DeepSeek streaming tolerates malformed SSE frames and surfaces explicit error frames", async () => {
+test("DeepSeek streaming rejects corrupted SSE frames and cancels/releases the stream on error frames", async () => {
   const originalFetch = globalThis.fetch;
   try {
-    const payload =
-      "data: {not valid json\n\n" +
-      `data: ${JSON.stringify({ choices: [{ delta: { content: "Hi" }, finish_reason: "stop" }] })}\n\n` +
+    const corruptedPayload =
+      `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", type: "function", function: { name: "read_file", arguments: '{"path":"a.js"' } }] } }] })}\n\n` +
+      "data: {corrupted middle frame\n\n" +
+      `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "}" } }] }, finish_reason: "tool_calls" }] })}\n\n` +
       "data: [DONE]\n\n";
-    globalThis.fetch = async () => new Response(payload, { status: 200, headers: { "content-type": "text/event-stream" } });
+    globalThis.fetch = async () => new Response(corruptedPayload, { status: 200, headers: { "content-type": "text/event-stream" } });
     const client = createDeepSeekClient({ apiKey: "k", baseUrl: "https://api.deepseek.com", timeoutMs: 1000, retryAttempts: 1 });
-    const response = await client.chatCompletionStream({ model: "deepseek-v4-pro", messages: [{ role: "user", content: "hi" }] });
-    assert.equal(response.choices[0].message.content, "Hi");
+    await assert.rejects(client.chatCompletionStream({ model: "deepseek-v4-pro", messages: [{ role: "user", content: "hi" }] }), { code: "INCOMPLETE_RESPONSE" });
 
-    const errorPayload = `data: ${JSON.stringify({ error: { message: "quota exceeded", code: 429 } })}\n\n`;
-    globalThis.fetch = async () => new Response(errorPayload, { status: 200, headers: { "content-type": "text/event-stream" } });
+    let cancelled = false;
+    const hangingErrorStream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ error: { message: "quota exceeded", code: 429 } })}\n\n`));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    globalThis.fetch = async () => new Response(hangingErrorStream, { status: 200, headers: { "content-type": "text/event-stream" } });
     await assert.rejects(client.chatCompletionStream({ model: "deepseek-v4-pro", messages: [{ role: "user", content: "hi" }] }), /API stream error: quota exceeded/);
+    assert.equal(cancelled, true, "stream reader must be cancelled on error exit");
+    assert.equal(hangingErrorStream.locked, false, "stream reader lock must be released on error exit");
   } finally {
     globalThis.fetch = originalFetch;
   }

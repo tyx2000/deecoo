@@ -101,9 +101,17 @@ test("read-only questions and reviews mentioning test commands or software subje
     assert.equal(plan.required, false, task);
     assert.equal(acceptance.satisfied, true, task);
   }
-  const compound = buildTaskSpec({ task: "分析一下为什么会创建失败，并修复它", cwd: "/tmp/repo" });
-  assert.equal(compound.mayWrite, true);
-  assert.equal(compound.requiresCodeChange, true);
+  for (const task of [
+    "分析一下为什么会创建失败，并修复它",
+    "分析为什么加载失败然后修改 app.js 的加载逻辑",
+    "Review the parser and fix logic for empty records in parser.js",
+  ]) {
+    const compound = buildTaskSpec({ task, cwd: "/tmp/repo" });
+    assert.equal(compound.mayWrite, true, task);
+    assert.equal(compound.requiresCodeChange, true, task);
+  }
+  const multilineCheck = buildTaskSpec({ task: "Run npm run typecheck\nOutput the result.", cwd: "/tmp/repo" });
+  assert.deepEqual(multilineCheck.requiredChecks.map((check) => check.target), ["npm run typecheck"]);
 });
 
 test("processController run_shell deduplication distinguishes cwd while short-circuiting same-cwd repeats", () => {
@@ -115,7 +123,7 @@ test("processController run_shell deduplication distinguishes cwd while short-ci
   assert.equal(sameCwd.action, "short_circuit");
 });
 
-test("background job_status binds verification freshness to start_job launch revision", async (t) => {
+test("background job_status binds verification freshness to start_job launch revision and does not clobber newer passing checks", async (t) => {
   const f = await fixture(t);
   await writeFile(join(f.cwd, "src/api.js"), "export const v = 1;\n");
   await writeFile(join(f.cwd, "package.json"), JSON.stringify({ scripts: { test: 'node -e "process.exit(0)"' } }));
@@ -132,6 +140,12 @@ test("background job_status binds verification freshness to start_job launch rev
     if (polled.status === "exited") break;
     await new Promise((r) => setTimeout(r, 25));
   }
-  vState = advanceVerificationState(vState, { name: "job_status", args: { jobId: started.jobId }, result: polled, step: 3 }, { plan });
-  assert.equal(evaluateTaskAcceptance({ taskSpec, verificationPlan: plan, verification: vState, agentState: { filesEdited: ["src/api.js"] }, effects: { events: [] } }).checks[0].status, "stale");
+  const staleState = advanceVerificationState(vState, { name: "job_status", args: { jobId: started.jobId }, result: polled, step: 3 }, { plan });
+  assert.equal(evaluateTaskAcceptance({ taskSpec, verificationPlan: plan, verification: staleState, agentState: { filesEdited: ["src/api.js"] }, effects: { events: [] } }).checks[0].status, "stale");
+
+  // If a foreground rerun already validated the post-edit revision, polling the older background job later must not downgrade it back to stale.
+  const rerun = await f.tools.execute("run_shell", { command: "npm test" });
+  let freshState = advanceVerificationState(vState, { name: "run_shell", args: { command: "npm test" }, result: rerun, step: 3 }, { plan });
+  freshState = advanceVerificationState(freshState, { name: "job_status", args: { jobId: started.jobId }, result: polled, step: 4 }, { plan });
+  assert.equal(evaluateTaskAcceptance({ taskSpec, verificationPlan: plan, verification: freshState, agentState: { filesEdited: ["src/api.js"] }, effects: { events: [] } }).checks[0].status, "passed");
 });

@@ -147,6 +147,29 @@ test("CLI-EXIT-002: pressing Esc in a TTY approval menu denies the tool without 
   });
 });
 
+test("CLI-EXIT-002: pressing Esc at a [y/N] line approval prompt cancels the task", async () => {
+  const { installTaskInterrupt } = await import("../src/cli/taskInterrupt.js");
+  const { createPrompter } = await import("../src/cli/prompter.js");
+  const wasInTTY = process.stdin.isTTY, wasOutTTY = process.stdout.isTTY, wasRaw = process.stdin.isRaw, setRaw = process.stdin.setRawMode;
+  Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+  Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+  process.stdin.setRawMode = (raw) => { process.stdin.isRaw = Boolean(raw); return process.stdin; };
+  const interrupt = installTaskInterrupt(false);
+  try {
+    const prompter = createPrompter(false);
+    const pending = prompter("Execute extension tool: custom_tool", { kind: "extension-tool-approval", signal: interrupt.signal });
+    setTimeout(() => process.stdin.emit("keypress", "\x1b", { name: "escape" }), 10);
+    await assert.rejects(pending, { name: "AbortError" });
+    assert.equal(interrupt.signal.aborted, true);
+  } finally {
+    interrupt.dispose();
+    process.stdin.setRawMode = setRaw;
+    process.stdin.isRaw = wasRaw;
+    Object.defineProperty(process.stdin, "isTTY", { value: wasInTTY, configurable: true });
+    Object.defineProperty(process.stdout, "isTTY", { value: wasOutTTY, configurable: true });
+  }
+});
+
 test("CLI-EXIT-002: interactive tasks remain usable after task input cleanup", async () => {
   await ttyFixture("success", async ({ child, waitFor, finish }) => {
     await waitFor((text) => text.includes("deecoo >>"), "the initial interactive prompt");

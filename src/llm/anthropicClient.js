@@ -230,35 +230,44 @@ async function readAnthropicSse(body, handlers) {
     }
   };
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const consumed = consumeSseEvents(buffer);
-    buffer = consumed.rest;
-    for (const event of consumed.items) applyEvent(event);
-  }
-  buffer += decoder.decode();
-  for (const event of consumeSseEvents(`${buffer}\n\n`).items) applyEvent(event);
+  let completed = false;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const consumed = consumeSseEvents(buffer);
+      buffer = consumed.rest;
+      for (const event of consumed.items) applyEvent(event);
+    }
+    buffer += decoder.decode();
+    for (const event of consumeSseEvents(`${buffer}\n\n`).items) applyEvent(event);
 
-  const usage = normalizeUsage({ ...startUsage, input_tokens: inputTokens, output_tokens: outputTokens });
-  if (!sawMessageStop || !finishReason) {
-    throw incompleteResponse("Anthropic stream ended before message_stop and its stop reason.", usage);
+    const usage = normalizeUsage({ ...startUsage, input_tokens: inputTokens, output_tokens: outputTokens });
+    if (!sawMessageStop || !finishReason) {
+      throw incompleteResponse("Anthropic stream ended before message_stop and its stop reason.", usage);
+    }
+    const toolCalls = [...blocks.entries()]
+      .sort(([left], [right]) => left - right)
+      .filter(([, block]) => block.type === "tool_use")
+      .map(([, block]) => ({
+        id: block.id,
+        type: "function",
+        function: { name: block.name, arguments: block.arguments || "{}" },
+      }));
+    assertCompleteToolCalls(toolCalls, usage, finishReason);
+    if (toolCalls.length) message.tool_calls = toolCalls;
+    completed = true;
+    return {
+      choices: [{ message, finish_reason: finishReason }],
+      usage,
+    };
+  } finally {
+    if (!completed) {
+      try { await reader.cancel(); } catch {}
+    }
+    try { reader.releaseLock(); } catch {}
   }
-  const toolCalls = [...blocks.entries()]
-    .sort(([left], [right]) => left - right)
-    .filter(([, block]) => block.type === "tool_use")
-    .map(([, block]) => ({
-      id: block.id,
-      type: "function",
-      function: { name: block.name, arguments: block.arguments || "{}" },
-    }));
-  assertCompleteToolCalls(toolCalls, usage, finishReason);
-  if (toolCalls.length) message.tool_calls = toolCalls;
-  return {
-    choices: [{ message, finish_reason: finishReason }],
-    usage,
-  };
 }
 
 function consumeSseEvents(buffer) {

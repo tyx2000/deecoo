@@ -41,11 +41,14 @@ export function inferRequiredChecks(task) {
   // override this list rather than being merged with guessed requirements.
   const pattern = /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?[\w:.-]+(?:\s+--(?:\s+(?!(?:and|then|并|然后|且|与)\b)[^\s,;。`]+)+)?|\bnode\s+--test(?:\s+(?!(?:and|then|please|report|并|然后|且|与)\b)[\w./*-]+)*|\b(?:python3?\s+-m\s+)?pytest(?:\s+(?!(?:and|then|please|report|并|然后|且|与)\b)[\w./*-]+)*|\bcargo\s+(?:test|check|clippy)|\bgo\s+test(?:\s+(?!(?:and|then|please|report|并|然后|且|与)\b)[\w./*-]+)*|\bswift\s+test|\bdotnet\s+test/g;
   for (const match of String(task ?? "").matchAll(pattern)) {
-    const prefix = String(task).slice(Math.max(0, match.index - 30), match.index);
-    const suffix = String(task).slice(match.index + match[0].length, match.index + match[0].length + 30);
-    if (/(?:do not|don't|never|不要|无需|不必|禁止)\s*(?:run|execute|运行|执行)?\s*$/i.test(prefix)) continue;
-    if (/(?:why(?:\s+did|\s+does|\s+is)?|how(?:\s+does|\s+to)?|what(?:\s+does|\s+is|\s+makes)?|whether|explain|review|inspect|examine|analy[sz]e|describe|about)\s+(?:the\s+)?$/i.test(prefix)
-      || /^\s+(?:script|config(?:uration)?|command|output|logs?|results?|failures?|errors?|failed|fails)\b/i.test(suffix)) continue;
+    const prefix = String(task).slice(Math.max(0, match.index - 40), match.index);
+    const suffix = String(task).slice(match.index + match[0].length, match.index + match[0].length + 40);
+    const clausePrefix = prefix.split(/[.;!?\n。；！？]/).at(-1) ?? "";
+    const clauseSuffix = suffix.split(/[.;!?\n,，。；！？]/)[0] ?? "";
+    if (/(?:do not|don't|never|不要|无需|不必|禁止)\s*(?:run|execute|运行|执行)?\s*$/i.test(clausePrefix)) continue;
+    const explicitRun = /(?:^|\b)(?:run|execute|运行|执行)\s*$/i.test(clausePrefix);
+    if (!explicitRun && (/(?:why(?:\s+did|\s+does|\s+is)?|how(?:\s+does|\s+to)?|what(?:\s+does|\s+is|\s+makes)?|whether|explain|review|inspect|examine|analy[sz]e|describe|about)\s+(?:the\s+)?$/i.test(clausePrefix)
+      || /^[ \t]+(?:script|config(?:uration)?|command|output|logs?|results?|failures?|errors?|failed|fails)\b/i.test(clauseSuffix))) continue;
     const command = match[0].replace(/[.!?。]+$/, "");
     const key = canonicalCheckCommand(command);
     if (key && !checks.some((item) => canonicalCheckCommand(item.command) === key)) checks.push({ command });
@@ -84,7 +87,7 @@ export function evaluateTaskAcceptance({ taskSpec, verificationPlan, verificatio
   const modified = Boolean(agentState?.filesEdited?.length || effects?.events?.some((effect) => effect.type === "file-change"));
   const checks = requiredChecks.map((check) => {
     const attempts = (verification?.evidence ?? []).filter((item) => matchingCheckIds(item.command, [check], { scope: item.scope ?? "." }).length);
-    const latest = attempts.at(-1);
+    const latest = latestCheckEvidence(attempts);
     const revision = verification?.validationRevision ?? verification?.workspaceRevision;
     const fresh = latest && (latest.validatedRevision ?? latest.revision) === revision;
     return { id: check.id, target: check.target, scope: check.scope, required: check.required !== false,
@@ -104,7 +107,10 @@ export function evaluateTaskAcceptance({ taskSpec, verificationPlan, verificatio
   const latestFailures = new Map();
   for (const item of verification?.evidence ?? []) {
     const ids = matchingCheckIds(item.command, requiredChecks, { scope: item.scope ?? "." });
-    for (const key of ids.length ? ids.map((id) => "check:" + id) : [canonicalCheckCommand(item.command)]) latestFailures.set(key, item);
+    for (const key of ids.length ? ids.map((id) => "check:" + id) : [canonicalCheckCommand(item.command)]) {
+      const prior = latestFailures.get(key);
+      if (!prior || evidenceRank(item) >= evidenceRank(prior)) latestFailures.set(key, item);
+    }
   }
   const failedEvidence = [...latestFailures.values()].filter((item) => !item.ok);
   const inferredType = modified ? "modified" : "no-change";
@@ -148,4 +154,16 @@ function collectSourceEvidence(agentState, effects, verification) {
     else out.push({ path, revision: current, content });
   }
   return out;
+}
+
+function evidenceRank(item) {
+  return Number(item?.validatedRevision ?? item?.revision ?? 0);
+}
+
+function latestCheckEvidence(attempts = []) {
+  let best;
+  for (const item of attempts) {
+    if (!best || evidenceRank(item) >= evidenceRank(best)) best = item;
+  }
+  return best;
 }

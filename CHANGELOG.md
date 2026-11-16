@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.1.13 — 2026-11-16
+
+- OpenAI/DeepSeek 流式解析遇到损坏的 SSE JSON 数据帧时按 `INCOMPLETE_RESPONSE` 拒绝，防止缺失或截断的工具参数被继续派发；流式读取因错误提前退出时主动取消并释放 `ReadableStream` reader（SCOR-001、SCOR-006）。
+- `inferRequiredChecks` 按同一子句边界区分命令执行指令与讨论/审查对象，保留跨行指令如 `Run npm run typecheck`（SCOR-002）；复合修改请求（如 `分析为什么加载失败然后修改 app.js 的加载逻辑`、`Review the parser and fix logic...`）优先保留独立修改语义（SCOR-003）。
+- 验证证据选择优先采用验证了较新工作区修订号（`validatedRevision`）的结果，迟到的旧后台任务结果不再覆盖更新的通过证据（SCOR-004）。
+- 仅由自身处理 `Esc` 的选择菜单暂停任务级 `Esc` 中断，`[y/N]` 行级审批提示按 `Esc` 仍可立即取消任务（SCOR-005）；外联 URL/主机提取按 Shell 分组与运算符边界切分，不再误拦括号内白名单域名（SCOR-007）；敏感路径检查不再二次切分引号内普通字符串中的 `&`/`<`/`>`（SCOR-008）。
+
 ## 0.1.12 — 2026-11-16
 
 - Shell 与外联分类器识别子 Shell `(...)`、花括号命令组 `{ ...; }`、紧邻重定向（如 `cat<.env`）及 ANSI-C 引号转义 `$'\''`，防止绕过拦截与审批规则。
